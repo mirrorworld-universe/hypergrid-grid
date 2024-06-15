@@ -1,6 +1,7 @@
 //! ReadOnlyAccountsCache used to store accounts, such as executable accounts,
 //! which can be large, loaded many times, and rarely change.
 use {
+    // crate::remote_loader::RemoteAccountLoader,
     dashmap::{mapref::entry::Entry, DashMap},
     index_list::{Index, IndexList},
     solana_measure::measure_us,
@@ -72,6 +73,7 @@ pub(crate) struct ReadOnlyAccountsCache {
 
     // Performance statistics
     stats: ReadOnlyCacheStats,
+    // remote_loader: RemoteAccountLoader,
 }
 
 impl ReadOnlyAccountsCache {
@@ -83,6 +85,7 @@ impl ReadOnlyAccountsCache {
             data_size: AtomicUsize::default(),
             ms_to_skip_lru_update,
             stats: ReadOnlyCacheStats::default(),
+            // remote_loader: RemoteAccountLoader::default(),
         }
     }
 
@@ -106,6 +109,14 @@ impl ReadOnlyAccountsCache {
             let Some(entry) = self.cache.get(&key) else {
                 self.stats.misses.fetch_add(1, Ordering::Relaxed);
                 return None;
+                // let account = self.remote_loader.get_account(&pubkey);
+                // if let Some(acc) = account {
+                //     Some(self.store(pubkey, slot, acc.clone()));
+                //     return Some(acc);
+                // } else {
+                //     self.stats.misses.fetch_add(1, Ordering::Relaxed);
+                //     return None;
+                // }  
             };
             // Move the entry to the end of the queue.
             // self.queue is modified while holding a reference to the cache entry;
@@ -129,6 +140,11 @@ impl ReadOnlyAccountsCache {
         account
     }
 
+    // pub fn has_account_from_remote(&self, pubkey: &Pubkey) -> bool {
+    //     // panic!("has_account_from_remote() not implemented");
+    //     self.remote_loader.has_account(pubkey)
+    // }
+    
     fn account_size(&self, account: &AccountSharedData) -> usize {
         CACHE_ENTRY_SIZE + account.data().len()
     }
