@@ -59,7 +59,8 @@ stream-cancel = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true, features = ["codec", "compat"] }
-
+sonic-printer ={ workspace = true }
+chrono =  { workspace = true }
 [dev-dependencies]
 serial_test = { workspace = true }
 solana-net-utils = { workspace = true }
