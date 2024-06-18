@@ -24,6 +24,7 @@ use {
         time::{Duration, Instant},
     },
     tokio::time::sleep,
+    sonic_printer::{show,func}, 
 };
 
 pub struct HttpSender {
@@ -128,7 +129,6 @@ impl RpcSender for HttpSender {
 
         let request_id = self.request_id.fetch_add(1, Ordering::Relaxed);
         let request_json = request.build_request_json(request_id, params).to_string();
-
         let mut too_many_requests_retries = 5;
         loop {
             let response = {
