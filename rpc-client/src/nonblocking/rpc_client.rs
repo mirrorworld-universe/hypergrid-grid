@@ -64,6 +64,7 @@ use {
         time::{Duration, Instant},
     },
     tokio::{sync::RwLock, time::sleep},
+    sonic_printer::{show, func},
 };
 
 /// A client of a remote Solana node.
@@ -1180,9 +1181,8 @@ impl RpcClient {
             } else {
                 break (signature, status);
             }
-
             if cfg!(not(test)) {
-                sleep(Duration::from_millis(500)).await;
+                sleep(Duration::from_millis(1000)).await;
             }
         };
         if let Some(result) = status {
@@ -1202,6 +1202,7 @@ impl RpcClient {
         loop {
             // Return when specified commitment is reached
             // Failed transactions have already been eliminated, `is_some` check is sufficient
+            
             if self
                 .get_signature_status_with_commitment(signature, commitment)
                 .await?
@@ -1211,14 +1212,13 @@ impl RpcClient {
                 progress_bar.finish_and_clear();
                 return Ok(());
             }
-
             progress_bar.set_message(format!(
                 "[{}/{}] Finalizing transaction {}",
                 min(confirmations + 1, desired_confirmations),
                 desired_confirmations,
                 signature,
             ));
-            sleep(Duration::from_millis(500)).await;
+            sleep(Duration::from_millis(1000)).await;
             confirmations = self
                 .get_num_blocks_since_signature_confirmation(signature)
                 .await
@@ -3953,6 +3953,14 @@ impl RpcClient {
                         RpcError::ForUser(format!("AccountNotFound: pubkey={pubkey}")).into(),
                     );
                 }
+
+                //Sonic: to fix the issue of "missing field `remote`".
+                let mut result_json = result_json.clone();
+                if result_json["value"].is_object() && result_json["value"].get("remote").is_none() {
+                    //set remote to false if it is null
+                    result_json["value"]["remote"] = false.into();
+                }
+
                 let Response {
                     context,
                     value: rpc_account,
@@ -4170,6 +4178,7 @@ impl RpcClient {
             context,
             value: accounts,
         } = serde_json::from_value::<Response<Vec<Option<UiAccount>>>>(response)?;
+       
         let accounts: Vec<Option<Account>> = accounts
             .into_iter()
             .map(|rpc_account| rpc_account.and_then(|a| a.decode()))
@@ -4823,6 +4832,14 @@ impl RpcClient {
                         RpcError::ForUser(format!("AccountNotFound: pubkey={pubkey}")).into(),
                     );
                 }
+
+                //Sonic: to fix the issue of "missing field `remote`".
+                let mut result_json = result_json.clone();
+                if result_json["value"].is_object() && result_json["value"].get("remote").is_none() {
+                    //set remote to false if it is null
+                    result_json["value"]["remote"] = false.into();
+                }
+
                 let Response {
                     context,
                     value: rpc_account,
@@ -5361,14 +5378,15 @@ impl RpcClient {
         T: serde::de::DeserializeOwned,
     {
         assert!(params.is_array() || params.is_null());
-
         let response = self
             .sender
             .send(request, params)
             .await
             .map_err(|err| err.into_with_request(request))?;
+        
         serde_json::from_value(response)
-            .map_err(|err| ClientError::new_with_request(err.into(), request))
+                    .map_err(|err| ClientError::new_with_request(err.into(), request))
+   
     }
 
     pub fn get_transport_stats(&self) -> RpcTransportStats {
