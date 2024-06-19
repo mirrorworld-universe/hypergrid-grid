@@ -29,11 +29,13 @@ use {
         time::Duration,
     },
     tokio::{sync::RwLock, task::JoinHandle, time::Instant},
+    sonic_printer::{func, show},
 };
 
-const BLOCKHASH_REFRESH_RATE: Duration = Duration::from_secs(5);
-const TPU_RESEND_REFRESH_RATE: Duration = Duration::from_secs(2);
-const SEND_INTERVAL: Duration = Duration::from_millis(10);
+// Sonic Rate
+const BLOCKHASH_REFRESH_RATE: Duration = Duration::from_secs(5); //default 5
+const TPU_RESEND_REFRESH_RATE: Duration = Duration::from_secs(2); //default 2
+const SEND_INTERVAL: Duration = Duration::from_millis(50); //default 10
 type QuicTpuClient = TpuClient<QuicPool, QuicConnectionManager, QuicConfig>;
 
 #[derive(Clone, Debug)]
@@ -314,7 +316,6 @@ async fn confirm_transactions_till_block_height_and_resend_unexpired_transaction
         .iter()
         .map(|x| x.last_valid_block_height)
         .max();
-
     if let Some(mut max_valid_block_height) = max_valid_block_height {
         if let Some(progress_bar) = progress_bar {
             let progress = progress_from_context_and_block_height(context, max_valid_block_height);
@@ -325,7 +326,6 @@ async fn confirm_transactions_till_block_height_and_resend_unexpired_transaction
                 ),
             );
         }
-
         if let Some(progress_bar) = progress_bar {
             let progress = progress_from_context_and_block_height(context, max_valid_block_height);
             progress.set_message_for_confirmed_transactions(
@@ -365,13 +365,11 @@ async fn confirm_transactions_till_block_height_and_resend_unexpired_transaction
                 } else {
                     format!("Resent {num_txs_to_resend} transactions...")
                 };
-
                 if let Some(progress_bar) = progress_bar {
                     let progress =
                         progress_from_context_and_block_height(context, max_valid_block_height);
                     progress.set_message_for_confirmed_transactions(progress_bar, &message);
                 }
-
                 let elapsed = instant.elapsed();
                 if elapsed < TPU_RESEND_REFRESH_RATE {
                     tokio::time::sleep(TPU_RESEND_REFRESH_RATE - elapsed).await;
@@ -411,7 +409,6 @@ pub async fn send_and_confirm_transactions_in_parallel<T: Signers + ?Sized>(
         blockhash,
         last_valid_block_height,
     }));
-
     // check if all the messages are signable by the signers
     messages
         .iter()
@@ -420,24 +417,20 @@ pub async fn send_and_confirm_transactions_in_parallel<T: Signers + ?Sized>(
             transaction.try_sign(signers, blockhash)
         })
         .collect::<std::result::Result<Vec<()>, SignerError>>()?;
-
     // get current block height
     let block_height = rpc_client.get_block_height().await?;
     let current_block_height = Arc::new(AtomicU64::new(block_height));
-
     let progress_bar = config.with_spinner.then(|| {
         let progress_bar = spinner::new_progress_bar();
         progress_bar.set_message("Setting up...");
         progress_bar
     });
-
     // blockhash and block height update task
     let block_data_task = create_blockhash_data_updating_task(
         rpc_client.clone(),
         blockhash_data_rw.clone(),
         current_block_height.clone(),
     );
-
     let unconfirmed_transasction_map = Arc::new(DashMap::<Signature, TransactionData>::new());
     let error_map = Arc::new(DashMap::new());
     let num_confirmed_transactions = Arc::new(AtomicUsize::new(0));
@@ -449,7 +442,6 @@ pub async fn send_and_confirm_transactions_in_parallel<T: Signers + ?Sized>(
         error_map.clone(),
         num_confirmed_transactions.clone(),
     );
-
     // transaction sender task
     let total_transactions = messages.len();
     let mut initial = true;
@@ -462,7 +454,6 @@ pub async fn send_and_confirm_transactions_in_parallel<T: Signers + ?Sized>(
         error_map: error_map.clone(),
         total_transactions,
     };
-
     for expired_blockhash_retries in (0..signing_count).rev() {
         // only send messages which have not been confirmed
         let messages_with_index: Vec<(usize, Message)> = if initial {
@@ -475,14 +466,12 @@ pub async fn send_and_confirm_transactions_in_parallel<T: Signers + ?Sized>(
                 .map(|x| (x.index, x.message.clone()))
                 .collect()
         };
-
         if messages_with_index.is_empty() {
             break;
         }
 
         // clear the map so that we can start resending
         unconfirmed_transasction_map.clear();
-
         let futures = [
             sign_all_messages_and_send(
                 &progress_bar,
@@ -510,18 +499,15 @@ pub async fn send_and_confirm_transactions_in_parallel<T: Signers + ?Sized>(
             .boxed_local(),
         ];
         join_all(futures).await.into_iter().collect::<Result<_>>()?;
-
         if unconfirmed_transasction_map.is_empty() {
             break;
         }
-
         if let Some(progress_bar) = &progress_bar {
             progress_bar.println(format!(
                 "Blockhash expired. {expired_blockhash_retries} retries remaining"
             ));
         }
     }
-
     block_data_task.abort();
     transaction_confirming_task.abort();
     if unconfirmed_transasction_map.is_empty() {
