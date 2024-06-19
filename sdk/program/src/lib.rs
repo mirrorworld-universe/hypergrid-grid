@@ -535,6 +535,7 @@ pub mod system_program;
 pub mod sysvar;
 pub mod vote;
 pub mod wasm;
+pub mod sonic_account_migrater;
 
 #[deprecated(
     since = "1.17.0",
@@ -568,6 +569,7 @@ pub mod sdk_ids {
             address_lookup_table, bpf_loader, bpf_loader_deprecated, bpf_loader_upgradeable,
             config, ed25519_program, feature, incinerator, loader_v4, secp256k1_program,
             solana_program::pubkey::Pubkey, stake, system_program, sysvar, vote,
+            sonic_account_migrater
         },
         lazy_static::lazy_static,
     };
@@ -591,6 +593,7 @@ pub mod sdk_ids {
                 stake::program::id(),
                 #[allow(deprecated)]
                 stake::config::id(),
+                sonic_account_migrater::program::id(),
             ];
             sdk_ids.extend(sysvar::ALL_IDS.iter());
             sdk_ids
