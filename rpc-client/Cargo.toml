@@ -28,6 +28,8 @@ solana-transaction-status = { workspace = true }
 solana-version = { workspace = true }
 solana-vote-program = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
+sonic-printer = { workspace = true }
+chrono =  { workspace = true }
 
 [dev-dependencies]
 assert_matches = { workspace = true }
