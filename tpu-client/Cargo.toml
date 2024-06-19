@@ -26,6 +26,8 @@ solana-rpc-client-api = { workspace = true }
 solana-sdk = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
+sonic-printer = { workspace = true }
+chrono =  { workspace = true }
 
 [features]
 default = ["spinner"]

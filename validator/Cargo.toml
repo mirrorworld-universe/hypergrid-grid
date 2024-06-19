@@ -64,6 +64,9 @@ solana-version = { workspace = true }
 solana-vote-program = { workspace = true }
 symlink = { workspace = true }
 thiserror = { workspace = true }
+sonic-printer = { workspace = true }
+
+
 
 [dev-dependencies]
 solana-account-decoder = { workspace = true }
