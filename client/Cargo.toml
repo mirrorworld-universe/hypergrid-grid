@@ -35,6 +35,8 @@ solana-tpu-client = { workspace = true, features = ["default"] }
 solana-udp-client = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
+sonic-printer ={ workspace = true }
+chrono =  { workspace = true }
 
 [dev-dependencies]
 crossbeam-channel = { workspace = true }
