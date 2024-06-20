@@ -46,6 +46,7 @@ use {
         task::JoinHandle,
         time::{sleep, timeout, Duration, Instant},
     },
+    sonic_printer::{func, show},
 };
 #[cfg(feature = "spinner")]
 use {
@@ -370,7 +371,9 @@ where
     M: ConnectionManager<ConnectionPool = P, NewConnectionConfig = C>,
     C: NewConnectionConfig,
 {
+    // Yusuf: I think this is the function that sends the transactions to the leader TPU
     let conn = connection_cache.get_nonblocking_connection(addr);
+
     conn.send_data_batch(wire_transactions).await
 }
 
@@ -455,6 +458,7 @@ where
         let leaders = self
             .leader_tpu_service
             .leader_tpu_sockets(self.fanout_slots);
+        
         let futures = leaders
             .iter()
             .map(|addr| {
@@ -514,7 +518,6 @@ where
         let leader_tpu_service =
             LeaderTpuService::new(rpc_client.clone(), websocket_url, M::PROTOCOL, exit.clone())
                 .await?;
-
         Ok(Self {
             fanout_slots: config.fanout_slots.clamp(1, MAX_FANOUT_SLOTS),
             leader_tpu_service,
@@ -702,7 +705,6 @@ impl LeaderTpuService {
         let start_slot = rpc_client
             .get_slot_with_commitment(CommitmentConfig::processed())
             .await?;
-
         let recent_slots = RecentLeaderSlots::new(start_slot);
         let slots_in_epoch = rpc_client.get_epoch_info().await?.slots_in_epoch;
         let leaders = rpc_client
@@ -716,13 +718,11 @@ impl LeaderTpuService {
             cluster_nodes,
             protocol,
         )));
-
         let pubsub_client = if !websocket_url.is_empty() {
             Some(PubsubClient::new(websocket_url).await?)
         } else {
             None
         };
-
         let t_leader_tpu_service = Some({
             let recent_slots = recent_slots.clone();
             let leader_tpu_cache = leader_tpu_cache.clone();
@@ -734,7 +734,6 @@ impl LeaderTpuService {
                 exit,
             ))
         });
-
         Ok(LeaderTpuService {
             recent_slots,
             leader_tpu_cache,
