@@ -1096,7 +1096,6 @@ pub fn keypair_from_seed_phrase(
 
     if confirm_pubkey {
         let pubkey = keypair.pubkey();
-        print!("Recovered pubkey `{pubkey:?}`. Continue? (y/n): ");
         let _ignored = stdout().flush();
         let mut input = String::new();
         stdin().read_line(&mut input).expect("Unexpected input");

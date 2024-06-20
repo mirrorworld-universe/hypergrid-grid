@@ -28,6 +28,7 @@ use {
     },
     std::fmt,
     thiserror::Error,
+    sonic_printer::{show, func},
 };
 
 #[macro_use]
@@ -974,7 +975,7 @@ impl VersionedTransactionWithStatusMeta {
             Some(&self.meta.loaded_addresses),
         )
     }
-
+    
     fn build_json_accounts(
         self,
         max_supported_transaction_version: Option<u8>,

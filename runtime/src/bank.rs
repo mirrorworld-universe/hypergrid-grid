@@ -33,6 +33,7 @@
 //! It offers a high-level API that signs transactions
 //! on behalf of the caller, and a low-level API for when they have
 //! already been signed and verified.
+use rand::seq::index;
 #[cfg(feature = "dev-context-only-utils")]
 use solana_accounts_db::accounts_db::{
     ACCOUNTS_DB_CONFIG_FOR_BENCHMARKS, ACCOUNTS_DB_CONFIG_FOR_TESTING,
@@ -65,6 +66,7 @@ use {
     dashmap::{DashMap, DashSet},
     itertools::izip,
     log::*,
+    regex::Regex,
     percentage::Percentage,
     rayon::{
         iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator},
@@ -176,6 +178,7 @@ use {
         transaction_context::{
             ExecutionRecord, TransactionAccount, TransactionContext, TransactionReturnData,
         },
+        program_utils::limited_deserialize,
     },
     solana_stake_program::stake_state::{
         self, InflationPointCalculationEvent, PointValue, StakeStateV2,
@@ -4545,6 +4548,11 @@ impl Bank {
                     upgrade_authority_address: _,
                 }) = programdata.state()
                 {
+                    //Sonic: if program is remote, set slot to 0.
+                    if programdata.remote { 
+                        
+                        return Ok(0);
+                    }
                     return Ok(slot);
                 }
             }
@@ -4689,6 +4697,11 @@ impl Bank {
                 .get(UpgradeableLoaderState::size_of_programdata_metadata()..)
                 .ok_or(Box::new(InstructionError::InvalidAccountData).into())
                 .and_then(|programdata| {
+                    //Sonic: if program account is remote, set slot to 0.
+                    let mut dep_slot = slot;
+                    if program_account.remote {
+                        dep_slot = 0;
+                    }
                     Self::load_program_from_bytes(
                         &mut load_program_metrics,
                         programdata,
@@ -4697,7 +4710,7 @@ impl Bank {
                             .data()
                             .len()
                             .saturating_add(programdata_account.data().len()),
-                        slot,
+                        dep_slot,
                         environments.program_runtime_v1.clone(),
                         reload,
                     )
@@ -4709,12 +4722,17 @@ impl Bank {
                 .get(LoaderV4State::program_data_offset()..)
                 .ok_or(Box::new(InstructionError::InvalidAccountData).into())
                 .and_then(|elf_bytes| {
+                    //Sonic: if program account is remote, set slot to 0.
+                    let mut dep_slot = slot;
+                    if program_account.remote {
+                        dep_slot = 0;
+                    }
                     Self::load_program_from_bytes(
                         &mut load_program_metrics,
                         elf_bytes,
                         &loader_v4::id(),
                         program_account.data().len(),
-                        slot,
+                        dep_slot,
                         environments.program_runtime_v2.clone(),
                         reload,
                     )
@@ -4778,6 +4796,14 @@ impl Bank {
     ) -> TransactionExecutionResult {
         let transaction_accounts = std::mem::take(&mut loaded_transaction.accounts);
 
+        // Sonic: print remote account info
+        // if !tx.is_simple_vote_transaction() {
+        //     for (pubkey, account) in transaction_accounts.iter() {
+        //         let index = transaction_accounts.iter().position(|(key, _)| key == pubkey).unwrap(); 
+        //         println!("Bank.execute_loaded_transaction():{:?} remote: {} writable {} ", pubkey, account.remote, tx.message().is_writable(index));
+        //     }
+        // }
+
         fn transaction_accounts_lamports_sum(
             accounts: &[(Pubkey, AccountSharedData)],
             message: &SanitizedMessage,
@@ -4826,6 +4852,10 @@ impl Bank {
             programs_loaded_for_tx_batch.latest_root_epoch,
         );
         let mut process_message_time = Measure::start("process_message_time");
+        //Sonic: print message
+        // if !tx.is_simple_vote_transaction() {
+        //     println!("MessageProcessor::process_message {:?}", tx.message());
+        // }
         let process_result = MessageProcessor::process_message(
             tx.message(),
             &loaded_transaction.program_indices,
@@ -4919,6 +4949,15 @@ impl Bank {
             None
         };
 
+        let remote_signature = self.post_status_to_baselayer(&tx, log_messages.clone());
+        let mut log_messages = log_messages.clone();
+        if remote_signature.is_some() {
+            
+            log_messages.as_mut().map(|log_messages| {
+                log_messages.push(format!("Sonic BaseLayer Transaction Signature: {}", remote_signature.unwrap().to_string()));
+            });
+        }
+
         TransactionExecutionResult::Executed {
             details: TransactionExecutionDetails {
                 status,
@@ -4945,7 +4984,7 @@ impl Bank {
         let remote_loader = &self.rc.accounts.accounts_db.accounts_cache.remote_loader;
         for ix in msg.instructions() {
             if let Some(program_id) = account_keys.get(ix.program_id_index.into()) {
-                // println!("Bank.check_remote_accounts(): program_id: {:?}", program_id);
+
                 if remote_loader.is_sonic_program(program_id) {
                     sonic_program = Some(program_id);
                     account = account_keys.get(ix.accounts[0].into());
@@ -4969,11 +5008,12 @@ impl Bank {
             let re = Regex::new(r"Fake NFT New Value: (\d+)").unwrap();
             for log_message in log_messages.iter() {
                 println!("log_message: {:?}", log_message);
+
                 //Sonic: send states to baselayer
                 let caps = re.captures(log_message);
                 if let Some(caps) = caps {
                     let value = caps.get(1).map_or("", |m| m.as_str());
-                    // println!("value: {}", value);
+
                     signature = remote_loader.send_status_to_baselayer(sonic_program.unwrap(), account.unwrap(), value.parse::<u64>().unwrap());
                     break;
                 }
@@ -5083,7 +5123,7 @@ impl Bank {
         let account_keys = msg.account_keys();
         msg.instructions().iter().for_each(|ix| {
             if let Some(program_id) = account_keys.get(ix.program_id_index.into()) {
-                // println!("Bank.check_remote_accounts(): program_id: {:?}", program_id);
+
                 if !sonic_account_migrater_program::check_id(program_id) { 
                     return;
                 }
@@ -5139,6 +5179,7 @@ impl Bank {
                     })
                     .is_some()
                 {
+                    self.check_remote_accounts(tx); //Socnic: check remote accounts
                     tx.message()
                         .account_keys()
                         .iter()

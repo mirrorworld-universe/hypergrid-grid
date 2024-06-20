@@ -68,7 +68,7 @@ impl MessageProcessor {
             blockhash,
             lamports_per_signature,
         );
-
+        
         debug_assert_eq!(program_indices.len(), message.instructions().len());
         for (instruction_index, ((program_id, instruction), program_indices)) in message
             .program_instructions_iter()
@@ -108,13 +108,28 @@ impl MessageProcessor {
                     .unwrap_or(instruction_account_index)
                     as IndexOfAccount;
                 let index_in_transaction = *index_in_transaction as usize;
+                let mut is_writable = message.is_writable(index_in_transaction);
+
+                // Sonic: Check if the account is a remote account
+                let pubkey = message.account_keys().get(index_in_transaction).unwrap();
+                if let Some(index) = invoke_context.transaction_context.find_index_of_account(&pubkey) {
+                    let account = invoke_context.transaction_context.
+                        get_account_at_index(index).unwrap();
+                    if account.borrow().remote {
+                        // Sonic: If the account is a remote account, it is always not writable.
+                        is_writable = false;     
+                    }
+                }
+                
                 instruction_accounts.push(InstructionAccount {
                     index_in_transaction: index_in_transaction as IndexOfAccount,
                     index_in_caller: index_in_transaction as IndexOfAccount,
                     index_in_callee,
                     is_signer: message.is_signer(index_in_transaction),
-                    is_writable: message.is_writable(index_in_transaction),
+                    is_writable,
                 });
+
+                
             }
 
             let result = if is_precompile {

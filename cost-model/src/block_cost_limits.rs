@@ -5,6 +5,7 @@ use {
     solana_sdk::{
         address_lookup_table, bpf_loader, bpf_loader_deprecated, bpf_loader_upgradeable,
         compute_budget, ed25519_program, loader_v4, pubkey::Pubkey, secp256k1_program,
+        sonic_account_migrater,
     },
     std::collections::HashMap,
 };
@@ -42,6 +43,7 @@ lazy_static! {
         (solana_system_program::id(), solana_system_program::system_processor::DEFAULT_COMPUTE_UNITS),
         (compute_budget::id(), solana_compute_budget_program::DEFAULT_COMPUTE_UNITS),
         (address_lookup_table::program::id(), solana_address_lookup_table_program::processor::DEFAULT_COMPUTE_UNITS),
+        (sonic_account_migrater::program::id(), sonic_account_migrater_program::processor::DEFAULT_COMPUTE_UNITS),
         (bpf_loader_upgradeable::id(), solana_bpf_loader_program::UPGRADEABLE_LOADER_COMPUTE_UNITS),
         (bpf_loader_deprecated::id(), solana_bpf_loader_program::DEPRECATED_LOADER_COMPUTE_UNITS),
         (bpf_loader::id(), solana_bpf_loader_program::DEFAULT_LOADER_COMPUTE_UNITS),

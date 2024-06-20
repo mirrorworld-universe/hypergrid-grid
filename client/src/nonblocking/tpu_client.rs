@@ -15,6 +15,7 @@ use {
     },
     solana_tpu_client::nonblocking::tpu_client::{Result, TpuClient as BackendTpuClient},
     std::sync::Arc,
+    sonic_printer::{func, show},
 };
 
 /// Client which sends transactions directly to the current leader's TPU port over UDP.

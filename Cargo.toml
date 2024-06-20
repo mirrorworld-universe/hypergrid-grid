@@ -394,6 +394,7 @@ sonic-printer = { path = "printer", version = "=1.18.11" }
 solana_rbpf = "=0.8.0"
 sonic-account-migrater-program = { path = "programs/sonic-account-migrater", version = "=1.18.11" }
 sonic-fee-settlement-program = { path = "programs/sonic-fee-settlement", version = "=1.18.11" }
+
 spl-associated-token-account = "=2.3.0"
 spl-instruction-padding = "0.1"
 spl-memo = "=4.0.0"
