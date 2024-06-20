@@ -4933,6 +4933,55 @@ impl Bank {
         }
     }
 
+    ///Sonic: post status to baselayer network.
+    fn post_status_to_baselayer(&self, tx: &SanitizedTransaction, log_messages: Option<Vec<String>>) -> Option<Signature> {
+        if tx.is_simple_vote_transaction() {
+            return None;
+        }
+        let msg = tx.message();
+        let account_keys = msg.account_keys();
+        let mut sonic_program: Option<&Pubkey> = None; 
+        let mut account: Option<&Pubkey> = None; 
+        let remote_loader = &self.rc.accounts.accounts_db.accounts_cache.remote_loader;
+        for ix in msg.instructions() {
+            if let Some(program_id) = account_keys.get(ix.program_id_index.into()) {
+                // println!("Bank.check_remote_accounts(): program_id: {:?}", program_id);
+                if remote_loader.is_sonic_program(program_id) {
+                    sonic_program = Some(program_id);
+                    account = account_keys.get(ix.accounts[0].into());
+                    break;
+                }
+            }
+        }
+
+        //Sonic: check if there are soinc program and account.
+        if !sonic_program.is_some() || !account.is_some() {
+            return None;
+        }
+
+        //Sonic: check if account is from remote.
+        if !remote_loader.has_account(account.unwrap()) {
+            return None;
+        }
+        
+        let mut signature: Option<Signature> = None;
+        log_messages.as_ref().map(|log_messages| {
+            let re = Regex::new(r"Fake NFT New Value: (\d+)").unwrap();
+            for log_message in log_messages.iter() {
+                println!("log_message: {:?}", log_message);
+                //Sonic: send states to baselayer
+                let caps = re.captures(log_message);
+                if let Some(caps) = caps {
+                    let value = caps.get(1).map_or("", |m| m.as_str());
+                    // println!("value: {}", value);
+                    signature = remote_loader.send_status_to_baselayer(sonic_program.unwrap(), account.unwrap(), value.parse::<u64>().unwrap());
+                    break;
+                }
+            }
+        }); 
+        signature
+    }
+
     fn replenish_program_cache(
         &self,
         program_accounts_map: &HashMap<Pubkey, (&Pubkey, u64)>,
@@ -5023,6 +5072,49 @@ impl Bank {
         }
 
         loaded_programs_for_txs.unwrap()
+    }
+
+    ///Sonic: check remote accounts in transaction
+    fn check_remote_accounts(&self, tx: &SanitizedTransaction) {
+        if tx.is_simple_vote_transaction() {
+            return;
+        }
+        let msg = tx.message();
+        let account_keys = msg.account_keys();
+        msg.instructions().iter().for_each(|ix| {
+            if let Some(program_id) = account_keys.get(ix.program_id_index.into()) {
+                // println!("Bank.check_remote_accounts(): program_id: {:?}", program_id);
+                if !sonic_account_migrater_program::check_id(program_id) { 
+                    return;
+                }
+                match limited_deserialize(&ix.data) {
+                    Err(_) => {
+                        return;
+                    },
+                    Ok(instruction) => {
+                        ix.accounts.iter().for_each(|account_index| {
+                            if msg.is_signer((*account_index).into()) || *account_index == ix.program_id_index {
+                                return;
+                            }
+                            let mut accounts:Vec<Pubkey> = vec![];
+                            if let Some(account_key) = account_keys.get((*account_index).into()) {
+                                accounts.push(*account_key);
+                            }
+                            match instruction {
+                                sonic_account_migrater_program::instruction::ProgramInstruction::MigrateRemoteAccounts => {
+                                    //load remote account...
+                                    self.rc.accounts.accounts_db.accounts_cache.load_accounts_from_remote(accounts);
+                                },
+                                sonic_account_migrater_program::instruction::ProgramInstruction::DeactivateRemoteAccounts => {
+                                    //deactivate remote account...
+                                    self.rc.accounts.accounts_db.accounts_cache.deactivate_remote_accounts(accounts);
+                                },
+                            }
+                        });
+                    },
+                }
+            }
+        });
     }
 
     /// Returns a hash map of executable program accounts (program accounts that are not writable

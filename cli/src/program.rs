@@ -608,6 +608,7 @@ pub fn parse_program_subcommand(
 
     let response = match (subcommand, sub_matches) {
         ("deploy", Some(matches)) => {
+            show!(file!(), line!(), func!(), "mark");
             let (fee_payer, fee_payer_pubkey) =
                 signer_of(matches, FEE_PAYER_ARG.name, wallet_manager)?;
 
@@ -926,6 +927,7 @@ pub fn parse_program_subcommand(
         }
         _ => unreachable!(),
     };
+    show!(file!(), line!(), func!(), response);
     Ok(response)
 }
 
@@ -1219,6 +1221,7 @@ fn process_program_deploy(
     let (program_data, program_len) = if let Some(program_location) = program_location {
         let program_data = read_and_verify_elf(program_location)?;
         let program_len = program_data.len();
+        // show!(file!(), line!(), func!(), program_data );
         (program_data, program_len)
     } else if buffer_provided {
         (
@@ -1249,6 +1252,7 @@ fn process_program_deploy(
                 "Initial deployments require a keypair be provided for the program id".into(),
             );
         }
+        show!(file!(), line!(), func!(), "do_process_program_write_and_deploy");
         do_process_program_write_and_deploy(
             rpc_client.clone(),
             config,
@@ -2704,6 +2708,8 @@ fn send_deploy_messages(
     final_signers: Option<&[&dyn Signer]>,
     max_sign_attempts: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    //show!(file!(), line!(), func!(), initial_message );
+    show!(file!(), line!(), func!(), "mark");
     if let Some(message) = initial_message {
         if let Some(initial_signer) = initial_signer {
             trace!("Preparing the required accounts");
@@ -2717,12 +2723,15 @@ fn send_deploy_messages(
             // account to sign the transaction. One (transfer) only requires the fee-payer signature.
             // This check is to ensure signing does not fail on a KeypairPubkeyMismatch error from an
             // extraneous signature.
+            show!(file!(), line!(), func!(), message.header.num_required_signatures );
             if message.header.num_required_signatures == 2 {
                 initial_transaction.try_sign(&[fee_payer_signer, initial_signer], blockhash)?;
             } else {
                 initial_transaction.try_sign(&[fee_payer_signer], blockhash)?;
             }
+            show!(file!(), line!(), func!(), initial_transaction );
             let result = rpc_client.send_and_confirm_transaction_with_spinner(&initial_transaction);
+            show!(file!(), line!(), func!(), result );
             log_instruction_custom_error::<SystemError>(result, config)
                 .map_err(|err| format!("Account allocation failed: {err}"))?;
         } else {
@@ -2761,6 +2770,7 @@ fn send_deploy_messages(
             } else {
                 ConnectionCache::with_udp("connection_cache_cli_program_udp", 1)
             };
+            show!(file!(), line!(), func!(), "mark" );
             let transaction_errors = match connection_cache {
                 ConnectionCache::Udp(cache) => TpuClient::new_with_connection_cache(
                     rpc_client.clone(),
@@ -2773,12 +2783,14 @@ fn send_deploy_messages(
                     &[fee_payer_signer, write_signer],
                 ),
                 ConnectionCache::Quic(cache) => {
+                    show!(file!(), line!(), func!(), "mark" );
                     let tpu_client_fut = solana_client::nonblocking::tpu_client::TpuClient::new_with_connection_cache(
                         rpc_client.get_inner_client().clone(),
                         config.websocket_url.as_str(),
                         solana_client::tpu_client::TpuClientConfig::default(),
                         cache,
                     );
+                    show!(file!(), line!(), func!(), "mark" );
                     let tpu_client = rpc_client
                         .runtime()
                         .block_on(tpu_client_fut)
