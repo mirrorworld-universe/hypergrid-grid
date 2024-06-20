@@ -72,6 +72,7 @@ where
         &self,
         wire_transactions: Vec<Vec<u8>>,
     ) -> TransportResult<()> {
+        show!(file!(), line!(), func!(), wire_transactions.len());
         self.tpu_client
             .try_send_wire_transaction_batch(wire_transactions)
             .await
@@ -111,6 +112,7 @@ where
         config: TpuClientConfig,
         connection_cache: Arc<BackendConnectionCache<P, M, C>>,
     ) -> Result<Self> {
+        show!(file!(), line!(), func!(), websocket_url,config);
         Ok(Self {
             tpu_client: BackendTpuClient::new_with_connection_cache(
                 rpc_client,

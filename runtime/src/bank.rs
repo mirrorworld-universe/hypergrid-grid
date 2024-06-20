@@ -4984,7 +4984,7 @@ impl Bank {
         let remote_loader = &self.rc.accounts.accounts_db.accounts_cache.remote_loader;
         for ix in msg.instructions() {
             if let Some(program_id) = account_keys.get(ix.program_id_index.into()) {
-                
+
                 if remote_loader.is_sonic_program(program_id) {
                     sonic_program = Some(program_id);
                     account = account_keys.get(ix.accounts[0].into());
@@ -5007,12 +5007,13 @@ impl Bank {
         log_messages.as_ref().map(|log_messages| {
             let re = Regex::new(r"Fake NFT New Value: (\d+)").unwrap();
             for log_message in log_messages.iter() {
-                
+                println!("log_message: {:?}", log_message);
+
                 //Sonic: send states to baselayer
                 let caps = re.captures(log_message);
                 if let Some(caps) = caps {
                     let value = caps.get(1).map_or("", |m| m.as_str());
-                    
+
                     signature = remote_loader.send_status_to_baselayer(sonic_program.unwrap(), account.unwrap(), value.parse::<u64>().unwrap());
                     break;
                 }
@@ -5122,7 +5123,7 @@ impl Bank {
         let account_keys = msg.account_keys();
         msg.instructions().iter().for_each(|ix| {
             if let Some(program_id) = account_keys.get(ix.program_id_index.into()) {
-                
+
                 if !sonic_account_migrater_program::check_id(program_id) { 
                     return;
                 }

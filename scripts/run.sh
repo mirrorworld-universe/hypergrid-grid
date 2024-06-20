@@ -97,7 +97,6 @@ trap abort INT TERM EXIT
 
 solana-faucet &
 faucet=$!
-
 args=(
   --identity "$validator_identity"
   --vote-account "$validator_vote_account"
@@ -106,7 +105,7 @@ args=(
   --full-rpc-api
   --rpc-port 8899
   --rpc-faucet-address 127.0.0.1:9900
-  --log -
+  --log "$dataDir"/validator.log
   --enable-rpc-transaction-history
   --enable-extended-tx-metadata-storage
   --init-complete-file "$dataDir"/init-completed
