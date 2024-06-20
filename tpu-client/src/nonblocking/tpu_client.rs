@@ -469,6 +469,7 @@ where
                 )
             })
             .collect::<Vec<_>>();
+        show!(file!(), line!(), func!(), futures.len());
         let results: Vec<TransportResult<()>> = join_all(futures).await;
 
         let mut last_error: Option<TransportError> = None;
@@ -514,7 +515,9 @@ where
         config: TpuClientConfig,
         connection_cache: Arc<ConnectionCache<P, M, C>>,
     ) -> Result<Self> {
+        show!(file!(), line!(), func!(), "mark");
         let exit = Arc::new(AtomicBool::new(false));
+        show!(file!(), line!(), func!(), "mark");
         let leader_tpu_service =
             LeaderTpuService::new(rpc_client.clone(), websocket_url, M::PROTOCOL, exit.clone())
                 .await?;
@@ -702,14 +705,18 @@ impl LeaderTpuService {
         protocol: Protocol,
         exit: Arc<AtomicBool>,
     ) -> Result<Self> {
+        show!(file!(), line!(), func!(), "mark");
         let start_slot = rpc_client
             .get_slot_with_commitment(CommitmentConfig::processed())
             .await?;
         let recent_slots = RecentLeaderSlots::new(start_slot);
+        show!(file!(), line!(), func!(), "mark");
         let slots_in_epoch = rpc_client.get_epoch_info().await?.slots_in_epoch;
+        show!(file!(), line!(), func!(), start_slot, slots_in_epoch);
         let leaders = rpc_client
             .get_slot_leaders(start_slot, LeaderTpuCache::fanout(slots_in_epoch))
             .await?;
+        show!(file!(), line!(), func!(), "mark");
         let cluster_nodes = rpc_client.get_cluster_nodes().await?;
         let leader_tpu_cache = Arc::new(RwLock::new(LeaderTpuCache::new(
             start_slot,
