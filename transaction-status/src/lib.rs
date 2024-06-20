@@ -28,6 +28,7 @@ use {
     },
     std::fmt,
     thiserror::Error,
+    sonic_printer::{show, func},
 };
 
 #[macro_use]
@@ -901,6 +902,7 @@ impl TransactionWithStatusMeta {
         max_supported_transaction_version: Option<u8>,
         show_rewards: bool,
     ) -> Result<EncodedTransactionWithStatusMeta, EncodeError> {
+        show!(file!(), line!(), func!(), "mark");
         match self {
             Self::MissingMetadata(ref transaction) => Ok(EncodedTransactionWithStatusMeta {
                 version: None,
@@ -973,12 +975,13 @@ impl VersionedTransactionWithStatusMeta {
             Some(&self.meta.loaded_addresses),
         )
     }
-
+    
     fn build_json_accounts(
         self,
         max_supported_transaction_version: Option<u8>,
         show_rewards: bool,
     ) -> Result<EncodedTransactionWithStatusMeta, EncodeError> {
+        show!(file!(), line!(), func!(), "mark");
         let version = self.validate_version(max_supported_transaction_version)?;
 
         let account_keys = match &self.transaction.message {
@@ -1144,6 +1147,7 @@ impl Encodable for Transaction {
 impl JsonAccounts for Transaction {
     type Encoded = EncodedTransaction;
     fn build_json_accounts(&self) -> Self::Encoded {
+        show!(file!(), line!(), func!(), "mark" );
         EncodedTransaction::Accounts(UiAccountsList {
             signatures: self.signatures.iter().map(ToString::to_string).collect(),
             account_keys: parse_legacy_message_accounts(&self.message),
@@ -1153,6 +1157,7 @@ impl JsonAccounts for Transaction {
 
 impl EncodedTransaction {
     pub fn decode(&self) -> Option<VersionedTransaction> {
+        show!(file!(), line!(), func!(), "mark" );
         let (blob, encoding) = match self {
             Self::Json(_) | Self::Accounts(_) => return None,
             Self::LegacyBinary(blob) => (blob, TransactionBinaryEncoding::Base58),

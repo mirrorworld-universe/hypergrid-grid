@@ -32,6 +32,8 @@ spl-associated-token-account = { workspace = true }
 spl-token = { workspace = true, features = ["no-entrypoint"] }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
+sonic-printer = { workspace = true }
+
 
 [dev-dependencies]
 assert_matches = { workspace = true }

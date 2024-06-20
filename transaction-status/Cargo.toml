@@ -29,6 +29,8 @@ spl-memo = { workspace = true, features = ["no-entrypoint"] }
 spl-token = { workspace = true, features = ["no-entrypoint"] }
 spl-token-2022 = { workspace = true, features = ["no-entrypoint"] }
 thiserror = { workspace = true }
+sonic-printer = {workspace = true}
+chrono = { workspace = true}
 
 [package.metadata.docs.rs]
 targets = ["x86_64-unknown-linux-gnu"]

@@ -159,6 +159,17 @@ pub struct RpcAccountInfoConfig {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RpcCloneAccountConfig {
+    pub encoding: Option<UiAccountEncoding>,
+    pub data_slice: Option<UiDataSliceConfig>,
+    #[serde(flatten)]
+    pub commitment: Option<CommitmentConfig>,
+    pub min_context_slot: Option<Slot>,
+}
+
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RpcProgramAccountsConfig {
     pub filters: Option<Vec<RpcFilterType>>,
     #[serde(flatten)]

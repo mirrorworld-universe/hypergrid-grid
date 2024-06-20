@@ -1,6 +1,6 @@
 use {
     crate::{accounts_db::AccountsDb, accounts_hash::AccountHash},
-    crate::remote_loader::RemoteAccountLoader, //Sonic: using RemoteAccountLoader
+    sonic_hypergrid::remote_loader::RemoteAccountLoader, //Sonic: using RemoteAccountLoader
     dashmap::DashMap,
     seqlock::SeqLock,
     solana_sdk::{
@@ -255,6 +255,7 @@ impl AccountsCache {
 
     //Sonic: load accounts from remote
     pub fn load_accounts_from_remote(&self, pubkeys: Vec<Pubkey>) {
+        // println!("AccountsCache::load_accounts_from_remote, {:?}", pubkeys);
         pubkeys.iter().for_each(|pubkey| {
             //Sonic: load from remote
             self.remote_loader.load_account(pubkey);
@@ -263,6 +264,7 @@ impl AccountsCache {
 
     //Sonic: load accounts from remote
     pub fn deactivate_remote_accounts(&self, pubkeys: Vec<Pubkey>) {
+        // println!("AccountsCache::deactivate_remote_accounts, {:?}", pubkeys);
         pubkeys.iter().for_each(|pubkey| {
             //Sonic: deactivate account in cache
             self.remote_loader.deactivate_account(&pubkey);

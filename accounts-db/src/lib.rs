@@ -49,7 +49,6 @@ pub mod transaction_results;
 pub mod utils;
 mod verify_accounts_hash_in_background;
 pub mod waitable_condvar;
-pub mod remote_loader;
 
 #[macro_use]
 extern crate solana_metrics;

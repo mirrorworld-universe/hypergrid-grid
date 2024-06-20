@@ -1,0 +1,40 @@
+[package]
+name = "sonic-hypergrid"
+description = "Sonic Hypergrid"
+documentation = "https://hypergrid.dev"
+version = { workspace = true }
+authors = { workspace = true }
+repository = { workspace = true }
+homepage = { workspace = true }
+license = { workspace = true }
+edition = { workspace = true }
+
+[dependencies]
+bs58 = { workspace = true }
+base64 = { workspace = true }
+zstd = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+dirs-next = { workspace = true }
+log = { workspace = true }
+dashmap = { workspace = true, features = ["rayon", "raw-api"] }
+serde = { workspace = true }
+serde_derive = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+sha2 = { workspace = true }
+solana-sdk = { workspace = true }
+solana-client = {workspace = true}
+solana-measure = { workspace = true }
+
+[features]
+dummy-for-ci-check = []
+
+[lib]
+name = "sonic_hypergrid"
+
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]
+
+[build-dependencies]
+rustc_version = { workspace = true }

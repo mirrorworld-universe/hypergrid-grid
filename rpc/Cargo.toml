@@ -61,6 +61,8 @@ tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true, features = ["codec", "compat"] }
 sonic-printer ={ workspace = true }
 chrono =  { workspace = true }
+sonic-hypergrid = { workspace = true }
+
 [dev-dependencies]
 serial_test = { workspace = true }
 solana-net-utils = { workspace = true }
