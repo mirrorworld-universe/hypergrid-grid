@@ -20,6 +20,7 @@
 
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
+use solana_sdk::feature_set::cap_transaction_accounts_data_size;
 use {
     crate::{
         account_info::{AccountInfo, StorageLocation},
@@ -5067,6 +5068,7 @@ impl AccountsDb {
             AccountIndexGetResult::NotFound => {
                 // Sonic: check if the pubkey is from remote in cache.
                 if ancestors.len() > 1 && self.accounts_cache.has_account_from_remote(pubkey) {
+                    // println!("******AccountsDb.read_index_for_accessor_or_load_slow: {:?} {}", std::thread::current().id(), pubkey.to_string());
                     return Some((0, StorageLocation::Cached, None)); //Sonic: return a dummy slot number
                 }
                 return None;
@@ -5456,6 +5458,7 @@ impl AccountsDb {
         
         let is_cached = loaded_account.is_cached();
         let account = loaded_account.take_account();
+        // show!(file!(), line!(), func!(), account);
         if matches!(load_zero_lamports, LoadZeroLamports::None) && account.is_zero_lamport() {
             return None;
         }
@@ -7722,10 +7725,23 @@ impl AccountsDb {
             let mut lamports: u64 = 0;
             for chis in cache_hash_intermediates.clone() {
                 for item in chis {
-                    if self.accounts_cache.has_account_from_remote(&item.pubkey) {
-                        println!("==== remote key: {:?}", item);
+                    if item.pubkey.to_string().contains("11111111111111111") {
+                        continue;
+                    }
+                    if self.accounts_cache.has_account_from_remote(&item.pubkey){
+                        println!("_calculate_accounts_hash_from_storages, remote key: {:?}", item);
                         lamports += item.lamports;
-                    }  
+                    } else {
+                        //Sonic: if the account is not in accounts_index, assume it was from a remote account.
+                        match self.accounts_index.get(&item.pubkey, config.ancestors, Some(slot)) {
+                            // we bail out pretty early for missing.
+                            AccountIndexGetResult::NotFound => {
+                                println!("_calculate_accounts_hash_from_storages, missing key: {:?}", item);
+                                lamports += item.lamports;
+                            },
+                            _ => {},
+                        }
+                    }
                 }
             }
 
