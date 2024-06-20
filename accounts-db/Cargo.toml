@@ -25,7 +25,6 @@ byteorder = { workspace = true }
 bzip2 = { workspace = true }
 crossbeam-channel = { workspace = true }
 dashmap = { workspace = true, features = ["rayon", "raw-api"] }
-dirs-next = { workspace = true }
 flate2 = { workspace = true }
 fnv = { workspace = true }
 im = { workspace = true, features = ["rayon", "serde"] }
@@ -49,11 +48,8 @@ regex = { workspace = true }
 seqlock = { workspace = true }
 serde = { workspace = true, features = ["rc"] }
 serde_derive = { workspace = true }
-serde_yaml = { workspace = true }
-sha2 = { workspace = true }
 smallvec = { workspace = true }
 solana-bucket-map = { workspace = true }
-solana-client = {workspace = true}
 solana-config-program = { workspace = true }
 solana-frozen-abi = { workspace = true }
 solana-frozen-abi-macro = { workspace = true }
@@ -65,7 +61,6 @@ solana-rayon-threadlimit = { workspace = true }
 solana-sdk = { workspace = true }
 solana-stake-program = { workspace = true }
 solana-system-program = { workspace = true }
-solana-version = { workspace = true }
 solana-vote-program = { workspace = true }
 static_assertions = { workspace = true }
 strum = { workspace = true, features = ["derive"] }
@@ -73,8 +68,7 @@ strum_macros = { workspace = true }
 tar = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
-sonic-printer = { workspace = true}
-chrono = { workspace = true }
+sonic-hypergrid = { workspace = true }
 
 [lib]
 crate-type = ["lib"]
