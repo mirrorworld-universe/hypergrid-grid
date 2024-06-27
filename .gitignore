@@ -33,7 +33,8 @@ log-*/
 
 /test-ledger
 run_local.sh
-Cargo.lock
 
-accounts-db/src/main.rs
+Cargo.lock
+*.lock
+
 
