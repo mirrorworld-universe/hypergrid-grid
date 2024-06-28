@@ -761,14 +761,14 @@ impl RpcClient {
         } else {
             *transaction.get_recent_blockhash()
         };
-        show!(file!(), line!(), func!(), recent_blockhash);
+        // show!(file!(), line!(), func!(), recent_blockhash);
         let signature = self
             .send_transaction_with_config(transaction, config)
             .await?;
-        show!(file!(), line!(), func!(), signature);
+        // show!(file!(), line!(), func!(), signature);
         self.confirm_transaction_with_spinner(&signature, &recent_blockhash, commitment)
             .await?;
-        show!(file!(), line!(), func!(), "final");
+        // show!(file!(), line!(), func!(), "final");
         Ok(signature)
     }
 
@@ -1165,18 +1165,18 @@ impl RpcClient {
         ));
 
         let now = Instant::now();
-        show!(file!(), line!(), func!(), "trace");
+        // show!(file!(), line!(), func!(), "trace");
         let confirm_transaction_initial_timeout = self
             .config
             .confirm_transaction_initial_timeout
             .unwrap_or_default();
-        show!(file!(), line!(), func!(), confirm_transaction_initial_timeout);
+        // show!(file!(), line!(), func!(), confirm_transaction_initial_timeout);
         let (signature, status) = loop {
             // Get recent commitment in order to count confirmations for successful transactions
             let status = self
                 .get_signature_status_with_commitment(signature, CommitmentConfig::processed())
                 .await?;
-            show!(file!(), line!(), func!(), status);
+            // show!(file!(), line!(), func!(), status);
             if status.is_none() {
                 let blockhash_not_found = !self
                     .is_blockhash_valid(recent_blockhash, CommitmentConfig::processed())
@@ -1192,7 +1192,7 @@ impl RpcClient {
                 sleep(Duration::from_millis(1000)).await;
             }
         };
-        show!(file!(), line!(), func!(), "trace");
+        // show!(file!(), line!(), func!(), "trace");
         if let Some(result) = status {
             if let Err(err) = result {
                 return Err(err.into());
@@ -1206,9 +1206,9 @@ impl RpcClient {
             )
             .into());
         }
-        show!(file!(), line!(), func!(), "trace");
+        // show!(file!(), line!(), func!(), "trace");
         let now = Instant::now();
-        show!(file!(), line!(), func!(), "xxx");
+        // show!(file!(), line!(), func!(), "xxx");
         loop {
             // Return when specified commitment is reached
             // Failed transactions have already been eliminated, `is_some` check is sufficient
@@ -1233,7 +1233,7 @@ impl RpcClient {
                 .get_num_blocks_since_signature_confirmation(signature)
                 .await
                 .unwrap_or(confirmations);
-            show!(file!(), line!(), func!(), confirmations);
+            // show!(file!(), line!(), func!(), confirmations);
             if now.elapsed().as_secs() >= MAX_HASH_AGE_IN_SECONDS as u64 {
                 return Err(
                     RpcError::ForUser("transaction not finalized. \
@@ -1754,14 +1754,14 @@ impl RpcClient {
         signature: &Signature,
         commitment_config: CommitmentConfig,
     ) -> ClientResult<Option<transaction::Result<()>>> {
-        show!(file!(), line!(), func!(), signature);
+        // show!(file!(), line!(), func!(), signature);
         let result: Response<Vec<Option<TransactionStatus>>> = self
             .send(
                 RpcRequest::GetSignatureStatuses,
                 json!([[signature.to_string()]]),
             )
             .await?;
-        show!(file!(), line!(), func!(), result);
+        // show!(file!(), line!(), func!(), result);
         Ok(result.value[0]
             .clone()
             .filter(|result| result.satisfies_commitment(commitment_config))
@@ -5390,7 +5390,7 @@ impl RpcClient {
     where
         T: serde::de::DeserializeOwned,
     {
-        show!(file!(), line!(), func!(), request);
+        // show!(file!(), line!(), func!(), request);
         assert!(params.is_array() || params.is_null());
         let response = self
             .sender
