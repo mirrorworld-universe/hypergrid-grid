@@ -583,11 +583,64 @@ impl JsonRpcRequestProcessor {
                 })
                 .collect::<Result<Vec<_>>>()?
         };
+        println!("==============Print Accounts Number:{:?}", accounts);
+        // debug!("==============Debug Accounts Number:{:?}", accounts.len());
+        // trace!("==============Trace Accounts Number:{:?}", accounts.len());
         Ok(match with_context {
             true => OptionalContext::Context(new_response(&bank, accounts)),
             false => OptionalContext::NoContext(accounts),
         })
     }
+
+
+    
+    // Yusuf -  added this function get_wallet_count
+    pub fn get_wallet_count(
+        &self,
+        program_id: &Pubkey,
+        config: Option<RpcAccountInfoConfig>,
+        mut filters: Vec<RpcFilterType>,
+        with_context: bool,
+    ) ->  Result<u64> {
+        let RpcAccountInfoConfig {
+            encoding,
+            data_slice: data_slice_config,
+            commitment,
+            min_context_slot,
+        } = config.unwrap_or_default();
+        let bank = self.get_bank_with_config(RpcContextConfig {
+            commitment,
+            min_context_slot,
+        })?;
+        let encoding = encoding.unwrap_or(UiAccountEncoding::Binary);
+        optimize_filters(&mut filters);
+        let keyed_accounts = {
+            if let Some(owner) = get_spl_token_owner_filter(program_id, &filters) {
+                self.get_filtered_spl_token_accounts_by_owner(&bank, program_id, &owner, filters)?
+            } else if let Some(mint) = get_spl_token_mint_filter(program_id, &filters) {
+                self.get_filtered_spl_token_accounts_by_mint(&bank, program_id, &mint, filters)?
+            } else {
+                self.get_filtered_program_accounts(&bank, program_id, filters)?
+            }
+        };
+        let accounts = if is_known_spl_token_id(program_id)
+            && encoding == UiAccountEncoding::JsonParsed
+        {
+            get_parsed_token_accounts(bank.clone(), keyed_accounts.into_iter()).collect()
+        } else {
+            keyed_accounts
+                .into_iter()
+                .map(|(pubkey, account)| {
+                    Ok(RpcKeyedAccount {
+                        pubkey: pubkey.to_string(),
+                        account: encode_account(&account, &pubkey, encoding, data_slice_config)?,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?
+        };
+        Ok(accounts.len() as u64)
+    }
+
 
     pub async fn get_inflation_reward(
         &self,
@@ -3031,6 +3084,8 @@ pub mod rpc_accounts {
             config: Option<RpcAccountInfoConfig>,
         ) -> Result<RpcResponse<Option<UiAccount>>>;
 
+        
+
         // Yusuf - Added isAccountExists
         #[rpc(meta, name = "isAccountExists")]
         fn is_account_exists(
@@ -3109,6 +3164,8 @@ pub mod rpc_accounts {
             let pubkey = verify_pubkey(&pubkey_str)?;
             meta.get_account_info(&pubkey, config)
         }
+
+         
 
         // Yusuf -  Added is_account_exists
         fn is_account_exists(
@@ -3226,6 +3283,15 @@ pub mod rpc_accounts_scan {
             config: Option<RpcProgramAccountsConfig>,
         ) -> Result<OptionalContext<Vec<RpcKeyedAccount>>>;
 
+        // Yusuf - Added getWalletCount
+        #[rpc(meta, name = "getWalletCount")]
+        fn get_wallet_count(
+            &self,
+            meta: Self::Metadata,
+            pubkey_str: String,
+            config: Option<RpcWalletCountConfig>,
+        ) ->  Result<u64>;
+
         #[rpc(meta, name = "getLargestAccounts")]
         fn get_largest_accounts(
             &self,
@@ -3304,6 +3370,38 @@ pub mod rpc_accounts_scan {
                 verify_filter(filter)?;
             }
             meta.get_program_accounts(&program_id, config, filters, with_context)
+        }
+
+        // Yusuf -  Added get_wallet_count
+        fn get_wallet_count(
+            &self,
+            meta: Self::Metadata,
+            program_id_str: String,
+            config: Option<RpcWalletCountConfig>,
+        ) -> Result<u64> {
+            debug!(
+                "get_wallet_count rpc request received: {:?}",
+                program_id_str
+            );
+            let program_id = verify_pubkey(&program_id_str)?;
+            let (config, filters, with_context) = if let Some(config) = config {
+                (
+                    Some(config.account_config),
+                    config.filters.unwrap_or_default(),
+                    config.with_context.unwrap_or_default(),
+                )
+            } else {
+                (None, vec![], false)
+            };
+            if filters.len() > MAX_GET_PROGRAM_ACCOUNT_FILTERS {
+                return Err(Error::invalid_params(format!(
+                    "Too many filters provided; max {MAX_GET_PROGRAM_ACCOUNT_FILTERS}"
+                )));
+            }
+            for filter in &filters {
+                verify_filter(filter)?;
+            }
+            meta.get_wallet_count(&program_id, config, filters, with_context)
         }
 
         fn get_largest_accounts(
