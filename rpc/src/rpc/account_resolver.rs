@@ -12,8 +12,8 @@ pub(crate) fn get_account_from_overwrites_or_bank(
     bank: &Bank,
     overwrite_accounts: Option<&HashMap<Pubkey, AccountSharedData>>,
 ) -> Option<AccountSharedData> {
-    show!(file!(), line!(), func!(), overwrite_accounts);
-    show!(file!(), line!(), func!(), bank.get_account(pubkey));
+    // show!(file!(), line!(), func!(), overwrite_accounts);
+    // show!(file!(), line!(), func!(), bank.get_account(pubkey));
     overwrite_accounts
         .and_then(|accounts| accounts.get(pubkey).cloned())
         .or_else(|| bank.get_account(pubkey))
