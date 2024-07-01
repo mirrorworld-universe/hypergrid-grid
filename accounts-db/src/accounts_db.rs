@@ -5458,7 +5458,7 @@ impl AccountsDb {
         
         let is_cached = loaded_account.is_cached();
         let account = loaded_account.take_account();
-        // show!(file!(), line!(), func!(), account);
+        
         if matches!(load_zero_lamports, LoadZeroLamports::None) && account.is_zero_lamport() {
             return None;
         }
