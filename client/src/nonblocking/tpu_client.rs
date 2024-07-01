@@ -72,7 +72,7 @@ where
         &self,
         wire_transactions: Vec<Vec<u8>>,
     ) -> TransportResult<()> {
-        show!(file!(), line!(), func!(), wire_transactions.len());
+        // show!(file!(), line!(), func!(), wire_transactions.len());
         self.tpu_client
             .try_send_wire_transaction_batch(wire_transactions)
             .await
