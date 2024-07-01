@@ -112,7 +112,7 @@ where
         config: TpuClientConfig,
         connection_cache: Arc<BackendConnectionCache<P, M, C>>,
     ) -> Result<Self> {
-        show!(file!(), line!(), func!(), websocket_url,config);
+        // show!(file!(), line!(), func!(), websocket_url,config);
         Ok(Self {
             tpu_client: BackendTpuClient::new_with_connection_cache(
                 rpc_client,
