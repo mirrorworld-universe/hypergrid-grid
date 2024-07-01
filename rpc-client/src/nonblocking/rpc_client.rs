@@ -1181,7 +1181,7 @@ impl RpcClient {
                 let blockhash_not_found = !self
                     .is_blockhash_valid(recent_blockhash, CommitmentConfig::processed())
                     .await?;
-                show!(file!(), line!(), func!(),  blockhash_not_found);
+                // show!(file!(), line!(), func!(),  blockhash_not_found);
                 if blockhash_not_found && now.elapsed() >= confirm_transaction_initial_timeout {
                     break (signature, status);
                 }

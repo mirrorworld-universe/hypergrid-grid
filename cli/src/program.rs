@@ -1255,7 +1255,7 @@ fn process_program_deploy(
                 "Initial deployments require a keypair be provided for the program id".into(),
             );
         }
-        show!(file!(), line!(), func!(), "do_process_program_write_and_deploy");
+        // show!(file!(), line!(), func!(), "do_process_program_write_and_deploy");
         do_process_program_write_and_deploy(
             rpc_client.clone(),
             config,
