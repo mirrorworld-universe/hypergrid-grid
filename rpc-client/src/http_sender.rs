@@ -24,7 +24,7 @@ use {
         time::{Duration, Instant},
     },
     tokio::time::sleep,
-    sonic_printer::{show,func}, 
+    // sonic_printer::{show,func}, 
 };
 
 pub struct HttpSender {
