@@ -70,6 +70,8 @@ members = [
     "programs/ed25519-tests",
     "programs/loader-v4",
     "programs/stake",
+    "programs/sonic-account-migrater",
+    "programs/sonic-fee-settlement",
     "programs/system",
     "programs/vote",
     "programs/zk-token-proof",

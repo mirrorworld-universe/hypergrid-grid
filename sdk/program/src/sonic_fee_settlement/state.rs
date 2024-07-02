@@ -2,7 +2,6 @@ use {
     serde::{Deserialize, Serialize},
     solana_frozen_abi_macro::{AbiEnumVisitor, AbiExample},
     solana_program::{
-        address_lookup_table::error::AddressLookupError,
         clock::Slot,
         instruction::InstructionError,
         pubkey::Pubkey,
@@ -18,10 +17,22 @@ pub enum SettlementState {
     /// Account is not initialized.
     Uninitialized,
     /// Initialized `LookupTable` account.
-    FeeBillSettled(ProfileBill),
+    FeeBillSettled(SettlementAccount),
 }
 
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone, AbiExample, AbiEnumVisitor)]
+pub struct SettlementAccount {
+    pub owner: Pubkey,
+    pub account_type: SettlementAccountType, 
+    pub amount: u64,
+    pub withdrawable: u64,
+    pub withdrawed: u64,
+}
 
-struct ProfileBill {
-
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone, AbiExample, AbiEnumVisitor)]
+pub enum SettlementAccountType {
+    BurnAccount,
+    HSSNAccount,
+    SonicGridAccount,
+    GridAccount,
 }

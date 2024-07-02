@@ -71,6 +71,7 @@ solana-vote-program = { workspace = true }
 solana-zk-token-proof-program = { workspace = true }
 solana-zk-token-sdk = { workspace = true }
 sonic-account-migrater-program = { workspace = true }
+sonic-fee-settlement-program = { workspace = true }
 static_assertions = { workspace = true }
 strum = { workspace = true, features = ["derive"] }
 strum_macros = { workspace = true }
