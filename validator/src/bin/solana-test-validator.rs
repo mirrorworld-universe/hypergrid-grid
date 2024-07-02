@@ -41,7 +41,7 @@ use {
         sync::{Arc, RwLock},
         time::{Duration, SystemTime, UNIX_EPOCH},
     },
-    sonic_printer::{func, show},
+    // sonic_printer::{func, show},
 };
 
 #[derive(PartialEq, Eq)]
