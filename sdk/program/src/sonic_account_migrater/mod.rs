@@ -1,6 +1,6 @@
-//! The [address lookup table program][np].
+//! The [Sonic account migrater program][np].
 //!
-//! [np]: https://docs.solanalabs.com/runtime/programs#address-lookup-table-program
+//! [np]: 
 
 pub mod instruction;
 

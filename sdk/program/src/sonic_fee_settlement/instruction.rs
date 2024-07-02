@@ -1,27 +1,31 @@
 use {
-    crate::{
-        sonic_fee_settlement::program::id,
-        instruction::{AccountMeta, Instruction},
-        pubkey::Pubkey,
-        system_program,
-    },
-    serde::{Deserialize, Serialize},
+    super::state::SettlementAccountType, 
+    crate::pubkey::Pubkey, 
+    serde::{Deserialize, Serialize}
 };
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone, AbiExample, AbiEnumVisitor)]
+pub struct SettlementBillParam {
+    pub key: Pubkey,
+    pub amount: u64,
+}
+
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone)]
 pub enum ProgramInstruction {
-    ///Migrate remote accounts to local accounts cache
-    SettleFeeBill {
-        ///The remote account to be migrated
-        remote_account: Pubkey,
-        ///The local account to be updated
-        local_account: Pubkey,
+    InitializeAccount {
+        owner: Pubkey,
+        account_type: SettlementAccountType,
     },
-    ///Deactivate remote accounts in local accounts cache
+    /// Settle fee bill
+    SettleFeeBill {
+        from_id: u64,
+        end_id: u64,
+        bills: Vec<SettlementBillParam>,
+    },
+    /// Withdraw fee bill
     WithdrawFeeBill {
-        ///The remote account to be deactivated
-        remote_account: Pubkey,
-        ///The local account to be updated
-        local_account: Pubkey,
+        address: Pubkey,
+        amount: u64,
     },
 }

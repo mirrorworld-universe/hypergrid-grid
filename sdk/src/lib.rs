@@ -57,6 +57,7 @@ pub use solana_program::{
     syscalls, system_instruction, system_program, sysvar, unchecked_div_by_const, vote,
     wasm_bindgen,
     sonic_account_migrater,
+    sonic_fee_settlement,
 };
 
 pub mod account;
