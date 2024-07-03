@@ -623,6 +623,7 @@ impl JsonRpcRequestProcessor {
                 self.get_filtered_program_accounts(&bank, program_id, filters)?
             }
         };
+        print!("==========keyed_accounts======={}", keyed_accounts.len());
         let accounts = if is_known_spl_token_id(program_id)
             && encoding == UiAccountEncoding::JsonParsed
         {
@@ -638,6 +639,7 @@ impl JsonRpcRequestProcessor {
                 })
                 .collect::<Result<Vec<_>>>()?
         };
+        print!("==========accounts======={}", accounts.len());
         Ok(accounts.len() as u64)
     }
 
