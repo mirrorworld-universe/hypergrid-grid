@@ -623,24 +623,23 @@ impl JsonRpcRequestProcessor {
                 self.get_filtered_program_accounts(&bank, program_id, filters)?
             }
         };
-        print!("==========keyed_accounts======={}", keyed_accounts.len());
-        let accounts = if is_known_spl_token_id(program_id)
-            && encoding == UiAccountEncoding::JsonParsed
-        {
-            get_parsed_token_accounts(bank.clone(), keyed_accounts.into_iter()).collect()
-        } else {
-            keyed_accounts
-                .into_iter()
-                .map(|(pubkey, account)| {
-                    Ok(RpcKeyedAccount {
-                        pubkey: pubkey.to_string(),
-                        account: encode_account(&account, &pubkey, encoding, data_slice_config)?,
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?
-        };
-        print!("==========accounts======={}", accounts.len());
-        Ok(accounts.len() as u64)
+        // println!("==========keyed_accounts======={}", keyed_accounts.len());
+        // let accounts = if is_known_spl_token_id(program_id)
+        //     && encoding == UiAccountEncoding::JsonParsed
+        // {
+        //     get_parsed_token_accounts(bank.clone(), keyed_accounts.into_iter()).collect()
+        // } else {
+        //     keyed_accounts
+        //         .into_iter()
+        //         .map(|(pubkey, account)| {
+        //             Ok(RpcKeyedAccount {
+        //                 pubkey: pubkey.to_string(),
+        //                 account: encode_account(&account, &pubkey, encoding, data_slice_config)?,
+        //             })
+        //         })
+        //         .collect::<Result<Vec<_>>>()?
+        // };
+        Ok(keyed_accounts.len() as u64)
     }
 
 
