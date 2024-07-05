@@ -1,13 +1,7 @@
 use {
     serde::{Deserialize, Serialize},
     solana_frozen_abi_macro::{AbiEnumVisitor, AbiExample},
-    solana_program::{
-        clock::Slot,
-        instruction::InstructionError,
-        pubkey::Pubkey,
-        slot_hashes::{SlotHashes, MAX_ENTRIES},
-    },
-    std::borrow::Cow,
+    solana_program::pubkey::Pubkey,
 };
 
 /// Program account states
