@@ -583,9 +583,7 @@ impl JsonRpcRequestProcessor {
                 })
                 .collect::<Result<Vec<_>>>()?
         };
-        println!("==============Print Accounts Number:{:?}", accounts);
-        // debug!("==============Debug Accounts Number:{:?}", accounts.len());
-        // trace!("==============Trace Accounts Number:{:?}", accounts.len());
+
         Ok(match with_context {
             true => OptionalContext::Context(new_response(&bank, accounts)),
             false => OptionalContext::NoContext(accounts),

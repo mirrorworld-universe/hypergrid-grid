@@ -126,7 +126,7 @@ impl RemoteAccountLoader {
         // println!("RemoteAccountLoader.get_account: {:?}, {}", thread::current().id(), pubkey.to_string());
         match self.account_cache.get(pubkey) {
             Some(account) =>    {
-                println!("RemoteAccountLoader.get_account: {} match.", pubkey.to_string());
+                // println!("RemoteAccountLoader.get_account: {} match.", pubkey.to_string());
                 return Some(account.clone());
             },
             None => None, // self.load_account(pubkey),
@@ -176,7 +176,7 @@ impl RemoteAccountLoader {
         let result = self.rpc_client.get_account(pubkey);
         match result {
             Ok(account) => {
-                println!("load_account_via_rpc: account: {:?}", account);
+                // println!("load_account_via_rpc: account: {:?}", account);
                 let mut account = AccountSharedData::create(
                     account.lamports,
                     account.data,
@@ -189,11 +189,11 @@ impl RemoteAccountLoader {
                 // println!("account: {:?}", account);
                 self.account_cache.insert(pubkey.clone(), account.clone());
                 time.stop();
-                println!("load_account_via_rpc: account: {:?}, {:?}", account, time.as_us());
+                // println!("load_account_via_rpc: account: {:?}, {:?}", account, time.as_us());
                 Some(account)
             },
             Err(e) => {
-                println!("load_account_via_rpc: failed to load account: {:?}\n", e);
+                // println!("load_account_via_rpc: failed to load account: {:?}\n", e);
                 None
             }
         }
@@ -234,7 +234,7 @@ impl RemoteAccountLoader {
             _ => Vec::new(), // Add wildcard pattern to cover all other possible values
         };
 
-        println!("data: {}, {}", space, data.len());
+        // println!("data: {}, {}", space, data.len());
 
         let mut account = AccountSharedData::create(
                 lamports,
@@ -282,7 +282,7 @@ impl RemoteAccountLoader {
                 .header(CONTENT_TYPE, "application/json")
                 .body(req.to_string())
                 .send().unwrap();
-            println!("load_account_from_remote, response: {:?}", res.status());
+            // println!("load_account_from_remote, response: {:?}", res.status());
             if res.status().is_success() {
                 let account_json: serde_json::Value = res.json().unwrap();
                 // println!("load_account_from_remote 1: {:?}", account_json);
@@ -400,13 +400,13 @@ impl RemoteAccountLoader {
         time.stop();
         match result {
             Ok(signature) => {
-                println!("send_transaction_to_baselayer: success {:?}, {}", signature, time.as_us());
+                // println!("send_transaction_to_baselayer: success {:?}, {}", signature, time.as_us());
                 //reload the account
                 self.load_account_via_rpc(account);
                 Some(signature)
             },
             Err(e) => {
-                println!("send_transaction_to_baselayer: failed: {:?}, {}", e, time.as_us());
+                // println!("send_transaction_to_baselayer: failed: {:?}, {}", e, time.as_us());
                 None
             }
         }

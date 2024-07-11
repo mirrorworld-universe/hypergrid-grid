@@ -7729,14 +7729,14 @@ impl AccountsDb {
                         continue;
                     }
                     if self.accounts_cache.has_account_from_remote(&item.pubkey){
-                        println!("_calculate_accounts_hash_from_storages, remote key: {:?}", item);
+                        // println!("_calculate_accounts_hash_from_storages, remote key: {:?}", item);
                         lamports += item.lamports;
                     } else {
                         //Sonic: if the account is not in accounts_index, assume it was from a remote account.
                         match self.accounts_index.get(&item.pubkey, config.ancestors, Some(slot)) {
                             // we bail out pretty early for missing.
                             AccountIndexGetResult::NotFound => {
-                                println!("_calculate_accounts_hash_from_storages, missing key: {:?}", item);
+                                // println!("_calculate_accounts_hash_from_storages, missing key: {:?}", item);
                                 lamports += item.lamports;
                             },
                             _ => {},
