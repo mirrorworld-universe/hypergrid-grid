@@ -46,7 +46,7 @@ use {
         task::JoinHandle,
         time::{sleep, timeout, Duration, Instant},
     },
-    sonic_printer::{func, show},
+    // sonic_printer::{func, show},
 };
 #[cfg(feature = "spinner")]
 use {

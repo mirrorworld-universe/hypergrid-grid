@@ -1,7 +1,7 @@
 use {
     solana_program_runtime::{declare_process_instruction, ic_msg, invoke_context::InvokeContext},
     solana_sdk::{
-        instruction::InstructionError, program_utils::limited_deserialize, pubkey::Pubkey, signer, sonic_fee_settlement::{
+        instruction::InstructionError, program_utils::limited_deserialize, pubkey::Pubkey, sonic_fee_settlement::{
             instruction::{ProgramInstruction, SettlementBillParam},
             program::check_id,
             state::{

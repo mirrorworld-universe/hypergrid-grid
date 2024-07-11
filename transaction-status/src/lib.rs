@@ -28,7 +28,7 @@ use {
     },
     std::fmt,
     thiserror::Error,
-    sonic_printer::{show, func},
+    // sonic_printer::{show, func},
 };
 
 #[macro_use]

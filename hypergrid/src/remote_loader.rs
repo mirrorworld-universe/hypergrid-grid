@@ -1,5 +1,5 @@
 use {
-    crate::config::Config, base64::{self, Engine}, core::fmt, dashmap::DashMap, reqwest::{
+    crate::{config::Config, cosmos}, base64::{self, Engine}, core::fmt, dashmap::DashMap, reqwest::{
         self,
         header::{
             self, 
@@ -146,16 +146,18 @@ impl RemoteAccountLoader {
     }
 
     /// Load the account from the RPC.
-    pub fn load_account(&self, pubkey: &Pubkey) -> Option<AccountSharedData> {
+    pub fn load_account(&self, pubkey: &Pubkey, source: Option<Pubkey>) -> Option<AccountSharedData> {
         if !self.enable || Self::ignored_account(pubkey) {
             return None;
         }
-        match self.load_account_via_rpc(pubkey) {
+        // let account = self.load_account_via_rpc(pubkey);
+        let account = self.load_account_via_hssn(pubkey, source);
+        match account {
             Some(account) => {
                 //Sonic: check if programdata account exists
                 if let Some(programdata_address) = RemoteAccountLoader::has_programdata_account(account.clone()) {
                     //Sonic: load programdata account from remote
-                    self.load_account(&programdata_address);
+                    self.load_account(&programdata_address, source);
                 }
                 Some(account)
             },
@@ -247,7 +249,7 @@ impl RemoteAccountLoader {
         Some(account)
     }
 
-    fn load_account_via_hssn(&self, pubkey: &Pubkey) -> Option<AccountSharedData> {
+    fn load_account_via_hssn(&self, pubkey: &Pubkey, source: Option<Pubkey>) -> Option<AccountSharedData> {
         if Self::ignored_account(pubkey) {
             // print!("******* skip: {}\n", pubkey.to_string());
             return None;
@@ -296,7 +298,12 @@ impl RemoteAccountLoader {
                 Some(account)
             },
             None => {
-                println!("load_account_from_remote: failed to load account: {:?}\n", pubkey);
+                println!("load_account_from_hssn: not found: {:?}\n", pubkey);
+                if let Some(source) = source {
+                    //load the account from the source
+                    cosmos::run_load_solana_account(pubkey.to_string().as_str(), "0", source.to_string().as_str());
+                }
+                
                 None
             }
         }
@@ -433,7 +440,7 @@ mod tests {
     fn test_remote_account_loader3() {
         let loader = RemoteAccountLoader::default();
         let pubkey = Pubkey::from_str("4WTUyXNcf6QCEj76b3aRDLPewkPGkXFZkkyf3A3vua1z").unwrap();
-        let account = loader.load_account(&pubkey);
+        let account = loader.load_account(&pubkey, None);
         assert_eq!(account.is_none(), true);
     }
 
@@ -459,7 +466,7 @@ mod tests {
     fn test_remote_account_loader6() {
         let loader = RemoteAccountLoader::default();
         let pubkey = Pubkey::from_str("4WTUyXNcf6QCEj76b3aRDLPewkPGkXFZkkyf3A3vua1z").unwrap();
-        let account = loader.load_account(&pubkey);
+        let account = loader.load_account(&pubkey, None);
         assert_eq!(account.is_none(), true);
     }
 

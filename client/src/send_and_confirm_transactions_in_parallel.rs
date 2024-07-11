@@ -29,7 +29,7 @@ use {
         time::Duration,
     },
     tokio::{sync::RwLock, task::JoinHandle, time::Instant},
-    sonic_printer::{func, show},
+    // sonic_printer::{func, show},
 };
 
 // Sonic Rate

@@ -64,7 +64,7 @@ use {
         time::{Duration, Instant},
     },
     tokio::{sync::RwLock, time::sleep},
-    sonic_printer::{show, func},
+    // sonic_printer::{show, func},
 };
 
 /// A client of a remote Solana node.

@@ -5143,11 +5143,15 @@ impl Bank {
                             match instruction {
                                 sonic_account_migrater_program::instruction::ProgramInstruction::MigrateRemoteAccounts => {
                                     //load remote account...
-                                    self.rc.accounts.accounts_db.accounts_cache.load_accounts_from_remote(accounts);
+                                    self.rc.accounts.accounts_db.accounts_cache.load_accounts_from_remote(accounts, None);
                                 },
                                 sonic_account_migrater_program::instruction::ProgramInstruction::DeactivateRemoteAccounts => {
                                     //deactivate remote account...
                                     self.rc.accounts.accounts_db.accounts_cache.deactivate_remote_accounts(accounts);
+                                },
+                                sonic_account_migrater_program::instruction::ProgramInstruction::MigrateSourceAccounts { node_id } => {
+                                    //load remote account from source...
+                                    self.rc.accounts.accounts_db.accounts_cache.load_accounts_from_remote(accounts, Some(node_id));
                                 },
                             }
                         });
