@@ -104,8 +104,24 @@ impl ReadOnlyAccountsCache {
     }
 
     pub(crate) fn load(&self, pubkey: Pubkey, slot: Slot) -> Option<AccountSharedData> {
+        // Yusuf - I am not sure if this is the right way to do this
         let (account, load_us) = measure_us!({
-            let key = (pubkey, slot);
+            let key = if pubkey.to_string() == "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr" {
+                (pubkey, 1)
+            } else {
+                (pubkey, slot)
+            };
+            // 
+            if pubkey.to_string() != "SysvarFees111111111111111111111111111111111" 
+            && pubkey.to_string() != "SysvarRent111111111111111111111111111111111" 
+            && pubkey.to_string() != "SysvarStakeHistory1111111111111111111111111"
+            && pubkey.to_string() != "SysvarLastRestartS1ot1111111111111111111111"
+            && pubkey.to_string() != "SysvarEpochSchedu1e111111111111111111111111"
+            && pubkey.to_string() != "Vote111111111111111111111111111111111111111" 
+            {
+                println!("key: {:?}", key);
+            }
+            // let key = (pubkey, slot)
             let Some(entry) = self.cache.get(&key) else {
                 self.stats.misses.fetch_add(1, Ordering::Relaxed);
                 return None;
