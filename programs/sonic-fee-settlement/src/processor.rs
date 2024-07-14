@@ -95,54 +95,48 @@ impl Processor {
             return Err(InstructionError::NotEnoughAccountKeys);
         }
 
-        // deal with bills
-        //convert bills to map
-        let mut bill_map: std::collections::HashMap<Pubkey, u64> = std::collections::HashMap::new();
-        bills.iter().for_each(|bill| {
+        for bill in &bills {
             ic_msg!(invoke_context, "bill: {:?} {:?}", bill.key, bill.amount);
-            bill_map.insert(bill.key, bill.amount);
-        });
-
-        for i in 0..n {
-            let account = instruction_context.try_borrow_instruction_account(transaction_context, i)?;
-            let key = *account.get_key();
-            if !account.is_signer() && account.is_writable() && check_id(account.get_owner()){
-                if let SettlementState::FeeBillSettled(mut state) = account.get_state()? {
-                    ic_msg!(invoke_context, "data account {} is initialized.", key);
-                    if let Some(amount) = bill_map.remove(&state.owner) {
-                        let mut amount = amount;
+            for i in 0..n {
+                let mut account = instruction_context.try_borrow_instruction_account(transaction_context, i)?;
+                let key = *account.get_key();
+                if !account.is_signer() && account.is_writable() && check_id(account.get_owner()){
+                    if let SettlementState::FeeBillSettled(mut state) = account.get_state()? {
+                        ic_msg!(invoke_context, "data account {} is initialized.", key);
+                        let mut amount = 0;
+                        if bill.key.eq(&state.owner) {
+                            amount += bill.amount / 2;
+                        }
+                        
                         match state.account_type {
                             SettlementAccountType::BurnAccount => {
-                                amount = amount;
+                                amount += bill.amount;
                                 ic_msg!(invoke_context, "BurnAccount {} settle {}.", key, amount);
                             },
                             SettlementAccountType::HSSNAccount => {
-                                amount = amount / 4;
+                                amount += bill.amount / 4;
                                 ic_msg!(invoke_context, "HSSNAccount {} settle {}.", key, amount);
                             },
                             SettlementAccountType::SonicGridAccount => {
-                                amount = amount / 4;
+                                amount += bill.amount / 4; 
                                 ic_msg!(invoke_context, "SonicGridAccount {} settle {}.", key, amount);
                             },
                             SettlementAccountType::GridAccount => {
-                                amount = amount / 2;
+                                amount += 0; //bill.amount / 2;
                                 ic_msg!(invoke_context, "GridAccount {} settle {}.", key, amount);
                             },
                         }
-                        state.amount += amount;
-                        state.withdrawable += amount;
+                        if amount > 0 {
+                            state.amount += amount;
+                            state.withdrawable += amount;
+                            account.set_state(&SettlementState::FeeBillSettled(state))?;
+                        }
+                    } else {
+                        ic_msg!(invoke_context, "data account {} is not initialized.", key);
                     }
-                } else {
-                    ic_msg!(invoke_context, "data account {} is not initialized.", key);
-                    return Err(InstructionError::InvalidAccountData);
                 }
             }
-        }
-
-        if bill_map.len() > 0 {
-            ic_msg!(invoke_context, "Some bills are not settled.");
-            return Err(InstructionError::NotEnoughAccountKeys);
-        }
+        };
         
         ic_msg!(invoke_context, "Sonic SettleFeeBill from {} to {}.", from_id, end_id);
 
