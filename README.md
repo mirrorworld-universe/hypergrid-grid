@@ -47,7 +47,7 @@ $ sudo dnf install openssl-devel systemd-devel pkg-config zlib-devel llvm clang 
 ## **2. Download the source code.**
 
 ```bash
-$ git clone https://github.com/solana-labs/solana.git
+$ git clone https://github.com/mirrorworld-universe/hypergrid-grid.git
 $ cd solana
 ```
 
