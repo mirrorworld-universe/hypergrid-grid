@@ -16,7 +16,8 @@ pub enum ProgramInstruction {
     DeactivateRemoteAccounts,
     ///Migrate remote accounts from source to local accounts cache
     MigrateSourceAccounts{
-        node_id: Pubkey
+        node_id: Pubkey,
+        refresh: bool,
     },
 }
 

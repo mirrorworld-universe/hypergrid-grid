@@ -254,11 +254,11 @@ impl AccountsCache {
     }
 
     //Sonic: load accounts from remote
-    pub fn load_accounts_from_remote(&self, pubkeys: Vec<Pubkey>, source: Option<Pubkey>) {
-        // println!("AccountsCache::load_accounts_from_remote, {:?}", pubkeys);
+    pub fn load_accounts_from_remote(&self, pubkeys: Vec<Pubkey>, source: Option<Pubkey>, refresh: bool) {
+        println!("AccountsCache::load_accounts_from_remote, {:?}", pubkeys);
         pubkeys.iter().for_each(|pubkey| {
             //Sonic: load from remote
-            self.remote_loader.load_account(pubkey, source);
+            self.remote_loader.load_account(pubkey, source, refresh);
         });
     }
 

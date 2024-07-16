@@ -21,8 +21,9 @@ declare_process_instruction!(Entrypoint, DEFAULT_COMPUTE_UNITS, |invoke_context|
         ProgramInstruction::MigrateRemoteAccounts => Processor::migrate_remote_accounts(invoke_context),
         ProgramInstruction::DeactivateRemoteAccounts => Processor::deactivate_remote_accounts(invoke_context),
         ProgramInstruction::MigrateSourceAccounts{
-            node_id
-        } => Processor::migrate_source_accounts(invoke_context, node_id),
+            node_id,
+            refresh,
+        } => Processor::migrate_source_accounts(invoke_context, node_id, refresh),
     }
 });
 
@@ -58,7 +59,8 @@ impl Processor {
 
     fn migrate_source_accounts(
         invoke_context: &mut InvokeContext,
-        node_id: Pubkey
+        node_id: Pubkey,
+        refresh: bool,
     ) -> Result<(), InstructionError> {
         let transaction_context = &invoke_context.transaction_context;
         let instruction_context = transaction_context.get_current_instruction_context()?;
@@ -80,7 +82,7 @@ impl Processor {
         }
 
         let clock = invoke_context.get_sysvar_cache().get_clock()?;
-        ic_msg!(invoke_context, "{} Remote Accounts are migrated from {} at slot {}.", addresses_len, node_id, clock.slot);
+        ic_msg!(invoke_context, "{} Remote Accounts are migrated from {} at slot {}, refresh: {}.", addresses_len, node_id, clock.slot, refresh);
 
         Ok(())
     }

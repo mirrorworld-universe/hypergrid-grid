@@ -5121,6 +5121,7 @@ impl Bank {
         }
         let msg = tx.message();
         let account_keys = msg.account_keys();
+        // println!("Bank.check_remote_accounts():{:?}", msg.instructions());
         msg.instructions().iter().for_each(|ix| {
             if let Some(program_id) = account_keys.get(ix.program_id_index.into()) {
 
@@ -5143,15 +5144,16 @@ impl Bank {
                             match instruction {
                                 sonic_account_migrater_program::instruction::ProgramInstruction::MigrateRemoteAccounts => {
                                     //load remote account...
-                                    self.rc.accounts.accounts_db.accounts_cache.load_accounts_from_remote(accounts, None);
+                                    self.rc.accounts.accounts_db.accounts_cache.load_accounts_from_remote(accounts, None, false);
                                 },
                                 sonic_account_migrater_program::instruction::ProgramInstruction::DeactivateRemoteAccounts => {
                                     //deactivate remote account...
                                     self.rc.accounts.accounts_db.accounts_cache.deactivate_remote_accounts(accounts);
                                 },
-                                sonic_account_migrater_program::instruction::ProgramInstruction::MigrateSourceAccounts { node_id } => {
+                                sonic_account_migrater_program::instruction::ProgramInstruction::MigrateSourceAccounts { node_id, refresh } => {
                                     //load remote account from source...
-                                    self.rc.accounts.accounts_db.accounts_cache.load_accounts_from_remote(accounts, Some(node_id));
+                                    println!("Bank.check_remote_accounts():MigrateSourceAccounts node_id: {:?} refresh: {:?}", node_id, refresh);
+                                    self.rc.accounts.accounts_db.accounts_cache.load_accounts_from_remote(accounts, Some(node_id), refresh);
                                 },
                             }
                         });
@@ -5173,6 +5175,7 @@ impl Bank {
         hash_queue: &BlockhashQueue,
     ) -> HashMap<Pubkey, (&'a Pubkey, u64)> {
         let mut result: HashMap<Pubkey, (&'a Pubkey, u64)> = HashMap::new();
+        // println!("Bank.filter_executable_program_accounts(): {:?}\n{:?}\n{:?}", txs, ancestors, lock_results);
         lock_results.iter_mut().zip(txs).for_each(|etx| {
             if let ((Ok(()), nonce), tx) = etx {
                 if nonce
