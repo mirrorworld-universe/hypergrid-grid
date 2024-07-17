@@ -5,7 +5,7 @@ use {
     base64::{prelude::BASE64_STANDARD, Engine},
     clap::{crate_description, crate_name, value_t, value_t_or_exit, App, Arg, ArgMatches},
     itertools::Itertools,
-    solana_accounts_db::hardened_unpack::MAX_GENESIS_ARCHIVE_UNPACKED_SIZE,
+    solana_accounts_db::{hardened_unpack::MAX_GENESIS_ARCHIVE_UNPACKED_SIZE, inline_spl_token, inline_spl_token_2022},
     solana_clap_utils::{
         input_parsers::{
             cluster_type_of, pubkey_of, pubkeys_of, unix_timestamp_from_rfc3339_datetime,
@@ -690,6 +690,26 @@ fn main() -> Result<(), Box<dyn error::Error>> {
             );
         }
     }
+
+    // Sonic: Add the native mint
+    let native_mint_account = solana_sdk::account::AccountSharedData::from(Account {
+        owner: inline_spl_token::id(),
+        data: inline_spl_token::native_mint::ACCOUNT_DATA.to_vec(),
+        lamports: sol_to_lamports(1.),
+        executable: false,
+        rent_epoch: 1,
+    });
+    genesis_config.add_account(inline_spl_token::native_mint::id(), native_mint_account);
+
+    // Sonic: Add the native mint 2022
+    let native_mint_account = solana_sdk::account::AccountSharedData::from(Account {
+        owner: inline_spl_token_2022::id(),
+        data: inline_spl_token::native_mint::ACCOUNT_DATA.to_vec(),
+        lamports: sol_to_lamports(1.),
+        executable: false,
+        rent_epoch: 1,
+    });
+    genesis_config.add_account(Pubkey::from_str("9pan9bMn5HatX4EJdBwg9VgCa7Uz5HL8N1m5D3NdXejP").unwrap(), native_mint_account);
 
     solana_logger::setup();
     create_new_ledger(

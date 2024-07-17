@@ -21,6 +21,8 @@
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
 use solana_sdk::feature_set::cap_transaction_accounts_data_size;
+use crate::inline_spl_token;
+
 use {
     crate::{
         account_info::{AccountInfo, StorageLocation},
@@ -7725,7 +7727,8 @@ impl AccountsDb {
             let mut lamports: u64 = 0;
             for chis in cache_hash_intermediates.clone() {
                 for item in chis {
-                    if item.pubkey.to_string().contains("11111111111111111") {
+                    if item.pubkey.to_string().contains("11111111111111111") && 
+                       item.pubkey != inline_spl_token::native_mint::id() {
                         continue;
                     }
                     if self.accounts_cache.has_account_from_remote(&item.pubkey){

@@ -1,21 +1,16 @@
 use {
-    crate::{accounts_db::AccountsDb, accounts_hash::AccountHash},
-    sonic_hypergrid::remote_loader::RemoteAccountLoader, //Sonic: using RemoteAccountLoader
-    dashmap::DashMap,
-    seqlock::SeqLock,
-    solana_sdk::{
-        account::{AccountSharedData, ReadableAccount},
+    crate::{accounts_db::AccountsDb, accounts_hash::AccountHash, inline_spl_token}, dashmap::DashMap, seqlock::SeqLock, solana_sdk::{
+        account::{Account, AccountSharedData, ReadableAccount},
         clock::Slot,
         pubkey::Pubkey,
-    },
-    std::{
+    }, sonic_hypergrid::remote_loader::RemoteAccountLoader, std::{
         collections::BTreeSet,
         ops::Deref,
         sync::{
             atomic::{AtomicBool, AtomicU64, Ordering},
             Arc, RwLock,
         },
-    },
+    }
 };
 
 pub type SlotCache = Arc<SlotCacheInner>;
@@ -234,6 +229,11 @@ impl AccountsCache {
                 Some(account)
             },
             None => {
+                if inline_spl_token::native_mint::id() == *pubkey || 
+                   "9pan9bMn5HatX4EJdBwg9VgCa7Uz5HL8N1m5D3NdXejP" == pubkey.to_string() {
+                    //Sonic: load native mint
+                    return Some(self.store(slot, pubkey, self.native_mint_account()));
+                }
                 //Sonic: load from remote
                 let account = self.remote_loader.get_account(pubkey);
                 match account {
@@ -248,8 +248,24 @@ impl AccountsCache {
         }
     }
 
+    fn native_mint_account(&self) -> AccountSharedData {
+        // Sonic: Add the native mint
+        let mut native_mint_account: AccountSharedData = solana_sdk::account::AccountSharedData::from(Account {
+            owner: inline_spl_token::id(),
+            data: inline_spl_token::native_mint::ACCOUNT_DATA.to_vec(),
+            lamports: 1_461_600, //1_000_000_000,
+            executable: false,
+            rent_epoch: 1,
+        });
+        native_mint_account.remote = true;
+
+        return native_mint_account;
+    }
+
     //Sonic: check if account exists in remote
     pub fn has_account_from_remote(&self, pubkey: &Pubkey) -> bool {
+        inline_spl_token::native_mint::id() == *pubkey || 
+        "9pan9bMn5HatX4EJdBwg9VgCa7Uz5HL8N1m5D3NdXejP" == pubkey.to_string() || 
         self.remote_loader.has_account(pubkey)
     }
 
