@@ -20,7 +20,6 @@
 
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
-use solana_sdk::feature_set::cap_transaction_accounts_data_size;
 use crate::inline_spl_token;
 
 use {

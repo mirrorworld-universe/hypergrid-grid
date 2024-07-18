@@ -1,13 +1,7 @@
 use {
-    crate::{config::Config, cosmos}, base64::{self, Engine}, core::fmt, dashmap::DashMap, reqwest::{
-        self,
-        header::{
-            self, 
-            CONTENT_TYPE,
-            // RETRY_AFTER
-        }, 
-    }, serde_derive::{Deserialize, Serialize}, serde_json::json, sha2::{Digest, Sha256}, solana_client::rpc_client::RpcClient, solana_measure::measure::Measure, solana_sdk::{
-        account::{self, AccountSharedData, ReadableAccount, WritableAccount}, 
+    crate::{config::Config, cosmos}, base64::{self, Engine}, core::fmt, dashmap::DashMap, 
+    serde_derive::{Deserialize, Serialize}, sha2::{Digest, Sha256}, solana_client::rpc_client::RpcClient, solana_measure::measure::Measure, solana_sdk::{
+        account::{AccountSharedData, ReadableAccount, WritableAccount}, 
         account_utils::StateMut, 
         bpf_loader_upgradeable::{self, UpgradeableLoaderState}, 
         commitment_config::CommitmentConfig, 
@@ -349,20 +343,25 @@ impl RemoteAccountLoader {
             // print!("******* skip: {}\n", pubkey.to_string());
             return None;
         }
-        println!("Thread {:?}: load_account_via_hssn: {}",  thread::current().id(), pubkey.to_string());
+        info!("Thread {:?}: load_account_via_hssn: {:?}",  thread::current().id(), pubkey.to_string());
 
         let url = format!("{}/hypergrid-ssn/hypergridssn/solana_account/{}/{}",self.config.hssn_rpc_url, pubkey.to_string(), 0);
         info!("load_account_from_hssn: {}\n", url);
         let res = self.cosmos_client.call(url);
         let mut account: Option<AccountSharedData> = None;
-        if let Ok(body) = res {
-            // println!("respone: {}", body);
-            //convert the response body to json
-            let value: serde_json::Result<serde_json::Value> = serde_json::from_str(&body);
-            if let Ok(value) = value {
-                // let value: serde_json::Value = value.unwrap();
-                // println!("load_account_via_hssn: success: {:?}\n", value);
-                account = RemoteAccountLoader::deserialize_from_json(value);
+        match res {
+            Ok(body) => {
+                info!("respone: {:?}", body);
+                //convert the response body to json
+                let value: serde_json::Result<serde_json::Value> = serde_json::from_str(&body);
+                if let Ok(value) = value {
+                    // let value: serde_json::Value = value.unwrap();
+                    info!("load_account_via_hssn: success: {:?}\n", value);
+                    account = RemoteAccountLoader::deserialize_from_json(value);
+                } 
+            },
+            Err(e) => {
+                warn!("load_account_from_hssn: not found: {:?}, {:?}\n", pubkey, e);
             }
         }
 
