@@ -697,7 +697,7 @@ fn main() -> Result<(), Box<dyn error::Error>> {
         data: inline_spl_token::native_mint::ACCOUNT_DATA.to_vec(),
         lamports: sol_to_lamports(1.),
         executable: false,
-        rent_epoch: 1,
+        rent_epoch: 18446744073709551615,
     });
     genesis_config.add_account(inline_spl_token::native_mint::id(), native_mint_account);
 
@@ -707,7 +707,7 @@ fn main() -> Result<(), Box<dyn error::Error>> {
         data: inline_spl_token::native_mint::ACCOUNT_DATA.to_vec(),
         lamports: sol_to_lamports(1.),
         executable: false,
-        rent_epoch: 1,
+        rent_epoch: 18446744073709551615,
     });
     genesis_config.add_account(inline_spl_token_2022::native_mint::id(), native_mint_account);
 

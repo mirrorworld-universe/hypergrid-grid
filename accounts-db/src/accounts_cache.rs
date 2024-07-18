@@ -260,7 +260,7 @@ impl AccountsCache {
             data: inline_spl_token::native_mint::ACCOUNT_DATA.to_vec(),
             lamports: 1_461_600, //1_000_000_000,
             executable: false,
-            rent_epoch: 1,
+            rent_epoch: 18446744073709551615,
         });
         native_mint_account.remote = true;
 
