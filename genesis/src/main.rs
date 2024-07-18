@@ -709,7 +709,7 @@ fn main() -> Result<(), Box<dyn error::Error>> {
         executable: false,
         rent_epoch: 1,
     });
-    genesis_config.add_account(Pubkey::from_str("9pan9bMn5HatX4EJdBwg9VgCa7Uz5HL8N1m5D3NdXejP").unwrap(), native_mint_account);
+    genesis_config.add_account(inline_spl_token_2022::native_mint::id(), native_mint_account);
 
     solana_logger::setup();
     create_new_ledger(

@@ -18,7 +18,8 @@ use {
     }, std::{
         option_env, str::FromStr, thread,
         time::{Duration, Instant},
-    }, zstd
+    }, zstd,
+    log::*,
 };
 
 
@@ -106,7 +107,7 @@ impl RemoteAccountLoader {
                 // println!("setting: {:?}, {:?}, {:?}", &setting.baselayer_rpc_url, key, program_id)
             },
             Err(e) => {
-                println!("setting: {:?}", e);
+                error!("setting: {:?}", e);
             },
         };
 
@@ -167,12 +168,12 @@ impl RemoteAccountLoader {
             return None;
         }
 
-        println!("Thread {:?}: load_account: {} from {}, refresh: {}",  thread::current().id(), pubkey.to_string(), source.unwrap_or_default().to_string(), refresh);
+        info!("Thread {:?}: load_account: {} from {}, refresh: {}",  thread::current().id(), pubkey.to_string(), source.unwrap_or_default().to_string(), refresh);
 
         if let Some(account_cache) = self.account_cache.get(pubkey) {
             let (account1, time) = account_cache.clone();
             if time.elapsed().as_secs() < 3 {
-                println!("******* cache: {}\n", pubkey.to_string());
+                info!("******* cache: {}\n", pubkey.to_string());
                 return Some(account1);
             }
         }
@@ -216,7 +217,7 @@ impl RemoteAccountLoader {
                 if node.value().role == 2 || node.value().role == 3 || node.value().role == 4 {
                     rpc_url = node.value().rpc.clone();
                 } else {
-                    println!("load_account_via_rpc: invalid source role: {}", node.value().role);
+                    info!("load_account_via_rpc: invalid source role: {}", node.value().role);
                     return None;
                 }
             }
@@ -247,7 +248,7 @@ impl RemoteAccountLoader {
                 Some(account)
             },
             Err(e) => {
-                // println!("load_account_via_rpc: failed to load account: {:?}\n", e);
+                error!("load_account_via_rpc: failed to load account: {:?}\n", e);
                 None
             }
         }
@@ -301,7 +302,7 @@ impl RemoteAccountLoader {
             );
             account.remote = true;
 
-            println!("deserialize_from_json account: {:?}", account);
+            info!("deserialize_from_json account: {:?}", account);
             Some(account)
         } else {
             None
@@ -310,7 +311,7 @@ impl RemoteAccountLoader {
 
     fn load_hypergrid_nodes(&self) {
         let url = format!("{}/hypergrid-ssn/hypergridssn/hypergrid_node", self.config.hssn_rpc_url);
-        // println!("load_hypergrid_nodes: {}\n", url);
+        info!("load_hypergrid_nodes: {}\n", url);
         // let client = cosmos::HttpClient::new(Duration::from_secs(30));
         let res = self.cosmos_client.call(url);
         if let Ok(body) = res {
@@ -340,7 +341,7 @@ impl RemoteAccountLoader {
             }
             return;
         }
-        println!("get_hypergrid_nodes: not found: {:?}\n", self.config.hssn_rpc_url);
+        warn!("get_hypergrid_nodes: not found: {:?}\n", self.config.hssn_rpc_url);
     }
 
     fn load_account_via_hssn(&self, pubkey: &Pubkey, source: Option<Pubkey>, refresh: bool) -> Option<AccountSharedData> {
@@ -350,9 +351,8 @@ impl RemoteAccountLoader {
         }
         println!("Thread {:?}: load_account_via_hssn: {}",  thread::current().id(), pubkey.to_string());
 
-           // let client = self.client.clone();
         let url = format!("{}/hypergrid-ssn/hypergridssn/solana_account/{}/{}",self.config.hssn_rpc_url, pubkey.to_string(), 0);
-        // let client = cosmos::HttpClient::new(Duration::from_secs(30));
+        info!("load_account_from_hssn: {}\n", url);
         let res = self.cosmos_client.call(url);
         let mut account: Option<AccountSharedData> = None;
         if let Ok(body) = res {
@@ -378,7 +378,7 @@ impl RemoteAccountLoader {
                 }
             },
             None => {
-                println!("load_account_from_hssn: not found: {:?}\n", pubkey);
+                info!("load_account_from_hssn: not found: {:?}\n", pubkey);
                 if let Some(source) = source {
                     //load the account from the source
                     cosmos::run_load_solana_account(pubkey.to_string().as_str(), "0", source.to_string().as_str(), false);
@@ -486,7 +486,7 @@ impl RemoteAccountLoader {
                 Some(signature)
             },
             Err(e) => {
-                // println!("send_transaction_to_baselayer: failed: {:?}, {}", e, time.as_us());
+                error!("send_transaction_to_baselayer: failed: {:?}, {}", e, time.as_us());
                 None
             }
         }

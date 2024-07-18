@@ -5007,7 +5007,7 @@ impl Bank {
         log_messages.as_ref().map(|log_messages| {
             let re = Regex::new(r"Fake NFT New Value: (\d+)").unwrap();
             for log_message in log_messages.iter() {
-                println!("log_message: {:?}", log_message);
+                info!("log_message: {:?}", log_message);
 
                 //Sonic: send states to baselayer
                 let caps = re.captures(log_message);
@@ -5152,7 +5152,7 @@ impl Bank {
                                 },
                                 sonic_account_migrater_program::instruction::ProgramInstruction::MigrateSourceAccounts { node_id, refresh } => {
                                     //load remote account from source...
-                                    println!("Bank.check_remote_accounts():MigrateSourceAccounts node_id: {:?} refresh: {:?}", node_id, refresh);
+                                    info!("Bank.check_remote_accounts():MigrateSourceAccounts node_id: {:?} refresh: {:?}", node_id, refresh);
                                     self.rc.accounts.accounts_db.accounts_cache.load_accounts_from_remote(accounts, Some(node_id), refresh);
                                 },
                             }

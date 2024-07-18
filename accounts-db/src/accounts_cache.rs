@@ -1,5 +1,5 @@
 use {
-    crate::{accounts_db::AccountsDb, accounts_hash::AccountHash, inline_spl_token}, dashmap::DashMap, seqlock::SeqLock, solana_sdk::{
+    crate::{accounts_db::AccountsDb, accounts_hash::AccountHash, inline_spl_token, inline_spl_token_2022}, dashmap::DashMap, seqlock::SeqLock, solana_sdk::{
         account::{Account, AccountSharedData, ReadableAccount},
         clock::Slot,
         pubkey::Pubkey,
@@ -230,9 +230,9 @@ impl AccountsCache {
             },
             None => {
                 if inline_spl_token::native_mint::id() == *pubkey || 
-                   "9pan9bMn5HatX4EJdBwg9VgCa7Uz5HL8N1m5D3NdXejP" == pubkey.to_string() {
+                   inline_spl_token_2022::native_mint::id() == *pubkey {
                     //Sonic: load native mint
-                    return Some(self.store(slot, pubkey, self.native_mint_account()));
+                    return Some(self.store(slot, pubkey, self.native_mint_account(pubkey)));
                 }
                 //Sonic: load from remote
                 let account = self.remote_loader.get_account(pubkey);
@@ -248,10 +248,15 @@ impl AccountsCache {
         }
     }
 
-    fn native_mint_account(&self) -> AccountSharedData {
+    fn native_mint_account(&self, pubkey: &Pubkey) -> AccountSharedData {
         // Sonic: Add the native mint
+        let owner = if inline_spl_token::native_mint::id() == *pubkey {
+            inline_spl_token::id()
+        } else {
+            inline_spl_token_2022::id()
+        };
         let mut native_mint_account: AccountSharedData = solana_sdk::account::AccountSharedData::from(Account {
-            owner: inline_spl_token::id(),
+            owner, 
             data: inline_spl_token::native_mint::ACCOUNT_DATA.to_vec(),
             lamports: 1_461_600, //1_000_000_000,
             executable: false,
@@ -264,14 +269,14 @@ impl AccountsCache {
 
     //Sonic: check if account exists in remote
     pub fn has_account_from_remote(&self, pubkey: &Pubkey) -> bool {
-        inline_spl_token::native_mint::id() == *pubkey || 
-        "9pan9bMn5HatX4EJdBwg9VgCa7Uz5HL8N1m5D3NdXejP" == pubkey.to_string() || 
+        inline_spl_token::native_mint::id() == *pubkey || //native mint
+        inline_spl_token_2022::native_mint::id() == *pubkey || //native mint 2022
         self.remote_loader.has_account(pubkey)
     }
 
     //Sonic: load accounts from remote
     pub fn load_accounts_from_remote(&self, pubkeys: Vec<Pubkey>, source: Option<Pubkey>, refresh: bool) {
-        println!("AccountsCache::load_accounts_from_remote, {:?}", pubkeys);
+        // println!("AccountsCache::load_accounts_from_remote, {:?}", pubkeys);
         pubkeys.iter().for_each(|pubkey| {
             //Sonic: load from remote
             self.remote_loader.load_account(pubkey, source, refresh);

@@ -6,6 +6,7 @@ use {
         process::Command,
         result::Result,
     },
+    log::*,
 };
 
 
@@ -27,10 +28,19 @@ pub fn run_load_solana_account(pub_key: &str, version:  &str, source: &str, upda
     }
 
     println!("cmd_str: {}", cmd_str);
-    let output = Command::new("sh").arg("-c").arg(cmd_str).output().expect("sh exec error!");
-
-    // let output_str = String::from_utf8_lossy(&output.stdout);
-    println!("{:?}", String::from_utf8_lossy(&output.stdout));
+    info!("cmd_str: {}", cmd_str);
+    
+    let output = Command::new("sh").arg("-c").arg(cmd_str).output();
+    match output {
+        Ok(output) => {
+            let output_str = String::from_utf8_lossy(&output.stdout);
+            info!("output: {}", output_str);
+            // println!("{:?}", String::from_utf8_lossy(&output.stdout));
+        },
+        Err(e) => {
+            error!("Error: {:?}", e);
+        }
+    }
 }
 
 
@@ -71,15 +81,21 @@ impl HttpClient {
         // `block_in_place()` only panics if called from a current_thread runtime, which is the
         // lesser evil.
         let res =tokio::task::block_in_place(move || self.runtime().block_on(async {
-            let response = self.rpc_client.get(url.to_string()).send().await.unwrap();
-            let status = response.status();
-            let body = response.text().await.unwrap();
-            if status.is_success() {
-                Ok(body)
-            } else {
-                Err(format!("{}: {}", status, body))
+            let response = self.rpc_client.get(url.to_string()).send().await;
+            match response {
+                Ok(response) => {
+                    let status = response.status();
+                    let body = response.text().await.unwrap_or("".to_string());
+                    if status.is_success() && body.len() > 0 {
+                        Ok(body)
+                    } else {
+                        Err(format!("{}: {}", status, body))
+                    }
+                },
+                Err(e) => {
+                    return Err(format!("Error: {:?}", e));
+                }
             }
-            
         }));
         return res;
         
