@@ -1,23 +1,13 @@
 use {
-    crate::{config::Config, cosmos}, base64::{self, Engine}, core::fmt, dashmap::DashMap, 
-    serde_derive::{Deserialize, Serialize}, sha2::{Digest, Sha256}, solana_client::rpc_client::RpcClient, solana_measure::measure::Measure, solana_sdk::{
-        account::{AccountSharedData, ReadableAccount, WritableAccount}, 
-        account_utils::StateMut, 
-        bpf_loader_upgradeable::{self, UpgradeableLoaderState}, 
-        commitment_config::CommitmentConfig, 
-        instruction::{AccountMeta, Instruction}, 
-        pubkey::Pubkey, 
-        signature::{Keypair, Signature, Signer}, 
-        transaction::Transaction
+    crate::{config::Config, cosmos}, base64::{self, Engine}, core::fmt, dashmap::DashMap, log::*, serde_derive::{Deserialize, Serialize}, serde_json::json, sha2::{Digest, Sha256}, solana_client::rpc_client::RpcClient, solana_measure::measure::Measure, solana_sdk::{
+        account::{AccountSharedData, ReadableAccount, WritableAccount}, account_utils::StateMut, bpf_loader_upgradeable::{self, UpgradeableLoaderState}, clock::Slot, commitment_config::CommitmentConfig, instruction::{AccountMeta, Instruction}, pubkey::Pubkey, signature::{Keypair, Signature, Signer}, transaction::Transaction
     }, std::{
-        option_env, str::FromStr, thread,
-        time::{Duration, Instant},
-    }, zstd,
-    log::*,
+        fs::File, option_env, str::FromStr, sync::Arc, thread, time::Duration
+    }, zstd
 };
 
 
-type AccountCacheKeyMap = DashMap<Pubkey, (AccountSharedData, Instant)>;
+type AccountCacheKeyMap = DashMap<Pubkey, (AccountSharedData, Slot)>;
 
 
 #[derive(Debug, Default)]
@@ -35,7 +25,7 @@ pub struct RemoteAccountLoader {
     rpc_client: RpcClient,
     cosmos_client: cosmos::HttpClient,
     /// Cache of accounts loaded from the remote.
-    account_cache: AccountCacheKeyMap,
+    account_cache: Arc<AccountCacheKeyMap>,
     hypergrid_nodes: HypergridNodes,
     /// Enable or disable the remote loader.
     enable: bool,
@@ -109,7 +99,7 @@ impl RemoteAccountLoader {
             rpc_client: RpcClient::new_with_timeout_and_commitment(&config.baselayer_rpc_url, 
             Duration::from_secs(30), CommitmentConfig::confirmed()),
             cosmos_client: cosmos::HttpClient::new(Duration::from_secs(30)),
-            account_cache: AccountCacheKeyMap::default(),
+            account_cache: Arc::new(AccountCacheKeyMap::default()),
             hypergrid_nodes: HypergridNodes::default(),
             enable: true,
             config,
@@ -136,7 +126,7 @@ impl RemoteAccountLoader {
         }
         // println!("RemoteAccountLoader.get_account: {:?}, {}", thread::current().id(), pubkey.to_string());
         match self.account_cache.get(pubkey) {
-            Some(account) =>    {
+            Some(account) => {
                 // println!("RemoteAccountLoader.get_account: {} match.", pubkey.to_string());
                 return Some(account.0.clone());
             },
@@ -157,16 +147,23 @@ impl RemoteAccountLoader {
     }
 
     /// Load the account from the RPC.
-    pub fn load_account(&self, pubkey: &Pubkey, source: Option<Pubkey>, refresh: bool) -> Option<AccountSharedData> {
+    pub fn load_account(&self, slot: Slot, pubkey: &Pubkey, source: Option<Pubkey>) -> Option<AccountSharedData> {
         if !self.enable || Self::ignored_account(pubkey) {
             return None;
         }
 
-        info!("Thread {:?}: load_account: {} from {}, refresh: {}",  thread::current().id(), pubkey.to_string(), source.unwrap_or_default().to_string(), refresh);
+        info!("Thread {:?}: load_account: {:?} from {:?}, solt: {:?}",  thread::current().id(), pubkey, source.unwrap_or_default(), slot);
+        println!("Thread {:?}: load_account: {:?} from {:?}, solt: {:?}",  thread::current().id(), pubkey, source.unwrap_or_default(), slot);
+
+        //load the account from the local file first
+        let account = self.load_account_from_local_file(slot, pubkey, source);
+        if account.is_some() {
+            return account;
+        }
 
         if let Some(account_cache) = self.account_cache.get(pubkey) {
-            let (account1, time) = account_cache.clone();
-            if time.elapsed().as_secs() < 3 {
+            let (account1, slot1) = account_cache.clone();
+            if slot == slot1  {
                 info!("******* cache: {}\n", pubkey.to_string());
                 return Some(account1);
             }
@@ -175,28 +172,94 @@ impl RemoteAccountLoader {
         let account: Option<AccountSharedData>;
         match source {
             Some(source) => {
-                account = self.load_account_via_hssn(pubkey, Some(source), refresh);
+                account = self.load_account_via_hssn(pubkey, Some(source), slot);
             },
             None => {
-                account = self.load_account_via_rpc(pubkey, None, refresh);
+                account = self.load_account_via_rpc(pubkey, None, slot);
             },
         }
 
         match account {
             Some(account) => {
+                //Sonic: insert the account to the cache
+                self.account_cache.insert(pubkey.clone(), (account.clone(), slot));
+
+                //Sonic: save the account to the local file
+                self.save_account_to_local_file(slot, pubkey, source, account.clone());
+
                 //Sonic: check if programdata account exists
-                if let Some(programdata_address) = RemoteAccountLoader::has_programdata_account(account.clone()) {
+                if let Some(programdata_address) = Self::has_programdata_account(account.clone()) {
                     //Sonic: load programdata account from remote
-                    self.load_account(&programdata_address, source, refresh);
+                    self.load_account(slot, &programdata_address, source);
                 }
+                
                 Some(account)
             },
             None => None,
         }
     }
 
+    fn load_account_from_local_file(&self, slot: Slot, pubkey: &Pubkey, source: Option<Pubkey>) -> Option<AccountSharedData> {
+        let path = format!("{}/{:?}_{:?}_{:?}.json", self.config.accounts_path, pubkey, source.unwrap_or_default(), slot);
+        println!("load_account_from_local_file: {}\n", path);
+        let file = File::open(path);
+        match file {
+            Ok(file) => {
+                // read file content to json
+                let account_data: serde_json::Value = serde_json::from_reader(file).unwrap();
+                debug!("load_account_from_local_file: account_data: {:?}", account_data);
+                let account = RemoteAccountLoader::deserialize_from_json2(account_data);
+                account
+            },
+            Err(e) => {
+                error!("load_account_from_local_file: failed to open file: {:?}\n", e);
+                None
+            }
+        }
+    }
+
+    fn save_account_to_local_file(&self, slot: Slot, pubkey: &Pubkey, source: Option<Pubkey>, account: AccountSharedData) {
+        let path = format!("{}/{:?}_{:?}_{:?}.json", self.config.accounts_path, pubkey, source.unwrap_or_default(), slot);
+        println!("save_account_to_local_file: {}\n", path);
+        let file = File::create(path.clone());
+        match file {
+            Ok(mut file) => {
+                let data = {
+                    if account.data().len() < 1 {
+                        "".to_string()
+                    } else {
+                        base64::engine::general_purpose::STANDARD.encode(account.data())
+                    }
+                };
+
+                let account_data = json!({
+                    "lamports": account.lamports(),
+                    "data": [
+                        data,
+                        "base58"
+                    ],
+                    "owner": account.owner(),
+                    "executable": account.executable(),
+                    "rent_epoch": account.rent_epoch(),
+                });
+                let result = serde_json::to_writer_pretty(&mut file, &account_data);
+                match result {
+                    Ok(_) => {
+                        info!("save_account_to_local_file: success: {}\n", path);
+                    },
+                    Err(e) => {
+                        error!("save_account_to_local_file: failed to write file: {:?}\n", e);
+                    }
+                }
+            },
+            Err(e) => {
+                error!("save_account_to_local_file: failed to create file: {:?}\n", e);
+            }
+        }
+    }
+
     /// Load the account from the RPC.
-    fn load_account_via_rpc(&self, pubkey: &Pubkey, source: Option<Pubkey>, refresh: bool) -> Option<AccountSharedData> {
+    fn load_account_via_rpc(&self, pubkey: &Pubkey, source: Option<Pubkey>, slot: Slot) -> Option<AccountSharedData> {
         if Self::ignored_account(pubkey) {
             // print!("******* skip: {}\n", pubkey.to_string());
             return None;
@@ -217,7 +280,8 @@ impl RemoteAccountLoader {
             }
         }
 
-        // println!("Thread {:?}: load_account_via_rpc: {} from {}",  thread::current().id(), pubkey.to_string(), rpc_url.clone());
+        println!("Thread {:?}: load_account_via_rpc: {:?} from {:?}",  thread::current().id(), pubkey, rpc_url.clone());
+        info!("Thread {:?}: load_account_via_rpc: {:?} from {:?}",  thread::current().id(), pubkey, rpc_url.clone());
 
         let rpc_client = RpcClient::new_with_timeout_and_commitment(rpc_url, Duration::from_secs(30), CommitmentConfig::confirmed());
 
@@ -235,8 +299,6 @@ impl RemoteAccountLoader {
                 );
                 account.remote = true;
         
-                // println!("load_account_via_rpc2: account: {:?}", account);
-                self.account_cache.insert(pubkey.clone(), (account.clone(), Instant::now()));
                 time.stop();
                 // println!("load_account_via_rpc: account: {:?}, {:?}", account, time.as_us());
                 Some(account)
@@ -261,46 +323,51 @@ impl RemoteAccountLoader {
         let value_str = value.as_str().unwrap_or("");
         let value: serde_json::Result<serde_json::Value> = serde_json::from_str(value_str);
         if let Ok(value) = value {
-            // println!("data: {:?}", account_data.to_string());
-            // let slot = result["slot"].as_u64().unwrap_or(0);
-            let data = value["data"][0].as_str().unwrap_or("");
-            let encoding = value["data"][1].as_str().unwrap_or("");
-            let lamports = value["lamports"].as_u64().unwrap_or(0);
-            let owner = value["owner"].as_str().unwrap_or("");
-            let rent_epoch = value["rentEpoch"].as_u64().unwrap_or(0);
-            // let space = value["space"].as_u64().unwrap();
-            let executable = value["executable"].as_bool().unwrap_or(false);
-            // if owner.eq("Feature111111111111111111111111111111111111") {
-            //     return None;
-            // }
-
-            let data = match encoding {
-                "base58" => bs58::decode(data).into_vec().unwrap_or_default(),
-                "base64" => base64::engine::general_purpose::STANDARD.decode(data).unwrap_or_default(),
-                "base64+zstd" => {
-                    let decoded = base64::engine::general_purpose::STANDARD.decode(data).unwrap_or_default();
-                    let decompressed = zstd::decode_all(decoded.as_slice()).unwrap_or_default();
-                    decompressed
-                },
-                _ => Vec::new(), // Add wildcard pattern to cover all other possible values
-            };
-
-            // println!("data: {}, {}", space, data.len());
-
-            let mut account = AccountSharedData::create(
-                    lamports,
-                    data,
-                    Pubkey::from_str(owner).unwrap(),
-                    executable,
-                    rent_epoch
-            );
-            account.remote = true;
-
+            let account = RemoteAccountLoader::deserialize_from_json2(value);
             info!("deserialize_from_json account: {:?}", account);
-            Some(account)
+            account
         } else {
             None
         }
+    }
+
+    fn deserialize_from_json2(value: serde_json::Value) -> Option<AccountSharedData> {
+        let owner = value["owner"].as_str().unwrap_or("");
+        if owner.eq("") {
+            return None;
+        } 
+        let data = value["data"][0].as_str().unwrap_or("");
+        let encoding = value["data"][1].as_str().unwrap_or("");
+        let lamports = value["lamports"].as_u64().unwrap_or(0);
+        let rent_epoch = value["rentEpoch"].as_u64().unwrap_or(0);
+        // let space = value["space"].as_u64().unwrap();
+        let executable = value["executable"].as_bool().unwrap_or(false);
+        // if owner.eq("Feature111111111111111111111111111111111111") {
+        //     return None;
+        // }
+
+        let data = match encoding {
+            "base58" => bs58::decode(data).into_vec().unwrap_or_default(),
+            "base64" => base64::engine::general_purpose::STANDARD.decode(data).unwrap_or_default(),
+            "base64+zstd" => {
+                let decoded = base64::engine::general_purpose::STANDARD.decode(data).unwrap_or_default();
+                let decompressed = zstd::decode_all(decoded.as_slice()).unwrap_or_default();
+                decompressed
+            },
+            _ => Vec::new(), // Add wildcard pattern to cover all other possible values
+        };
+
+        let mut account = AccountSharedData::create(
+            lamports,
+            data,
+            Pubkey::from_str(owner).unwrap(),
+            executable,
+            rent_epoch
+        );
+        account.remote = true;
+
+        info!("deserialize_from_json account: {:?}", account);
+        Some(account)
     }
 
     fn load_hypergrid_nodes(&self) {
@@ -338,14 +405,15 @@ impl RemoteAccountLoader {
         warn!("get_hypergrid_nodes: not found: {:?}\n", self.config.hssn_rpc_url);
     }
 
-    fn load_account_via_hssn(&self, pubkey: &Pubkey, source: Option<Pubkey>, refresh: bool) -> Option<AccountSharedData> {
+    fn load_account_via_hssn(&self, pubkey: &Pubkey, source: Option<Pubkey>, slot: Slot) -> Option<AccountSharedData> {
         if Self::ignored_account(pubkey) {
             // print!("******* skip: {}\n", pubkey.to_string());
             return None;
         }
         info!("Thread {:?}: load_account_via_hssn: {:?}",  thread::current().id(), pubkey.to_string());
+        println!("Thread {:?}: load_account_via_hssn: {:?}",  thread::current().id(), pubkey.to_string());
 
-        let url = format!("{}/hypergrid-ssn/hypergridssn/solana_account/{}/{}",self.config.hssn_rpc_url, pubkey.to_string(), 0);
+        let url = format!("{:?}/hypergrid-ssn/hypergridssn/solana_account/{:?}/{:?}_{:?}",self.config.hssn_rpc_url, pubkey, source.unwrap_or_default(), slot);
         info!("load_account_from_hssn: {}\n", url);
         let res = self.cosmos_client.call(url);
         let mut account: Option<AccountSharedData> = None;
@@ -367,21 +435,18 @@ impl RemoteAccountLoader {
 
         match account {
             Some(account) => {
-                if refresh {
-                    //load the account from the source
-                    cosmos::run_load_solana_account(pubkey.to_string().as_str(), "0", "", true);
-                    self.load_account_via_rpc(pubkey, source, refresh)
-                } else {
-                    self.account_cache.insert(pubkey.clone(), (account.clone(), Instant::now()));
-                    Some(account)
-                }
+                Some(account)
             },
             None => {
                 info!("load_account_from_hssn: not found: {:?}\n", pubkey);
-                if let Some(source) = source {
+                let account = self.load_account_via_rpc(pubkey, source, slot);
+                if let Some(account) = account {
                     //load the account from the source
-                    cosmos::run_load_solana_account(pubkey.to_string().as_str(), "0", source.to_string().as_str(), false);
-                    self.load_account_via_rpc(pubkey, Some(source), refresh)
+                    let version = format!("{:?}_{:?}", source.unwrap_or_default(), slot);
+                    if let Some(source) = source {
+                        cosmos::run_load_solana_account(pubkey.to_string().as_str(), version.as_str(), source.to_string().as_str(), false);
+                    }
+                    Some(account)
                 } else {
                     None
                 }
@@ -406,11 +471,11 @@ impl RemoteAccountLoader {
     }
 
     /// Deactivate the account in the cache.
-    pub fn deactivate_account(&self, pubkey: &Pubkey) {
+    pub fn deactivate_account(&self, slot: Slot, pubkey: &Pubkey) {
         if !self.enable || Self::ignored_account(pubkey) {
             return;
         }
-        // println!("RemoteAccountLoader.deactivate_account: {}", pubkey.to_string());
+        println!("RemoteAccountLoader.deactivate_account: {}, {}", pubkey.to_string(), slot);
         match self.get_account(pubkey) {
             Some(account) => {
                 self.account_cache.remove(pubkey);
@@ -481,7 +546,7 @@ impl RemoteAccountLoader {
             Ok(signature) => {
                 // println!("send_transaction_to_baselayer: success {:?}, {}", signature, time.as_us());
                 //reload the account
-                self.load_account_via_rpc(account, None, false);
+                self.load_account_via_rpc(account, None, 0);
                 Some(signature)
             },
             Err(e) => {
@@ -519,7 +584,7 @@ mod tests {
     fn test_remote_account_loader3() {
         let loader = RemoteAccountLoader::default();
         let pubkey = Pubkey::from_str("4WTUyXNcf6QCEj76b3aRDLPewkPGkXFZkkyf3A3vua1z").unwrap();
-        let account = loader.load_account(&pubkey, None, false);
+        let account = loader.load_account(0, &pubkey, None);
         assert_eq!(account.is_none(), true);
     }
 
@@ -527,7 +592,7 @@ mod tests {
     fn test_remote_account_loader4() {
         let loader = RemoteAccountLoader::default();
         let pubkey = Pubkey::from_str("4WTUyXNcf6QCEj76b3aRDLPewkPGkXFZkkyf3A3vua1z").unwrap();
-        loader.deactivate_account(&pubkey);
+        loader.deactivate_account(0, &pubkey);
         let account = loader.get_account(&pubkey);
         assert_eq!(account.is_none(), true);
     }
@@ -536,7 +601,7 @@ mod tests {
     fn test_remote_account_loader5() {
         let loader = RemoteAccountLoader::default();
         let pubkey = Pubkey::from_str("4WTUyXNcf6QCEj76b3aRDLPewkPGkXFZkkyf3A3vua1z").unwrap();
-        loader.deactivate_account(&pubkey);
+        loader.deactivate_account(0, &pubkey);
         let account = loader.has_account(&pubkey);
         assert_eq!(account, false);
     }
@@ -545,7 +610,7 @@ mod tests {
     fn test_remote_account_loader6() {
         let loader = RemoteAccountLoader::default();
         let pubkey = Pubkey::from_str("4WTUyXNcf6QCEj76b3aRDLPewkPGkXFZkkyf3A3vua1z").unwrap();
-        let account = loader.load_account(&pubkey, None, false);
+        let account = loader.load_account(0, &pubkey, None);
         assert_eq!(account.is_none(), true);
     }
 

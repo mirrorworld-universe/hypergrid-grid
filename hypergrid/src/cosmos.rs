@@ -11,7 +11,7 @@ use {
 
 const COSMOS_CHAIN_ID: &str = "hypergridssn";
 const COSMOS_HOME: &str = ".hypergrid-ssn";
-const COSMOS_APP: &str = " bin/hypergrid-ssnd";
+const COSMOS_APP: &str = "bin/hypergrid-ssnd";
 const COSMOS_SIGNER: &str = "my_key";
 
 pub fn run_load_solana_account(pub_key: &str, version:  &str, source: &str, update: bool) {
@@ -46,7 +46,7 @@ pub fn run_load_solana_account(pub_key: &str, version:  &str, source: &str, upda
     match output {
         Ok(output) => {
             let output_str = String::from_utf8_lossy(&output.stdout);
-            info!("output: {}", output_str);
+            info!("output: {:?}", output_str);
             // println!("{:?}", String::from_utf8_lossy(&output.stdout));
         },
         Err(e) => {

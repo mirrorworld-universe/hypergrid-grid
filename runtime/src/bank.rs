@@ -33,7 +33,8 @@
 //! It offers a high-level API that signs transactions
 //! on behalf of the caller, and a low-level API for when they have
 //! already been signed and verified.
-use rand::seq::index;
+use std::str::FromStr;
+
 #[cfg(feature = "dev-context-only-utils")]
 use solana_accounts_db::accounts_db::{
     ACCOUNTS_DB_CONFIG_FOR_BENCHMARKS, ACCOUNTS_DB_CONFIG_FOR_TESTING,
@@ -4796,14 +4797,12 @@ impl Bank {
     ) -> TransactionExecutionResult {
         let transaction_accounts = std::mem::take(&mut loaded_transaction.accounts);
 
-        // Sonic: print remote account info
-        // if !tx.is_simple_vote_transaction() {
-        //     for (pubkey, account) in transaction_accounts.iter() {
-        //         let index = transaction_accounts.iter().position(|(key, _)| key == pubkey).unwrap(); 
-        //         println!("Bank.execute_loaded_transaction():{:?} remote: {} writable {} ", pubkey, account.remote, tx.message().is_writable(index));
-        //     }
-        // }
-
+        //Sonic: check remote account migration.
+        if !tx.is_simple_vote_transaction() && self.check_remote_accounts(tx) {
+            println!("MessageProcessor::execute_loaded_transaction {:?}", tx.message());
+            return TransactionExecutionResult::NotExecuted(TransactionError::InstructionError(0, InstructionError::InvalidInstructionData));
+        }
+        
         fn transaction_accounts_lamports_sum(
             accounts: &[(Pubkey, AccountSharedData)],
             message: &SanitizedMessage,
@@ -4852,10 +4851,6 @@ impl Bank {
             programs_loaded_for_tx_batch.latest_root_epoch,
         );
         let mut process_message_time = Measure::start("process_message_time");
-        //Sonic: print message
-        // if !tx.is_simple_vote_transaction() {
-        //     println!("MessageProcessor::process_message {:?}", tx.message());
-        // }
         let process_result = MessageProcessor::process_message(
             tx.message(),
             &loaded_transaction.program_indices,
@@ -4949,13 +4944,19 @@ impl Bank {
             None
         };
 
-        let remote_signature = self.post_status_to_baselayer(&tx, log_messages.clone());
-        let mut log_messages = log_messages.clone();
-        if remote_signature.is_some() {
-            
-            log_messages.as_mut().map(|log_messages| {
-                log_messages.push(format!("Sonic BaseLayer Transaction Signature: {}", remote_signature.unwrap().to_string()));
-            });
+        //Sonic: post-execution handling
+        if !tx.is_simple_vote_transaction() && status.is_ok() {
+            //Socnic: migrate remote accounts.
+            self.migrate_remote_accounts(&tx, log_messages.clone()); 
+
+            //Sonic: post status to baselayer network.
+            let remote_signature = self.post_status_to_baselayer(&tx, log_messages.clone());
+            let mut log_messages = log_messages.clone();
+            if remote_signature.is_some() {
+                log_messages.as_mut().map(|log_messages| {
+                    log_messages.push(format!("Sonic BaseLayer Transaction Signature: {}", remote_signature.unwrap().to_string()));
+                });
+            }
         }
 
         TransactionExecutionResult::Executed {
@@ -4970,6 +4971,123 @@ impl Bank {
             },
             programs_modified_by_tx: Box::new(programs_modified_by_tx),
         }
+    }
+
+    ///Sonic: check remote accounts in transaction
+    fn check_remote_accounts(&self, tx: &SanitizedTransaction) -> bool {
+        let msg = tx.message();
+        let account_keys = msg.account_keys();
+        let mut has_account_inside = false;
+        msg.instructions().iter().for_each(|ix| {
+            if let Some(program_id) = account_keys.get(ix.program_id_index.into()) {
+                if !sonic_account_migrater_program::check_id(program_id) { 
+                    return;
+                }
+                //run the following codes in another thread.
+                match limited_deserialize(&ix.data) {
+                    Err(_) => {
+                        return;
+                    },
+                    Ok(instruction) => {
+                        match &instruction {
+                            sonic_account_migrater_program::instruction::ProgramInstruction::MigrateRemoteAccounts{addresses} => {
+                                for address in addresses {
+                                    if self.rc.accounts.accounts_db.account_in_indexes(address) {
+                                        has_account_inside = true;
+                                        return;
+                                    }
+                                }
+                            },
+                            sonic_account_migrater_program::instruction::ProgramInstruction::DeactivateRemoteAccounts{addresses} => {
+                                
+                            },
+                            sonic_account_migrater_program::instruction::ProgramInstruction::MigrateSourceAccounts { node_id, addresses} => {
+                                for address in addresses {
+                                    if self.rc.accounts.accounts_db.account_in_indexes(address) {
+                                        has_account_inside = true;
+                                        return;
+                                    }
+                                }
+                            },
+                        }
+                    },
+                }
+                if has_account_inside {
+                    return;
+                }
+            }
+        });
+        has_account_inside
+    }
+
+    ///Sonic: check remote accounts in transaction and migrate them.
+    fn migrate_remote_accounts(&self, tx: &SanitizedTransaction, log_messages: Option<Vec<String>>) {
+        let msg = tx.message();
+        let account_keys = msg.account_keys();
+        // println!("Bank.migrate_remote_accounts():{:?}", msg.instructions());
+        let accounts_cache = &self.rc.accounts.accounts_db.accounts_cache;
+        msg.instructions().iter().for_each(|ix| {
+            if let Some(program_id) = account_keys.get(ix.program_id_index.into()) {
+
+                if !sonic_account_migrater_program::check_id(program_id) { 
+                    return;
+                }
+                
+                log_messages.as_ref().map(|log_messages| {
+                    let re = Regex::new(r"Account (\w+) is migrated at slot (\d+) from (\w+)\.").unwrap();
+                    for log_message in log_messages.iter() {
+                        info!("log_message: {:?}", log_message);
+        
+                        //Sonic: send states to baselayer
+                        let caps = re.captures(log_message);
+                        if let Some(caps) = caps {
+                            let address = caps.get(1).map_or("", |m| m.as_str());
+                            let slot = caps.get(2).map_or("", |m| m.as_str());
+                            let node_id = caps.get(3).map_or("", |m| m.as_str());
+                            
+                            let address = Pubkey::from_str(address).unwrap();
+                            let slot = slot.parse::<u64>().unwrap();
+                            let source: Option<Pubkey> = Pubkey::from_str(node_id).map(Option::Some).unwrap_or(Option::None);
+
+                            println!("Bank.migrate_remote_accounts():MigrateRemoteAccounts address: {:?} slot: {:?} node_id: {:?}", address, slot, source);
+                            accounts_cache.load_accounts_from_remote(slot, vec![address], source);
+                        }
+                    }
+                }); 
+
+                // let slot = self.slot();
+                // let data = ix.data.clone();
+
+                // //run the following codes in another thread.
+                // match limited_deserialize(&data) {
+                //     Err(_) => {
+                //         info!("Bank.check_remote_accounts():limited_deserialize error");
+                //         return;
+                //     },
+                //     Ok(instruction) => {
+                //         info!("Bank.check_remote_accounts():limited_deserialize ok, {:?}", instruction);
+                //         match &instruction {
+                //             sonic_account_migrater_program::instruction::ProgramInstruction::MigrateRemoteAccounts{addresses} => {
+                //                 //load remote account...
+                //                 info!("Bank.check_remote_accounts():MigrateRemoteAccounts");
+
+                //                 accounts_cache.load_accounts_from_remote(slot, addresses.to_vec(), None);
+                //             },
+                //             sonic_account_migrater_program::instruction::ProgramInstruction::DeactivateRemoteAccounts{addresses} => {
+                //                 //deactivate remote account...
+                //                 info!("Bank.check_remote_accounts():DeactivateRemoteAccounts");
+                //                 accounts_cache.deactivate_remote_accounts(slot, addresses.to_vec());
+                //             },
+                //             sonic_account_migrater_program::instruction::ProgramInstruction::MigrateSourceAccounts { addresses, node_id} => {
+                //                 //load remote account from source...
+                //                 info!("Bank.check_remote_accounts():MigrateSourceAccounts node_id: {:?} refresh: {:?}", node_id);
+                //                 accounts_cache.load_accounts_from_remote(slot, addresses.to_vec(), Some(*node_id));
+                //             },
+                //         }
+                //     },
+                // }
+            }
+        });
     }
 
     ///Sonic: post status to baselayer network.
@@ -5114,55 +5232,6 @@ impl Bank {
         loaded_programs_for_txs.unwrap()
     }
 
-    ///Sonic: check remote accounts in transaction
-    fn check_remote_accounts(&self, tx: &SanitizedTransaction) {
-        if tx.is_simple_vote_transaction() {
-            return;
-        }
-        let msg = tx.message();
-        let account_keys = msg.account_keys();
-        // println!("Bank.check_remote_accounts():{:?}", msg.instructions());
-        msg.instructions().iter().for_each(|ix| {
-            if let Some(program_id) = account_keys.get(ix.program_id_index.into()) {
-
-                if !sonic_account_migrater_program::check_id(program_id) { 
-                    return;
-                }
-                match limited_deserialize(&ix.data) {
-                    Err(_) => {
-                        return;
-                    },
-                    Ok(instruction) => {
-                        ix.accounts.iter().for_each(|account_index| {
-                            if msg.is_signer((*account_index).into()) || *account_index == ix.program_id_index {
-                                return;
-                            }
-                            let mut accounts:Vec<Pubkey> = vec![];
-                            if let Some(account_key) = account_keys.get((*account_index).into()) {
-                                accounts.push(*account_key);
-                            }
-                            match instruction {
-                                sonic_account_migrater_program::instruction::ProgramInstruction::MigrateRemoteAccounts => {
-                                    //load remote account...
-                                    self.rc.accounts.accounts_db.accounts_cache.load_accounts_from_remote(accounts, None, false);
-                                },
-                                sonic_account_migrater_program::instruction::ProgramInstruction::DeactivateRemoteAccounts => {
-                                    //deactivate remote account...
-                                    self.rc.accounts.accounts_db.accounts_cache.deactivate_remote_accounts(accounts);
-                                },
-                                sonic_account_migrater_program::instruction::ProgramInstruction::MigrateSourceAccounts { node_id, refresh } => {
-                                    //load remote account from source...
-                                    info!("Bank.check_remote_accounts():MigrateSourceAccounts node_id: {:?} refresh: {:?}", node_id, refresh);
-                                    self.rc.accounts.accounts_db.accounts_cache.load_accounts_from_remote(accounts, Some(node_id), refresh);
-                                },
-                            }
-                        });
-                    },
-                }
-            }
-        });
-    }
-
     /// Returns a hash map of executable program accounts (program accounts that are not writable
     /// in the given transactions), and their owners, for the transactions with a valid
     /// blockhash or nonce.
@@ -5186,7 +5255,7 @@ impl Bank {
                     })
                     .is_some()
                 {
-                    self.check_remote_accounts(tx); //Socnic: check remote accounts
+                    // self.check_remote_accounts(tx); //Socnic: check remote accounts
                     tx.message()
                         .account_keys()
                         .iter()

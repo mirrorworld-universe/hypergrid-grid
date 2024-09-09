@@ -20,7 +20,6 @@
 
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
-use crate::inline_spl_token;
 
 use {
     crate::{
@@ -97,6 +96,7 @@ use {
         saturating_add_assign,
         timing::AtomicInterval,
         transaction::SanitizedTransaction,
+        sonic_account_migrater::{self, state::MigratedAccountsState},
     },
     std::{
         borrow::{Borrow, Cow},
@@ -113,6 +113,7 @@ use {
         },
         thread::{sleep, Builder},
         time::{Duration, Instant},
+        thread,
     },
     tempfile::TempDir,
 };
@@ -2579,6 +2580,7 @@ impl AccountsDb {
                 std::fs::create_dir_all(path).expect("Create directory failed.");
             }
         }
+        // new.restore_remote_accounts();
         new
     }
 
@@ -2830,6 +2832,36 @@ impl AccountsDb {
             })
             .unwrap();
         self.sender_bg_hasher = Some(sender);
+    }
+
+    pub fn account_in_indexes(&self, pubkey: &Pubkey) -> bool {
+        match self.accounts_index.get(pubkey, None, None) {
+            AccountIndexGetResult::Found(_, _) => true,
+            AccountIndexGetResult::NotFound => false,
+        }
+    }
+
+    ///Sonic: restore remote accounts from the migrated accounts
+    fn restore_remote_accounts(&self) {
+        info!("restore_remote_accounts: {:?}", thread::current().id());
+        let pubkey = sonic_account_migrater::migrated_accounts::id();
+        let ancestors = Ancestors::default();
+        let result = self.load(&ancestors, &pubkey, LoadHint::Unspecified);
+        if let Some((account, _slot)) = result {
+            let state = bincode::deserialize(account.data()).unwrap();
+            if let MigratedAccountsState::MigratedAccounts(accounts) = state {
+                accounts.iter().for_each(|item | {
+                    if self.account_in_indexes(&item.address) {
+                        info!("restore_remote_accounts: already exists: slot: {:?}, address: {:?}, source: {:?}", item.slot, item.address, item.source);
+                        return;
+                    }
+                    info!("restore_remote_accounts: slot: {:?}, address: {:?}, source: {:?}", item.slot, item.address, item.source);
+                    self.accounts_cache.load_accounts_from_remote(item.slot, vec![item.address], item.source)
+                });
+            }
+        } else {
+            warn!("restore_remote_accounts: failed to load migrated accounts at {:?}", pubkey);
+        }
     }
 
     #[must_use]
@@ -7726,20 +7758,19 @@ impl AccountsDb {
             let mut lamports: u64 = 0;
             for chis in cache_hash_intermediates.clone() {
                 for item in chis {
-                    if item.pubkey.to_string().contains("11111111111111111") && 
-                       item.pubkey != inline_spl_token::native_mint::id() {
+                    if item.pubkey.to_string().contains("11111111111111111") {
                         continue;
                     }
                     if self.accounts_cache.has_account_from_remote(&item.pubkey){
-                        // println!("_calculate_accounts_hash_from_storages, remote key: {:?}", item);
+                        info!("_calculate_accounts_hash_from_storages, remote key: {:?}", item);
                         lamports += item.lamports;
                     } else {
                         //Sonic: if the account is not in accounts_index, assume it was from a remote account.
                         match self.accounts_index.get(&item.pubkey, config.ancestors, Some(slot)) {
                             // we bail out pretty early for missing.
                             AccountIndexGetResult::NotFound => {
-                                // println!("_calculate_accounts_hash_from_storages, missing key: {:?}", item);
-                                lamports += item.lamports;
+                                info!("_calculate_accounts_hash_from_storages, missing key: {:?}", item);
+                                // lamports += item.lamports;
                             },
                             _ => {},
                         }
@@ -9309,6 +9340,9 @@ impl AccountsDb {
         }
 
         self.accounts_index.log_secondary_indexes();
+
+        //Sonic: restore remote accounts once the index is generated
+        self.restore_remote_accounts();
 
         IndexGenerationInfo {
             accounts_data_len: accounts_data_len.load(Ordering::Relaxed),
