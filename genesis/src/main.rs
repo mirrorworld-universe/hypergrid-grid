@@ -33,6 +33,7 @@ use {
         signer::keypair::read_keypair_file,
         stake::state::StakeStateV2,
         system_program, timing,
+        sonic_account_migrater,
     },
     solana_stake_program::stake_state,
     solana_vote_program::vote_state::{self, VoteState},
@@ -104,6 +105,48 @@ pub fn load_genesis_accounts(file: &str, genesis_config: &mut GenesisConfig) -> 
     }
 
     Ok(lamports)
+}
+
+// Sonic: Add custom accounts to the genesis config
+fn add_custom_accounts(
+    genesis_config: &mut GenesisConfig,
+) {
+    // Sonic: Add the native mint
+    println!("Adding account {:?} to the genesis config", inline_spl_token::native_mint::id());
+    let native_mint_account = solana_sdk::account::AccountSharedData::from(Account {
+        owner: inline_spl_token::id(),
+        data: inline_spl_token::native_mint::ACCOUNT_DATA.to_vec(),
+        lamports: sol_to_lamports(1.),
+        executable: false,
+        rent_epoch: 18446744073709551615,
+    });
+    genesis_config.add_account(inline_spl_token::native_mint::id(), native_mint_account);
+
+    // Sonic: Add the native mint 2022
+    println!("Adding account {:?} to the genesis config", inline_spl_token_2022::native_mint::id());
+    let native_mint_account = solana_sdk::account::AccountSharedData::from(Account {
+        owner: inline_spl_token_2022::id(),
+        data: inline_spl_token::native_mint::ACCOUNT_DATA.to_vec(),
+        lamports: sol_to_lamports(1.),
+        executable: false,
+        rent_epoch: 18446744073709551615,
+    });
+    genesis_config.add_account(inline_spl_token_2022::native_mint::id(), native_mint_account);
+
+    // Sonic: Add Sonic account migrater
+    println!("Adding account {:?} to the genesis config", sonic_account_migrater::migrated_accounts::id());
+    let migrater_data_account = solana_sdk::account::AccountSharedData::from(Account {
+        owner: sonic_account_migrater::program::id(),
+        data: vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
+                   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
+                   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 
+        lamports: sol_to_lamports(100.),
+        executable: false,
+        rent_epoch: 1,
+    });
+    genesis_config.add_account(sonic_account_migrater::migrated_accounts::id(), migrater_data_account);
 }
 
 #[allow(clippy::cognitive_complexity)]
@@ -691,25 +734,8 @@ fn main() -> Result<(), Box<dyn error::Error>> {
         }
     }
 
-    // Sonic: Add the native mint
-    let native_mint_account = solana_sdk::account::AccountSharedData::from(Account {
-        owner: inline_spl_token::id(),
-        data: inline_spl_token::native_mint::ACCOUNT_DATA.to_vec(),
-        lamports: sol_to_lamports(1.),
-        executable: false,
-        rent_epoch: 18446744073709551615,
-    });
-    genesis_config.add_account(inline_spl_token::native_mint::id(), native_mint_account);
-
-    // Sonic: Add the native mint 2022
-    let native_mint_account = solana_sdk::account::AccountSharedData::from(Account {
-        owner: inline_spl_token_2022::id(),
-        data: inline_spl_token::native_mint::ACCOUNT_DATA.to_vec(),
-        lamports: sol_to_lamports(1.),
-        executable: false,
-        rent_epoch: 18446744073709551615,
-    });
-    genesis_config.add_account(inline_spl_token_2022::native_mint::id(), native_mint_account);
+    // Sonic: Add custom accounts to the genesis config
+    add_custom_accounts(&mut genesis_config);
 
     solana_logger::setup();
     create_new_ledger(
