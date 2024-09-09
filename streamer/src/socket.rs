@@ -27,7 +27,8 @@ impl SocketAddrSpace {
                 // TODO: Consider excluding:
                 //    addr.is_link_local() || addr.is_broadcast()
                 // || addr.is_documentation() || addr.is_unspecified()
-                !(addr.is_private() || addr.is_loopback())
+                // !(addr.is_private() || addr.is_loopback()) //Sonic: commented out
+                !addr.is_loopback()
             }
             IpAddr::V6(addr) => {
                 // TODO: Consider excluding:
