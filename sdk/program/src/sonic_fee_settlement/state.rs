@@ -10,7 +10,7 @@ use {
 pub enum SettlementState {
     /// Account is not initialized.
     Uninitialized,
-    /// Initialized `LookupTable` account.
+    /// Initialized `Settlement` account.
     FeeBillSettled(SettlementAccount),
 }
 
