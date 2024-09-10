@@ -5035,10 +5035,10 @@ impl Bank {
                 
                 log_messages.as_ref().map(|log_messages| {
                     let re = Regex::new(r"Account (\w+) is migrated at slot (\d+) from (\w+)\.").unwrap();
+                    let re2 = Regex::new(r"Account (\w+) is deactivated in cache\.").unwrap();
                     for log_message in log_messages.iter() {
                         info!("log_message: {:?}", log_message);
         
-                        //Sonic: send states to baselayer
                         let caps = re.captures(log_message);
                         if let Some(caps) = caps {
                             let address = caps.get(1).map_or("", |m| m.as_str());
@@ -5051,6 +5051,14 @@ impl Bank {
 
                             println!("Bank.migrate_remote_accounts():MigrateRemoteAccounts address: {:?} slot: {:?} node_id: {:?}", address, slot, source);
                             accounts_cache.load_accounts_from_remote(slot, vec![address], source);
+                        } else {
+                            let caps = re2.captures(log_message);
+                            if let Some(caps) = caps {
+                                let address = caps.get(1).map_or("", |m| m.as_str());
+                                let address = Pubkey::from_str(address).unwrap();
+                                println!("Bank.migrate_remote_accounts():DeactivateRemoteAccounts address: {:?}", address);
+                                accounts_cache.deactivate_remote_accounts(self.slot, vec![address]);
+                            }
                         }
                     }
                 }); 
