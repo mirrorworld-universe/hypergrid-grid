@@ -32,6 +32,7 @@ pub fn run_load_solana_account(pub_key: &str, version:  &str, source: &str, upda
     let app_path = std::path::Path::new(&cosmos_app_path);
     if !app_path.exists() {
         warn!("{} does not exist.", cosmos_app_path);
+        return;
     }
     
     //format the command string

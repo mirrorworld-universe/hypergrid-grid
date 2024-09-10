@@ -245,7 +245,7 @@ impl RemoteAccountLoader {
                         data,
                         "base58"
                     ],
-                    "owner": account.owner(),
+                    "owner": account.owner().to_string(),
                     "executable": account.executable(),
                     "rent_epoch": account.rent_epoch(),
                 });
