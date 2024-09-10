@@ -31,7 +31,7 @@ impl Default for Config {
         let keypair_base58 = "5gA6JTpFziXu7py2j63arRUq1H29p6pcPMB74LaNuzcSqULPD6s1SZUS3UMPvFEE9oXmt1kk6ez3C6piTc3bwpJ6".to_string();
         let baselayer_rpc_url = "https://api.devnet.solana.com".to_string();
         let sonic_program_id ="4WTUyXNcf6QCEj76b3aRDLPewkPGkXFZkkyf3A3vua1z".to_string();
-        let hssn_rpc_url: String = "http://localhost:1317".to_string();
+        let hssn_rpc_url: String = "https://api.hypergrid.dev".to_string();
         let accounts_path: String = "hypergrid/accounts".to_string();
 
         Self {

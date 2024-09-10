@@ -28,6 +28,11 @@ pub fn run_load_solana_account(pub_key: &str, version:  &str, source: &str, upda
         _path.extend([COSMOS_HOME, COSMOS_APP]);
         _path.to_str().unwrap().to_string()
     };
+
+    let app_path = std::path::Path::new(&cosmos_app_path);
+    if !app_path.exists() {
+        warn!("{} does not exist.", cosmos_app_path);
+    }
     
     //format the command string
     let cmd_str: String;

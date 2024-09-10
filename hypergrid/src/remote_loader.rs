@@ -220,6 +220,13 @@ impl RemoteAccountLoader {
 
     fn save_account_to_local_file(&self, slot: Slot, pubkey: &Pubkey, source: Option<Pubkey>, account: AccountSharedData) {
         let path = format!("{}/{:?}_{:?}_{:?}.json", self.config.accounts_path, pubkey, source.unwrap_or_default(), slot);
+
+        //make sure the directory exists
+        let dir = std::path::Path::new(&path).parent().unwrap();
+        if !dir.exists() {
+            std::fs::create_dir_all(dir).unwrap_or_default();
+        }
+
         println!("save_account_to_local_file: {}\n", path);
         let file = File::create(path.clone());
         match file {
@@ -274,7 +281,7 @@ impl RemoteAccountLoader {
                 if node.value().role == 2 || node.value().role == 3 || node.value().role == 4 {
                     rpc_url = node.value().rpc.clone();
                 } else {
-                    info!("load_account_via_rpc: invalid source role: {}", node.value().role);
+                    info!("load_account_via_rpc: invalid source role: {:?}, {:?}, {:?}", node.value().name, node.value().pubkey, node.value().role);
                     return None;
                 }
             }
