@@ -4799,7 +4799,7 @@ impl Bank {
 
         //Sonic: check remote account migration.
         if !tx.is_simple_vote_transaction() && self.check_remote_accounts(tx) {
-            println!("MessageProcessor::execute_loaded_transaction {:?}", tx.message());
+            //Sonic: throw Error if there is local account in account parameters.
             return TransactionExecutionResult::NotExecuted(TransactionError::InstructionError(0, InstructionError::InvalidInstructionData));
         }
         
@@ -4973,17 +4973,17 @@ impl Bank {
         }
     }
 
-    ///Sonic: check remote accounts in transaction
+    ///Sonic: check if there is local account in account parameters in sonic_account_migrater_program instruction
     fn check_remote_accounts(&self, tx: &SanitizedTransaction) -> bool {
         let msg = tx.message();
         let account_keys = msg.account_keys();
-        let mut has_account_inside = false;
+        let mut has_local_account = false;
         msg.instructions().iter().for_each(|ix| {
             if let Some(program_id) = account_keys.get(ix.program_id_index.into()) {
                 if !sonic_account_migrater_program::check_id(program_id) { 
                     return;
                 }
-                //run the following codes in another thread.
+
                 match limited_deserialize(&ix.data) {
                     Err(_) => {
                         return;
@@ -4993,18 +4993,18 @@ impl Bank {
                             sonic_account_migrater_program::instruction::ProgramInstruction::MigrateRemoteAccounts{addresses} => {
                                 for address in addresses {
                                     if self.rc.accounts.accounts_db.account_in_indexes(address) {
-                                        has_account_inside = true;
+                                        has_local_account = true;
                                         return;
                                     }
                                 }
                             },
-                            sonic_account_migrater_program::instruction::ProgramInstruction::DeactivateRemoteAccounts{addresses} => {
+                            sonic_account_migrater_program::instruction::ProgramInstruction::DeactivateRemoteAccounts{addresses: _} => {
                                 
                             },
-                            sonic_account_migrater_program::instruction::ProgramInstruction::MigrateSourceAccounts { node_id, addresses} => {
+                            sonic_account_migrater_program::instruction::ProgramInstruction::MigrateSourceAccounts { node_id: _, addresses} => {
                                 for address in addresses {
                                     if self.rc.accounts.accounts_db.account_in_indexes(address) {
-                                        has_account_inside = true;
+                                        has_local_account = true;
                                         return;
                                     }
                                 }
@@ -5012,15 +5012,15 @@ impl Bank {
                         }
                     },
                 }
-                if has_account_inside {
+                if has_local_account {
                     return;
                 }
             }
         });
-        has_account_inside
+        has_local_account
     }
 
-    ///Sonic: check remote accounts in transaction and migrate them.
+    ///Sonic: check transaction log messages and migrate/deactivate remote accounts.
     fn migrate_remote_accounts(&self, tx: &SanitizedTransaction, log_messages: Option<Vec<String>>) {
         let msg = tx.message();
         let account_keys = msg.account_keys();

@@ -287,8 +287,8 @@ impl RemoteAccountLoader {
             }
         }
 
-        println!("Thread {:?}: load_account_via_rpc: {:?} from {:?}",  thread::current().id(), pubkey, rpc_url.clone());
-        info!("Thread {:?}: load_account_via_rpc: {:?} from {:?}",  thread::current().id(), pubkey, rpc_url.clone());
+        println!("Thread {:?}: load_account_via_rpc: {:?} at slot {:?} from {:?}",  thread::current().id(), pubkey, slot, rpc_url.clone());
+        info!("Thread {:?}: load_account_via_rpc: {:?} at slot {:?} from {:?}",  thread::current().id(), pubkey, slot, rpc_url.clone());
 
         let rpc_client = RpcClient::new_with_timeout_and_commitment(rpc_url, Duration::from_secs(30), CommitmentConfig::confirmed());
 
