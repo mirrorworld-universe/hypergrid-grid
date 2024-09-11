@@ -17,7 +17,7 @@ where
     Ok(config)
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone)]
 pub struct Config {
     pub baselayer_rpc_url: String,
     pub hssn_rpc_url: String,

@@ -2,7 +2,7 @@ use {
     crate::{config::Config, cosmos}, base64::{self, Engine}, core::fmt, dashmap::DashMap, log::*, serde_derive::{Deserialize, Serialize}, serde_json::json, sha2::{Digest, Sha256}, solana_client::rpc_client::RpcClient, solana_measure::measure::Measure, solana_sdk::{
         account::{AccountSharedData, ReadableAccount, WritableAccount}, account_utils::StateMut, bpf_loader_upgradeable::{self, UpgradeableLoaderState}, clock::Slot, commitment_config::CommitmentConfig, instruction::{AccountMeta, Instruction}, pubkey::Pubkey, signature::{Keypair, Signature, Signer}, transaction::Transaction
     }, std::{
-        fs::File, option_env, str::FromStr, sync::Arc, thread, time::Duration
+        fs::File, io::Write, option_env, str::FromStr, thread, time::Duration
     }, zstd
 };
 
@@ -18,15 +18,12 @@ struct HypergridNode {
     pub role: i32,
 }
 
-type HypergridNodes = DashMap<Pubkey, HypergridNode>;
-
 pub struct RemoteAccountLoader {
     ///RPC client used to send requests to the remote.
     rpc_client: RpcClient,
     cosmos_client: cosmos::HttpClient,
     /// Cache of accounts loaded from the remote.
-    account_cache: Arc<AccountCacheKeyMap>,
-    hypergrid_nodes: HypergridNodes,
+    account_cache: AccountCacheKeyMap,
     /// Enable or disable the remote loader.
     enable: bool,
     config: Config,
@@ -99,8 +96,7 @@ impl RemoteAccountLoader {
             rpc_client: RpcClient::new_with_timeout_and_commitment(&config.baselayer_rpc_url, 
             Duration::from_secs(30), CommitmentConfig::confirmed()),
             cosmos_client: cosmos::HttpClient::new(Duration::from_secs(30)),
-            account_cache: Arc::new(AccountCacheKeyMap::default()),
-            hypergrid_nodes: HypergridNodes::default(),
+            account_cache: AccountCacheKeyMap::default(),
             enable: true,
             config,
         }
@@ -272,19 +268,9 @@ impl RemoteAccountLoader {
             return None;
         }
 
-        let mut rpc_url = self.config.baselayer_rpc_url.clone();
-        if let Some(source) = source {
-            if self.hypergrid_nodes.len() < 1 || self.hypergrid_nodes.get(&source).is_none() {
-                self.load_hypergrid_nodes();
-            }
-            if let Some(node) = self.hypergrid_nodes.get(&source) {
-                if node.value().role == 2 || node.value().role == 3 || node.value().role == 4 {
-                    rpc_url = node.value().rpc.clone();
-                } else {
-                    info!("load_account_via_rpc: invalid source role: {:?}, {:?}, {:?}", node.value().name, node.value().pubkey, node.value().role);
-                    return None;
-                }
-            }
+        let rpc_url = self.get_rpc_url_by_source(source, slot);
+        if rpc_url.eq("") {
+            return None;
         }
 
         println!("Thread {:?}: load_account_via_rpc: {:?} at slot {:?} from {:?}",  thread::current().id(), pubkey, slot, rpc_url.clone());
@@ -314,6 +300,49 @@ impl RemoteAccountLoader {
                 error!("load_account_via_rpc: failed to load account: {:?}\n", e);
                 None
             }
+        }
+    }
+
+    fn get_rpc_url_by_source(&self, source: Option<Pubkey>, slot: Slot) -> String {
+        if let Some(source) = source {
+            let path = format!("{}/hypergrid_{:?}_{:?}.json", self.config.accounts_path, source, slot);
+            println!("load hypergrid node from file: {}\n", path);
+            let file = File::open(path);
+            match file {
+                Ok(file) => {
+                    // read file content to json
+                    let _data: serde_json::Value = serde_json::from_reader(file).unwrap();
+                    debug!("load_account_from_local_file: account_data: {:?}", _data);
+                    let node = _data.get("hypergridNode").unwrap();
+                    let node_id = node["pubkey"].as_str().unwrap();
+                    let node_name = node["name"].as_str().unwrap();
+                    let node_url = node["rpc"].as_str().unwrap();
+                    let node_role = node["role"].as_i64().unwrap();
+                    // println!("node: {}, {}", node_id, node_url);
+
+                    if node_role == 2 || node_role == 3 || node_role == 4 {
+                        return node_url.to_string();
+                    } else {
+                        info!("load hypergrid node from file: invalid source role: {:?}, {:?}, {:?}", node_name, node_id, node_role);
+                        return "".to_string();
+                    }
+                },
+                Err(e) => {
+                    info!("load hypergrid node from file: failed to open file: {:?}\n", e);
+                }
+            }
+
+            let node = Self::load_hypergrid_node(self.config.clone(), source, slot);
+            if let Some(node) = node {
+                if node.role == 2 || node.role == 3 || node.role == 4 {
+                    return node.rpc;
+                } else {
+                    info!("load_account_via_rpc: invalid source role: {:?}, {:?}, {:?}", node.name, node.pubkey, node.role);
+                }
+            }
+            return "".to_string();
+        } else {
+            self.config.baselayer_rpc_url.clone()
         }
     }
 
@@ -377,40 +406,73 @@ impl RemoteAccountLoader {
         Some(account)
     }
 
-    fn load_hypergrid_nodes(&self) {
-        let url = format!("{}/hypergrid-ssn/hypergridssn/hypergrid_node", self.config.hssn_rpc_url);
+    fn load_hypergrid_node(config: Config, source: Pubkey, slot: Slot) -> Option<HypergridNode> {
+        let url = format!("{}/hypergrid-ssn/hypergridssn/hypergrid_node/{}", config.hssn_rpc_url, source.to_string());
         info!("load_hypergrid_nodes: {}\n", url);
-        // let client = cosmos::HttpClient::new(Duration::from_secs(30));
-        let res = self.cosmos_client.call(url);
+        let client = cosmos::HttpClient::new(Duration::from_secs(30));
+        let res = client.call(url.clone());
         if let Ok(body) = res {
-            // println!("respone: {}", body);
+            //sace the response to local file
+            let path = format!("{}/hypergrid_{:?}_{:?}.json", config.accounts_path, source, slot);
+            let dir = std::path::Path::new(&path).parent().unwrap();
+            if !dir.exists() {
+                std::fs::create_dir_all(dir).unwrap_or_default();
+            }
+
+            println!("save hypergrid node to local file: {}\n", path);
+            let file = File::create(path.clone());
+            match file {
+                Ok(mut file) => {
+                    let result = file.write_all(body.as_bytes());
+                    match result {
+                        Ok(_) => {
+                            info!("save hypergrid node to local file: success: {}\n", path);
+                        },
+                        Err(e) => {
+                            warn!("save hypergrid node to local file: failed to write file: {:?}\n", e);
+                        }
+                    }
+                },
+                Err(e) => {
+                    warn!("save hypergrid node to local file: failed to create file: {:?}\n", e);
+                }
+            }
+
             //convert the response body to json
             let value: serde_json::Result<serde_json::Value> = serde_json::from_str(&body);
             if let Ok(value) = value {
                 // let value: serde_json::Value = value.unwrap();
                 
-                let nodes = value["hypergridNode"].as_array().unwrap();
-                // println!("load_hypergrid_nodes: success: {:?}\n", nodes);
-                for node in nodes {
-                    // println!("load_hypergrid_nodes: node: {:?}\n", node);
-                    let node_id = node["pubkey"].as_str().unwrap();
-                    let node_name = node["name"].as_str().unwrap();
-                    let node_url = node["rpc"].as_str().unwrap();
-                    let node_role = node["role"].as_i64().unwrap();
-                    // println!("node: {}, {}", node_id, node_url);
-                    self.hypergrid_nodes.insert(Pubkey::from_str(node_id).unwrap(), 
-                    HypergridNode {
-                        pubkey: Pubkey::from_str(node_id).unwrap(),
-                        name: node_name.to_string(),
-                        rpc: node_url.to_string(),
-                        role: node_role as i32,
-                    });
-                }
+                let node = value.get("hypergridNode").unwrap();
+                // println!("load_hypergrid_node: success: {:?}\n", node);
+                let node_id = node["pubkey"].as_str().unwrap();
+                let node_name = node["name"].as_str().unwrap();
+                let node_url = node["rpc"].as_str().unwrap();
+                let node_role = node["role"].as_i64().unwrap();
+                let node = HypergridNode {
+                    pubkey: Pubkey::from_str(node_id).unwrap(),
+                    name: node_name.to_string(),
+                    rpc: node_url.to_string(),
+                    role: node_role as i32,
+                };
+
+                return Some(node);
             }
-            return;
         }
-        warn!("get_hypergrid_nodes: not found: {:?}\n", self.config.hssn_rpc_url);
+        warn!("get_hypergrid_nodes: not found: {:?}\n", url.clone());
+        None
     }
+
+    // fn load_hypergrid_nodes(&self) {
+    //     let config = self.config.clone();
+    //     let hypergrid_nodes = self.hypergrid_nodes.clone();
+    //     thread::Builder::new()
+    //         .name("load_hypergrid_nodes".to_string())
+    //         .spawn(move || {
+    //             Self::do_load_hypergrid_nodes(config, hypergrid_nodes);
+    //         })
+    //         .unwrap();
+    // }
 
     fn load_account_via_hssn(&self, pubkey: &Pubkey, source: Option<Pubkey>, slot: Slot) -> Option<AccountSharedData> {
         if Self::ignored_account(pubkey) {
