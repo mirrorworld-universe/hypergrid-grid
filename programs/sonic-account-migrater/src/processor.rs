@@ -226,7 +226,10 @@ impl Processor {
             accouts.remove(address);
         }
         
-        data_account.set_state(&MigratedAccountsState::MigratedAccounts(accouts.values().cloned().collect::<Vec<MigratedAccount>>()))?;
+        // data_account.set_state(&MigratedAccountsState::MigratedAccounts(accouts.values().cloned().collect::<Vec<MigratedAccount>>()))?;
+        let state = MigratedAccountsState::MigratedAccounts(accouts.values().cloned().collect::<Vec<MigratedAccount>>());
+        let serialized_data = bincode::serialize(&state).map_err(|_| InstructionError::GenericError)?;
+        data_account.set_data_from_slice(&serialized_data)?;
 
         let clock = invoke_context.get_sysvar_cache().get_clock()?;
         ic_msg!(invoke_context, "{} Remote Accounts are already deactivated at slot {}.", addresses.len(), clock.slot);
