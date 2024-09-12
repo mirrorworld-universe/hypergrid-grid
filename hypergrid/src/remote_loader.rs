@@ -2,8 +2,8 @@ use {
     crate::{config::Config, cosmos}, base64::{self, Engine}, core::fmt, dashmap::DashMap, log::*, serde_derive::{Deserialize, Serialize}, serde_json::json, sha2::{Digest, Sha256}, solana_client::rpc_client::RpcClient, solana_measure::measure::Measure, solana_sdk::{
         account::{AccountSharedData, ReadableAccount, WritableAccount}, account_utils::StateMut, bpf_loader_upgradeable::{self, UpgradeableLoaderState}, clock::Slot, commitment_config::CommitmentConfig, instruction::{AccountMeta, Instruction}, pubkey::Pubkey, signature::{Keypair, Signature, Signer}, transaction::Transaction
     }, std::{
-        fs::File, io::Write, option_env, str::FromStr, thread, time::Duration
-    }, zstd
+        fs::File, io::Write, option_env, str::FromStr, sync::Arc, thread, time::Duration
+    }, tokio, zstd
 };
 
 
@@ -27,6 +27,7 @@ pub struct RemoteAccountLoader {
     /// Enable or disable the remote loader.
     enable: bool,
     config: Config,
+    runtime: Option<tokio::runtime::Runtime>,
 }
 
 impl fmt::Debug for RemoteAccountLoader {
@@ -99,7 +100,15 @@ impl RemoteAccountLoader {
             account_cache: AccountCacheKeyMap::default(),
             enable: true,
             config,
+            runtime: Some(
+                tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(4).build().unwrap()
+            ),
         }
+    }
+
+    pub fn runtime(&self) -> &tokio::runtime::Runtime {
+        self.runtime.as_ref().expect("runtime")
     }
 
     /// Check if the account should be ignored.
@@ -140,6 +149,28 @@ impl RemoteAccountLoader {
             true => true,
             false => false, //self.load_account(pubkey).is_some(),
         }
+    }
+
+    pub fn load_accounts(remote_loader: &Arc<Self>, slot: Slot, pubkeys: Vec<Pubkey>, source: Option<Pubkey>) {
+        let loader = remote_loader.clone();
+        remote_loader.runtime().spawn(async move {
+            // println!("AccountsCache::load_accounts_from_remote, {:?}", pubkeys);
+            pubkeys.iter().for_each(|pubkey| {
+                //Sonic: load from remote
+                loader.load_account(slot, pubkey, source);
+            });
+        });
+    }
+
+    pub fn deactivate_accounts(remote_loader: &Arc<Self>, slot: Slot, pubkeys: Vec<Pubkey>) {
+        let loader = remote_loader.clone();
+        remote_loader.runtime().spawn(async move {
+            // println!("AccountsCache::deactivate_remote_accounts, {:?}", pubkeys);
+            pubkeys.iter().for_each(|pubkey| {
+                //Sonic: deactivate account in cache
+                loader.deactivate_account(slot, &pubkey);
+            });
+        });
     }
 
     /// Load the account from the RPC.
