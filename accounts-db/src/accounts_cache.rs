@@ -9,7 +9,7 @@ use {
         sync::{
             atomic::{AtomicBool, AtomicU64, Ordering},
             Arc, RwLock,
-        }, thread,
+        },
     }
 };
 
