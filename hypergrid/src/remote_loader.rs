@@ -603,8 +603,12 @@ impl RemoteAccountLoader {
     /// Send a transaction to the base layer to update the status of the account.
     pub fn send_status_to_baselayer(&self, program_id: &Pubkey, account: &Pubkey, value:u64) -> Option<Signature> {
         let mut time = Measure::start("load_account_from_remote");
-        let payer = Keypair::read_from_file(&self.config.keypair_file).unwrap();
-        // let payer = Keypair::from_base58_string(&self.config.keypair_base58);
+        let keypair = Keypair::read_from_file(&self.config.keypair_file);
+        if let Err(e) = keypair {
+            error!("send_status_to_baselayer: failed to read keypair: {:?}", e);
+            return None;
+        }
+        let payer = keypair.unwrap();
         // let program_id = Pubkey::from_str(SONIC_PROGRAM_ID).unwrap();
 
         let setlocker_data = SetLockerInstruction {
