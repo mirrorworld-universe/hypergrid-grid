@@ -1,6 +1,6 @@
 use {
     crate::{config::Config, cosmos}, base64::{self, Engine}, core::fmt, dashmap::DashMap, log::*, serde_derive::{Deserialize, Serialize}, serde_json::json, sha2::{Digest, Sha256}, solana_client::rpc_client::RpcClient, solana_measure::measure::Measure, solana_sdk::{
-        account::{AccountSharedData, ReadableAccount, WritableAccount}, account_utils::StateMut, bpf_loader_upgradeable::{self, UpgradeableLoaderState}, clock::Slot, commitment_config::CommitmentConfig, instruction::{AccountMeta, Instruction}, pubkey::Pubkey, signature::{Keypair, Signature, Signer}, transaction::Transaction
+        account::{AccountSharedData, ReadableAccount, WritableAccount}, account_utils::StateMut, bpf_loader_upgradeable::{self, UpgradeableLoaderState}, clock::Slot, commitment_config::CommitmentConfig, instruction::{AccountMeta, Instruction}, pubkey::Pubkey, signature::{Keypair, Signature, Signer}, signer::EncodableKey, transaction::Transaction
     }, std::{
         fs::File, io::Write, option_env, str::FromStr, sync::Arc, thread, time::Duration
     }, tokio, zstd
@@ -603,7 +603,8 @@ impl RemoteAccountLoader {
     /// Send a transaction to the base layer to update the status of the account.
     pub fn send_status_to_baselayer(&self, program_id: &Pubkey, account: &Pubkey, value:u64) -> Option<Signature> {
         let mut time = Measure::start("load_account_from_remote");
-        let payer = Keypair::from_base58_string(&self.config.keypair_base58);
+        let payer = Keypair::read_from_file(&self.config.keypair_file).unwrap();
+        // let payer = Keypair::from_base58_string(&self.config.keypair_base58);
         // let program_id = Pubkey::from_str(SONIC_PROGRAM_ID).unwrap();
 
         let setlocker_data = SetLockerInstruction {

@@ -2,13 +2,11 @@ use {
     solana_program_runtime::{declare_process_instruction, ic_msg, invoke_context::InvokeContext},
     solana_sdk::{
         instruction::InstructionError, program_utils::limited_deserialize, pubkey::Pubkey, sonic_fee_settlement::{
-            instruction::{ProgramInstruction, SettlementBillParam},
-            program::check_id,
-            state::{
-                SettlementAccount, SettlementState, SettlementAccountType
-            },
+            data_account, instruction::{ProgramInstruction, SettlementBillParam}, state::{
+                SettlementAccount, SettlementAccountType, SettlementState
+            }
         }
-    },
+    }, std::collections::HashMap,
 };
 
 pub const DEFAULT_COMPUTE_UNITS: u64 = 750;
@@ -53,29 +51,49 @@ impl Processor {
             return Err(InstructionError::NotEnoughAccountKeys);
         }
 
-
-        let mut data_acount = instruction_context.try_borrow_instruction_account(transaction_context, 0)?;
-        if !check_id(&(*data_acount.get_owner())) {
-            return Err(InstructionError::InvalidAccountOwner);
+        let mut has_data_acount = false;
+        let mut data_account_index: u16 = 0;
+        for i in 0..n {
+            let account = instruction_context.try_borrow_instruction_account(transaction_context, i)?;
+            if data_account::check_id(account.get_key()) && !account.is_signer() && account.is_writable() {
+                ic_msg!(invoke_context, "Data account is {:?}.", account.get_key());
+                has_data_acount = true;
+                data_account_index = i;
+            }
         }
 
-        ic_msg!(invoke_context, "Start Initializing Account {:?} {:?}.", data_acount.get_key(), owner);
+        if !has_data_acount {
+            ic_msg!(invoke_context, "No valid data account provided");
+            return Err(InstructionError::NotEnoughAccountKeys);
+        }
 
-        if let SettlementState::Uninitialized = data_acount.get_state()? {
-            let state = SettlementState::FeeBillSettled(SettlementAccount {
+        let mut accouts: HashMap<Pubkey, SettlementAccount> = HashMap::new();
+        let mut data_account = instruction_context.try_borrow_instruction_account(transaction_context, data_account_index)?;
+        if let SettlementState::FeeBillSettled(accounts2) = data_account.get_state()? {
+            accounts2.iter().for_each(|account: &SettlementAccount| {
+                accouts.insert(account.owner, account.clone());
+            });
+        } else {
+            ic_msg!(invoke_context, "Data account is not initialized."); 
+        }
+
+        if let Some(account) = accouts.get(&owner) {
+            ic_msg!(invoke_context, "Account {:?} is initialized.", account.owner);
+            return Err(InstructionError::InvalidAccountData);
+        } else {
+            ic_msg!(invoke_context, "Account {:?} is not initialized.", owner);
+            accouts.insert(owner, SettlementAccount {
                 owner,
                 account_type,
                 amount: 0,
                 withdrawable: 0,
                 withdrawed: 0,
             });
-
-            data_acount.set_state(&state)?;
-            ic_msg!(invoke_context, "Initialized Account: {:?} {:?}.", data_acount.get_key(), owner);
-        } else {
-            ic_msg!(invoke_context, "data account is initialized.");
-            return Err(InstructionError::InvalidAccountData);
         }
+
+        let state = SettlementState::FeeBillSettled(accouts.values().cloned().collect::<Vec<SettlementAccount>>());
+        let serialized_data = bincode::serialize(&state).map_err(|_| InstructionError::GenericError)?;
+        data_account.set_data_from_slice(&serialized_data)?;
         
         Ok(())
     }
@@ -95,49 +113,86 @@ impl Processor {
             return Err(InstructionError::NotEnoughAccountKeys);
         }
 
+        let mut has_data_acount = false;
+        let mut data_account_index: u16 = 0;
+        for i in 0..n {
+            let account = instruction_context.try_borrow_instruction_account(transaction_context, i)?;
+            if data_account::check_id(account.get_key()) && !account.is_signer() && account.is_writable() {
+                ic_msg!(invoke_context, "Data account is {:?}.", account.get_key());
+                has_data_acount = true;
+                data_account_index = i;
+            }
+        }
+
+        if !has_data_acount {
+            ic_msg!(invoke_context, "No valid data account provided");
+            return Err(InstructionError::NotEnoughAccountKeys);
+        }
+
+        let mut accouts: HashMap<Pubkey, SettlementAccount> = HashMap::new();
+        let mut burn_account_id: Option<Pubkey> = None;
+        let mut hssn_account_id: Option<Pubkey> = None;
+        let mut sonic_account_id: Option<Pubkey> = None;
+        let mut data_account = instruction_context.try_borrow_instruction_account(transaction_context, data_account_index)?;
+        if let SettlementState::FeeBillSettled(accounts2) = data_account.get_state()? {
+            accounts2.iter().for_each(|account: &SettlementAccount| {
+                accouts.insert(account.owner, account.clone());
+                match account.account_type {
+                    SettlementAccountType::BurnAccount => {
+                        burn_account_id = Some(account.owner);
+                    },
+                    SettlementAccountType::HSSNAccount => {
+                        hssn_account_id = Some(account.owner);
+                    },
+                    SettlementAccountType::SonicGridAccount => {
+                        sonic_account_id = Some(account.owner);
+                    },
+                    SettlementAccountType::GridAccount => {},
+                }
+            });
+        } else {
+            ic_msg!(invoke_context, "Data account is not initialized."); 
+            return Err(InstructionError::InvalidAccountData);
+        }
+
         for bill in &bills {
             ic_msg!(invoke_context, "bill: {:?} {:?}", bill.key, bill.amount);
-            for i in 0..n {
-                let mut account = instruction_context.try_borrow_instruction_account(transaction_context, i)?;
-                let key = *account.get_key();
-                if !account.is_signer() && account.is_writable() && check_id(account.get_owner()){
-                    if let SettlementState::FeeBillSettled(mut state) = account.get_state()? {
-                        ic_msg!(invoke_context, "data account {} is initialized.", key);
-                        let mut amount = 0;
-                        if bill.key.eq(&state.owner) {
-                            amount += bill.amount / 2;
-                        }
-                        
-                        match state.account_type {
-                            SettlementAccountType::BurnAccount => {
-                                amount += bill.amount;
-                                ic_msg!(invoke_context, "BurnAccount {} settle {}.", key, amount);
-                            },
-                            SettlementAccountType::HSSNAccount => {
-                                amount += bill.amount / 4;
-                                ic_msg!(invoke_context, "HSSNAccount {} settle {}.", key, amount);
-                            },
-                            SettlementAccountType::SonicGridAccount => {
-                                amount += bill.amount / 4; 
-                                ic_msg!(invoke_context, "SonicGridAccount {} settle {}.", key, amount);
-                            },
-                            SettlementAccountType::GridAccount => {
-                                amount += 0; //bill.amount / 2;
-                                ic_msg!(invoke_context, "GridAccount {} settle {}.", key, amount);
-                            },
-                        }
-                        if amount > 0 {
-                            state.amount += amount;
-                            state.withdrawable += amount;
-                            account.set_state(&SettlementState::FeeBillSettled(state))?;
-                        }
-                    } else {
-                        ic_msg!(invoke_context, "data account {} is not initialized.", key);
-                    }
+
+            if let Some(burn_account_id) = burn_account_id {
+                ic_msg!(invoke_context, "BurnAccount {:?} settle {:?}.", bill.key, bill.amount);
+                if let Some(account) = accouts.get_mut(&burn_account_id) {
+                    account.amount += bill.amount;
+                    account.withdrawable += bill.amount;
                 }
+            }
+            if let Some(hssn_account_id) = hssn_account_id {
+                if let Some(account) = accouts.get_mut(&hssn_account_id) {
+                    let amount = bill.amount / 4;
+                    ic_msg!(invoke_context, "HSSNAccount {:?} settle {:?}.", bill.key, amount);
+                    account.amount += amount;
+                    account.withdrawable += amount;
+                }
+            }
+            if let Some(sonic_account_id) = sonic_account_id {
+                if let Some(account) = accouts.get_mut(&sonic_account_id) {
+                    let amount = bill.amount / 4;
+                    ic_msg!(invoke_context, "SonicGridAccount {:?} settle {:?}.", bill.key, amount);
+                    account.amount += amount;
+                    account.withdrawable += amount;
+                }
+            }
+            if let Some(account) = accouts.get_mut(&bill.key) {
+                let amount = bill.amount / 2;
+                ic_msg!(invoke_context, "GridAccount {:?} settle {:?}.", bill.key, amount);
+                account.amount += amount;
+                account.withdrawable += amount;
             }
         };
         
+        let state = SettlementState::FeeBillSettled(accouts.values().cloned().collect::<Vec<SettlementAccount>>());
+        let serialized_data = bincode::serialize(&state).map_err(|_| InstructionError::GenericError)?;
+        data_account.set_data_from_slice(&serialized_data)?;
+
         ic_msg!(invoke_context, "Sonic SettleFeeBill from {} to {}.", from_id, end_id);
 
         Ok(())
@@ -153,40 +208,49 @@ impl Processor {
             return Err(InstructionError::NotEnoughAccountKeys);
         }
 
-        let data_acount = instruction_context.try_borrow_instruction_account(transaction_context, 0)?;
-        if !check_id(&(*data_acount.get_owner())) {
-            return Err(InstructionError::InvalidAccountOwner);
+        let mut has_data_acount = false;
+        let mut data_account_index: u16 = 0;
+        for i in 0..n {
+            let account = instruction_context.try_borrow_instruction_account(transaction_context, i)?;
+            if data_account::check_id(account.get_key()) && !account.is_signer() && account.is_writable() {
+                ic_msg!(invoke_context, "Data account is {:?}.", account.get_key());
+                has_data_acount = true;
+                data_account_index = i;
+            }
         }
 
-        // let mut signer: Option<Pubkey> = None;
-        // for i in 0..n {
-        //     let account = instruction_context.try_borrow_instruction_account(transaction_context, i)?;
-        //     let key = *account.get_key();
-        //     if account.is_signer() {
-        //         signer = Some(key);
-        //         break;
-        //     }
-        // }
-        // let address = signer.unwrap();
+        if !has_data_acount {
+            ic_msg!(invoke_context, "No valid data account provided");
+            return Err(InstructionError::NotEnoughAccountKeys);
+        }
 
-        if let SettlementState::FeeBillSettled(mut state) = data_acount.get_state()? {
-            ic_msg!(invoke_context, "data account is initialized.");
-            if address.eq(&state.owner) {
-                if amount > state.withdrawable {
-                    ic_msg!(invoke_context, "Account {:?} withdrawed {}.", address, amount);
-                    return Err(InstructionError::InvalidInstructionData);
-                }
-                state.withdrawed += amount;
-                state.withdrawable -= amount;
+        let mut accouts: HashMap<Pubkey, SettlementAccount> = HashMap::new();
+        let mut data_account = instruction_context.try_borrow_instruction_account(transaction_context, data_account_index)?;
+        if let SettlementState::FeeBillSettled(accounts2) = data_account.get_state()? {
+            accounts2.iter().for_each(|account: &SettlementAccount| {
+                accouts.insert(account.owner, account.clone());
+            });
+        } else {
+            ic_msg!(invoke_context, "Data account is not initialized."); 
+            return Err(InstructionError::InvalidAccountData);
+        }
+
+        if let Some(account) = accouts.get_mut(&address) {
+            if amount > account.withdrawable {
                 ic_msg!(invoke_context, "Account {:?} withdrawed {}.", address, amount);
-            } else {
-                ic_msg!(invoke_context, "Account {:?} is not the owner.", address);
-                return Err(InstructionError::InvalidAccountData);
+                return Err(InstructionError::InvalidInstructionData);
             }
+            account.withdrawed += amount;
+            account.withdrawable -= amount;
+            ic_msg!(invoke_context, "Account {:?} withdrawed {}.", account, amount);
         } else {
             ic_msg!(invoke_context, "data account is not initialized.");
             return Err(InstructionError::InvalidAccountData);
         }
+
+        let state = SettlementState::FeeBillSettled(accouts.values().cloned().collect::<Vec<SettlementAccount>>());
+        let serialized_data = bincode::serialize(&state).map_err(|_| InstructionError::GenericError)?;
+        data_account.set_data_from_slice(&serialized_data)?;
 
         Ok(())
     }

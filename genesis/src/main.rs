@@ -18,22 +18,7 @@ use {
     solana_genesis::{genesis_accounts::add_genesis_accounts, Base64Account},
     solana_ledger::{blockstore::create_new_ledger, blockstore_options::LedgerColumnOptions},
     solana_sdk::{
-        account::{Account, AccountSharedData, ReadableAccount, WritableAccount},
-        bpf_loader_upgradeable::UpgradeableLoaderState,
-        clock,
-        epoch_schedule::EpochSchedule,
-        fee_calculator::FeeRateGovernor,
-        genesis_config::{ClusterType, GenesisConfig},
-        inflation::Inflation,
-        native_token::sol_to_lamports,
-        poh_config::PohConfig,
-        pubkey::Pubkey,
-        rent::Rent,
-        signature::{Keypair, Signer},
-        signer::keypair::read_keypair_file,
-        stake::state::StakeStateV2,
-        system_program, timing,
-        sonic_account_migrater,
+        account::{Account, AccountSharedData, ReadableAccount, WritableAccount}, bpf_loader_upgradeable::UpgradeableLoaderState, clock, epoch_schedule::EpochSchedule, fee_calculator::FeeRateGovernor, genesis_config::{ClusterType, GenesisConfig}, inflation::Inflation, native_token::sol_to_lamports, poh_config::PohConfig, pubkey::Pubkey, rent::Rent, signature::{Keypair, Signer}, signer::keypair::read_keypair_file, sonic_account_migrater, sonic_fee_settlement, stake::state::StakeStateV2, system_program, timing
     },
     solana_stake_program::stake_state,
     solana_vote_program::vote_state::{self, VoteState},
@@ -147,6 +132,21 @@ fn add_custom_accounts(
         rent_epoch: 1,
     });
     genesis_config.add_account(sonic_account_migrater::migrated_accounts::id(), migrater_data_account);
+
+    // Sonic: Add Sonic fee settlement data account
+    println!("Adding account {:?} to the genesis config", sonic_fee_settlement::data_account::id());
+    let migrater_data_account = solana_sdk::account::AccountSharedData::from(Account {
+        owner: sonic_fee_settlement::program::id(),
+        data: vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
+                   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
+                   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 
+        lamports: sol_to_lamports(100.),
+        executable: false,
+        rent_epoch: 1,
+    });
+    genesis_config.add_account(sonic_fee_settlement::data_account::id(), migrater_data_account);
 }
 
 #[allow(clippy::cognitive_complexity)]

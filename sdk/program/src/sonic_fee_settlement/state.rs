@@ -11,7 +11,7 @@ pub enum SettlementState {
     /// Account is not initialized.
     Uninitialized,
     /// Initialized `Settlement` account.
-    FeeBillSettled(SettlementAccount),
+    FeeBillSettled(Vec<SettlementAccount>),
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone, AbiExample, AbiEnumVisitor)]
