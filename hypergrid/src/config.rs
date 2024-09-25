@@ -22,21 +22,21 @@ pub struct Config {
     pub baselayer_rpc_url: String,
     pub hssn_rpc_url: String,
     pub keypair_file: String,
-    pub sonic_program_id: String,
+    // pub sonic_program_id: String,
 }
 
 impl Default for Config {
     fn default() -> Self {
         let keypair_file = "~/.config/solana/id.json".to_string();
         let baselayer_rpc_url = "https://api.devnet.solana.com".to_string();
-        let sonic_program_id ="4WTUyXNcf6QCEj76b3aRDLPewkPGkXFZkkyf3A3vua1z".to_string();
+        // let sonic_program_id ="4WTUyXNcf6QCEj76b3aRDLPewkPGkXFZkkyf3A3vua1z".to_string();
         let hssn_rpc_url: String = "http://localhost:1317".to_string();
 
         Self {
             baselayer_rpc_url,
             hssn_rpc_url,
             keypair_file,
-            sonic_program_id,
+            // sonic_program_id,
         }
     }
 }
