@@ -4949,15 +4949,6 @@ impl Bank {
             None
         };
 
-        let remote_signature = self.post_status_to_baselayer(&tx, log_messages.clone());
-        let mut log_messages = log_messages.clone();
-        if remote_signature.is_some() {
-            
-            log_messages.as_mut().map(|log_messages| {
-                log_messages.push(format!("Sonic BaseLayer Transaction Signature: {}", remote_signature.unwrap().to_string()));
-            });
-        }
-
         TransactionExecutionResult::Executed {
             details: TransactionExecutionDetails {
                 status,
@@ -4970,56 +4961,6 @@ impl Bank {
             },
             programs_modified_by_tx: Box::new(programs_modified_by_tx),
         }
-    }
-
-    ///Sonic: post status to baselayer network.
-    fn post_status_to_baselayer(&self, tx: &SanitizedTransaction, log_messages: Option<Vec<String>>) -> Option<Signature> {
-        if tx.is_simple_vote_transaction() {
-            return None;
-        }
-        let msg = tx.message();
-        let account_keys = msg.account_keys();
-        let mut sonic_program: Option<&Pubkey> = None; 
-        let mut account: Option<&Pubkey> = None; 
-        let remote_loader = &self.rc.accounts.accounts_db.accounts_cache.remote_loader;
-        for ix in msg.instructions() {
-            if let Some(program_id) = account_keys.get(ix.program_id_index.into()) {
-
-                if remote_loader.is_sonic_program(program_id) {
-                    sonic_program = Some(program_id);
-                    account = account_keys.get(ix.accounts[0].into());
-                    break;
-                }
-            }
-        }
-
-        //Sonic: check if there are soinc program and account.
-        if !sonic_program.is_some() || !account.is_some() {
-            return None;
-        }
-
-        //Sonic: check if account is from remote.
-        if !remote_loader.has_account(account.unwrap()) {
-            return None;
-        }
-        
-        let mut signature: Option<Signature> = None;
-        log_messages.as_ref().map(|log_messages| {
-            let re = Regex::new(r"Fake NFT New Value: (\d+)").unwrap();
-            for log_message in log_messages.iter() {
-                info!("log_message: {:?}", log_message);
-
-                //Sonic: send states to baselayer
-                let caps = re.captures(log_message);
-                if let Some(caps) = caps {
-                    let value = caps.get(1).map_or("", |m| m.as_str());
-
-                    signature = remote_loader.send_status_to_baselayer(sonic_program.unwrap(), account.unwrap(), value.parse::<u64>().unwrap());
-                    break;
-                }
-            }
-        }); 
-        signature
     }
 
     fn replenish_program_cache(
