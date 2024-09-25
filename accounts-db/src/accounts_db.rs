@@ -2833,7 +2833,8 @@ impl AccountsDb {
             .unwrap();
         self.sender_bg_hasher = Some(sender);
     }
-
+    
+    ///Sonic: check if the pubkey is in the accounts index
     pub fn account_in_indexes(&self, pubkey: &Pubkey) -> bool {
         match self.accounts_index.get(pubkey, None, None) {
             AccountIndexGetResult::Found(_, _) => true,
