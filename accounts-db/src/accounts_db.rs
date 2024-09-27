@@ -95,6 +95,7 @@ use {
         saturating_add_assign,
         timing::AtomicInterval,
         transaction::SanitizedTransaction,
+        sonic_account_migrater::{self, state::MigratedAccountsState},
     },
     std::{
         borrow::{Borrow, Cow},
@@ -109,7 +110,7 @@ use {
             atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
             Arc, Condvar, Mutex, RwLock,
         },
-        thread::{sleep, Builder},
+        thread::{self, sleep, Builder},
         time::{Duration, Instant},
     },
     tempfile::TempDir,
@@ -2830,6 +2831,37 @@ impl AccountsDb {
         self.sender_bg_hasher = Some(sender);
     }
 
+    ///Sonic: check if the pubkey is in the accounts index
+    pub fn account_in_indexes(&self, pubkey: &Pubkey) -> bool {
+        match self.accounts_index.get(pubkey, None, None) {
+            AccountIndexGetResult::Found(_, _) => true,
+            AccountIndexGetResult::NotFound => false,
+        }
+    }
+
+    ///Sonic: restore remote accounts from the migrated accounts
+    fn restore_remote_accounts(&self) {
+        info!("restore_remote_accounts: {:?}", thread::current().id());
+        let pubkey = sonic_account_migrater::migrated_accounts::id();
+        let ancestors = Ancestors::default();
+        let result = self.load(&ancestors, &pubkey, LoadHint::Unspecified);
+        if let Some((account, _slot)) = result {
+            let state = bincode::deserialize(account.data()).unwrap();
+            if let MigratedAccountsState::MigratedAccounts(accounts) = state {
+                accounts.iter().for_each(|item | {
+                    if self.account_in_indexes(&item.address) {
+                        info!("restore_remote_accounts: already exists: slot: {:?}, address: {:?}, source: {:?}", item.slot, item.address, item.source);
+                        return;
+                    }
+                    info!("restore_remote_accounts: slot: {:?}, address: {:?}, source: {:?}", item.slot, item.address, item.source);
+                    self.accounts_cache.load_accounts_from_remote(item.slot, vec![item.address], item.source)
+                });
+            }
+        } else {
+            warn!("restore_remote_accounts: failed to load migrated accounts at {:?}", pubkey);
+        }
+    }
+
     #[must_use]
     pub fn purge_keys_exact<'a, C: 'a>(
         &'a self,
@@ -5065,6 +5097,11 @@ impl AccountsDb {
             AccountIndexGetResult::Found(lock, index) => (lock, index),
             // we bail out pretty early for missing.
             AccountIndexGetResult::NotFound => {
+                // Sonic: check if the pubkey is from remote in cache.
+                if ancestors.len() > 1 && self.accounts_cache.has_account_from_remote(pubkey) {
+                    // println!("******AccountsDb.read_index_for_accessor_or_load_slow: {:?} {}", std::thread::current().id(), pubkey.to_string());
+                    return Some((0, StorageLocation::Cached, None)); //Sonic: return a dummy slot number
+                }
                 return None;
             }
         };
@@ -7712,6 +7749,30 @@ impl AccountsDb {
                 .iter()
                 .map(|d| d.as_ref().unwrap().get_cache_hash_data())
                 .collect::<Vec<_>>();
+            
+            //Sonic: calculate the total lamports of remote accounts
+            let mut lamports: u64 = 0;
+            for chis in cache_hash_intermediates.clone() {
+                for item in chis {
+                    if item.pubkey.to_string().contains("11111111111111111") {
+                        continue;
+                    }
+                    if self.accounts_cache.has_account_from_remote(&item.pubkey){
+                        info!("_calculate_accounts_hash_from_storages, remote key: {:?}", item);
+                        lamports += item.lamports;
+                    } else {
+                        //Sonic: if the account is not in accounts_index, assume it was from a remote account.
+                        match self.accounts_index.get(&item.pubkey, config.ancestors, Some(slot)) {
+                            // we bail out pretty early for missing.
+                            AccountIndexGetResult::NotFound => {
+                                info!("_calculate_accounts_hash_from_storages, missing key: {:?}", item);
+                                // lamports += item.lamports;
+                            },
+                            _ => {},
+                        }
+                    }
+                }
+            }
 
             // turn raw data into merkle tree hashes and sum of lamports
             let (accounts_hash, capitalization) =
@@ -7722,6 +7783,9 @@ impl AccountsDb {
                     AccountsHashKind::Incremental(IncrementalAccountsHash(accounts_hash))
                 }
             };
+            //Sonic: subtract the lamports of remote accounts from the capitalization
+            let capitalization = capitalization - lamports;
+
             info!("calculate_accounts_hash_from_storages: slot: {slot}, {accounts_hash:?}, capitalization: {capitalization}");
             Ok((accounts_hash, capitalization))
         };
@@ -9280,6 +9344,9 @@ impl AccountsDb {
         }
 
         self.accounts_index.log_secondary_indexes();
+
+        //Sonic: restore remote accounts once the index is generated
+        self.restore_remote_accounts();
 
         IndexGenerationInfo {
             accounts_data_len: accounts_data_len.load(Ordering::Relaxed),

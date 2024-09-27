@@ -70,6 +70,8 @@ members = [
     "programs/ed25519-tests",
     "programs/loader-v4",
     "programs/stake",
+    "programs/sonic-account-migrater",
+    "programs/sonic-fee-settlement",
     "programs/system",
     "programs/vote",
     "programs/zk-token-proof",
@@ -388,6 +390,9 @@ solana-zk-keygen = { path = "zk-keygen", version = "=1.18.23" }
 solana-zk-token-proof-program = { path = "programs/zk-token-proof", version = "=1.18.23" }
 solana-zk-token-sdk = { path = "zk-token-sdk", version = "=1.18.23" }
 solana_rbpf = "=0.8.3"
+sonic-hypergrid = { path = "hypergrid", version = "=1.18.23" }
+sonic-account-migrater-program = { path = "programs/sonic-account-migrater", version = "=1.18.23" }
+sonic-fee-settlement-program = { path = "programs/sonic-fee-settlement", version = "=1.18.23" }
 spl-associated-token-account = "=2.3.0"
 spl-instruction-padding = "0.1"
 spl-memo = "=4.0.0"

@@ -15,6 +15,7 @@ use {
             Arc, RwLock,
         },
     },
+    sonic_hypergrid::remote_loader::RemoteAccountLoader,
 };
 
 pub type SlotCache = Arc<SlotCacheInner>;
@@ -162,6 +163,7 @@ pub struct AccountsCache {
     maybe_unflushed_roots: RwLock<BTreeSet<Slot>>,
     max_flushed_root: AtomicU64,
     total_size: Arc<AtomicU64>,
+    pub remote_loader: Arc<RemoteAccountLoader>, //Sonic: using RemoteAccountLoader
 }
 
 impl AccountsCache {
@@ -224,8 +226,63 @@ impl AccountsCache {
     }
 
     pub fn load(&self, slot: Slot, pubkey: &Pubkey) -> Option<CachedAccount> {
-        self.slot_cache(slot)
-            .and_then(|slot_cache| slot_cache.get_cloned(pubkey))
+        // self.slot_cache(slot)
+        //     .and_then(|slot_cache| slot_cache.get_cloned(pubkey))
+        match self.slot_cache(slot)
+            .and_then(|slot_cache| slot_cache.get_cloned(pubkey)) {
+            Some(account) => {
+                Some(account)
+            },
+            None => {
+                //Sonic: load from remote
+                let account = self.remote_loader.get_account(pubkey);
+                match account {
+                    Some(acc) => {
+                        //Sonic: store into cache
+                        Some(self.store(slot, pubkey, acc))
+                    },
+                    None => None,
+                }
+                // None
+            },
+        }
+    }
+
+    //Sonic: check if account exists in remote
+    pub fn has_account_from_remote(&self, pubkey: &Pubkey) -> bool {
+        self.remote_loader.has_account(pubkey)
+    }
+
+    //Sonic: load accounts from remote
+    pub fn load_accounts_from_remote(&self, slot: Slot, pubkeys: Vec<Pubkey>, source: Option<Pubkey>) {
+        RemoteAccountLoader::load_accounts(&self.remote_loader, slot, pubkeys, source);
+
+        // let remote_loader = self.remote_loader.clone();
+        // thread::Builder::new()
+        //     .name("solRemoteLoader1".to_string())
+        //     .spawn(move || {
+        //         // println!("AccountsCache::load_accounts_from_remote, {:?}", pubkeys);
+        //         pubkeys.iter().for_each(|pubkey| {
+        //             //Sonic: load from remote
+        //             remote_loader.load_account(slot, pubkey, source);
+        //         });
+        //     }).unwrap();
+    }
+
+    //Sonic: load accounts from remote
+    pub fn deactivate_remote_accounts(&self, slot: Slot, pubkeys: Vec<Pubkey>) {
+        RemoteAccountLoader::deactivate_accounts(&self.remote_loader, slot, pubkeys);
+
+        // let remote_loader = self.remote_loader.clone();
+        // thread::Builder::new()
+        //     .name("solRemoteLoader2".to_string())
+        //     .spawn(move || {
+        //         // println!("AccountsCache::deactivate_remote_accounts, {:?}", pubkeys);
+        //         pubkeys.iter().for_each(|pubkey| {
+        //             //Sonic: deactivate account in cache
+        //             remote_loader.deactivate_account(slot, &pubkey);
+        //         });
+        //     }).unwrap();
     }
 
     pub fn remove_slot(&self, slot: Slot) -> Option<SlotCache> {
