@@ -56,6 +56,8 @@ pub use solana_program::{
     serialize_utils, short_vec, slot_hashes, slot_history, stable_layout, stake, stake_history,
     syscalls, system_instruction, system_program, sysvar, unchecked_div_by_const, vote,
     wasm_bindgen,
+    sonic_account_migrater,
+    sonic_fee_settlement,
 };
 
 pub mod account;

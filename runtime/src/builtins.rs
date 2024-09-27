@@ -107,4 +107,16 @@ pub static BUILTINS: &[BuiltinPrototype] = &[
         name: "loader_v4",
         entrypoint: solana_loader_v4_program::Entrypoint::vm,
     },
+    BuiltinPrototype {
+        feature_id: None,
+        program_id: solana_sdk::sonic_account_migrater::program::id(),
+        name: "sonic_account_migrater_program",
+        entrypoint: sonic_account_migrater_program::processor::Entrypoint::vm,
+    },
+    BuiltinPrototype {
+        feature_id: None,
+        program_id: solana_sdk::sonic_fee_settlement::program::id(),
+        name: "sonic_fee_settlement_program",
+        entrypoint: sonic_fee_settlement_program::processor::Entrypoint::vm,
+    },
 ];

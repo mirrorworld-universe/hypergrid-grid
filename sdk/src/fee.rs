@@ -29,6 +29,8 @@ pub struct FeeStructure {
     pub lamports_per_write_lock: u64,
     /// Compute unit fee bins
     pub compute_fee_bins: Vec<FeeBin>,
+    ///Sonic: congestion multiplier
+    fee_multiplier: u32,
 }
 
 pub const ACCOUNT_DATA_COST_PAGE_SIZE: u64 = 32_u64.saturating_mul(1024);
@@ -46,10 +48,19 @@ impl FeeStructure {
                 fee: sol_to_lamports(*sol),
             })
             .collect::<Vec<_>>();
+        
+        //Sonic: get fee multiplier from environment variable
+        let fee_multiplier: Option<&'static str> = option_env!("SONIC_FEE_MULTIPLIER");
+        let fee_multiplier = match fee_multiplier.unwrap_or("10000").parse() {
+            Ok(f) => f,
+            Err(_) => 10000,
+        };
+
         FeeStructure {
             lamports_per_signature: sol_to_lamports(sol_per_signature),
             lamports_per_write_lock: sol_to_lamports(sol_per_write_lock),
             compute_fee_bins,
+            fee_multiplier,
         }
     }
 
@@ -88,7 +99,9 @@ impl FeeStructure {
         let congestion_multiplier = if lamports_per_signature == 0 {
             0.0 // test only
         } else {
-            1.0 // multiplier that has no effect
+            // 1.0 // multiplier that has no effect
+            //Sonic: custom congestion multiplier
+            self.fee_multiplier as f64 / 10000 as f64
         };
 
         let signature_fee = message

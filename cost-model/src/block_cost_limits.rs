@@ -5,6 +5,7 @@ use {
     solana_sdk::{
         address_lookup_table, bpf_loader, bpf_loader_deprecated, bpf_loader_upgradeable,
         compute_budget, ed25519_program, loader_v4, pubkey::Pubkey, secp256k1_program,
+        sonic_account_migrater, sonic_fee_settlement,
     },
     std::collections::HashMap,
 };
@@ -49,6 +50,8 @@ lazy_static! {
         // Note: These are precompile, run directly in bank during sanitizing;
         (secp256k1_program::id(), 0),
         (ed25519_program::id(), 0),
+        (sonic_account_migrater::program::id(), sonic_account_migrater_program::processor::DEFAULT_COMPUTE_UNITS),
+        (sonic_fee_settlement::program::id(), sonic_fee_settlement_program::processor::DEFAULT_COMPUTE_UNITS),
     ]
     .iter()
     .cloned()
