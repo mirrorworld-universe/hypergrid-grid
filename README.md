@@ -48,7 +48,7 @@ $ sudo dnf install openssl-devel systemd-devel pkg-config zlib-devel llvm clang 
 
 ```bash
 $ git clone https://github.com/mirrorworld-universe/hypergrid-grid.git
-$ cd solana
+$ cd hypergrid-grid
 ```
 
 ## **3. Build.**
