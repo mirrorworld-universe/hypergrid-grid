@@ -16,8 +16,13 @@ struct HypergridNode {
     pub pubkey: Pubkey,
     pub name: String,
     pub rpc: String,
-    pub role: i32,
+    pub role: i32, // 0: unknown, 1: HSSN, 2: Sonic Grid, 3: Grid, 4: Solana L1
 }
+
+const NODE_TYPE_HSSN: i32 = 1;
+const NODE_TYPE_SONIC: i32 = 2;
+const NODE_TYPE_GRID: i32 = 3;
+const NODE_TYPE_L1: i32 = 4;
 
 type HypergridNodes = DashMap<Pubkey, HypergridNode>;
 
@@ -199,7 +204,8 @@ impl RemoteAccountLoader {
                 self.load_hypergrid_nodes();
             }
             if let Some(node) = self.hypergrid_nodes.get(&source) {
-                if node.value().role == 2 || node.value().role == 3 || node.value().role == 4 {
+                //Only call rpc of nodes (2: Sonic Grid, 3: Grid, 4: Solana L1)
+                if node.value().role == NODE_TYPE_SONIC || node.value().role == NODE_TYPE_GRID || node.value().role == NODE_TYPE_L1 {
                     rpc_url = node.value().rpc.clone();
                 } else {
                     info!("load_account_via_rpc: invalid source role: {}", node.value().role);
