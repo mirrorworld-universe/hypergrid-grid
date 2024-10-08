@@ -55,6 +55,9 @@ impl FeeStructure {
             Ok(f) => f,
             Err(_) => 10000,
         };
+        if fee_multiplier < 1000 || fee_multiplier > 100000 {
+            panic!("environment parameter \"SONIC_FEE_MULTIPLIER\" should be between 1000 and 100000.");
+        }
         
         FeeStructure {
             lamports_per_signature: sol_to_lamports(sol_per_signature),
