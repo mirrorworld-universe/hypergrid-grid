@@ -15,12 +15,17 @@ struct HypergridNode {
     pub pubkey: Pubkey,
     pub name: String,
     pub rpc: String,
-    pub role: i32,
+    pub role: i32, // 0: unknown, 1: HSSN, 2: Sonic Grid, 3: Grid, 4: Solana L1
 }
+
+const NODE_TYPE_HSSN: i32 = 1;
+const NODE_TYPE_SONIC: i32 = 2;
+const NODE_TYPE_GRID: i32 = 3;
+const NODE_TYPE_L1: i32 = 4;
 
 pub struct RemoteAccountLoader {
     ///RPC client used to send requests to the remote.
-    rpc_client: RpcClient,
+    // rpc_client: RpcClient,
     cosmos_client: cosmos::HttpClient,
     /// Cache of accounts loaded from the remote.
     account_cache: AccountCacheKeyMap,
@@ -51,8 +56,6 @@ impl Default for RemoteAccountLoader {
         Self::new(config_path.unwrap_or(default_config_path.as_str()))
     }
 }
-
-// const SONIC_PROGRAM_ID: &str = "4WTUyXNcf6QCEj76b3aRDLPewkPGkXFZkkyf3A3vua1z";
 
 #[derive(Serialize, Deserialize)]
 struct SetValueInstruction {
@@ -94,8 +97,8 @@ impl RemoteAccountLoader {
         };
 
         Self {
-            rpc_client: RpcClient::new_with_timeout_and_commitment(&config.baselayer_rpc_url, 
-            Duration::from_secs(30), CommitmentConfig::confirmed()),
+            // rpc_client: RpcClient::new_with_timeout_and_commitment(&config.baselayer_rpc_url, 
+            // Duration::from_secs(30), CommitmentConfig::confirmed()),
             cosmos_client: cosmos::HttpClient::new(Duration::from_secs(30)),
             account_cache: AccountCacheKeyMap::default(),
             enable: true,
@@ -365,7 +368,8 @@ impl RemoteAccountLoader {
 
             let node = Self::load_hypergrid_node(self.config.clone(), source, slot);
             if let Some(node) = node {
-                if node.role == 2 || node.role == 3 || node.role == 4 {
+                //Only call rpc of nodes (2: Sonic Grid, 3: Grid, 4: Solana L1)
+                if node.role == NODE_TYPE_SONIC || node.role == NODE_TYPE_GRID || node.role == NODE_TYPE_L1 {
                     return node.rpc;
                 } else {
                     info!("load_account_via_rpc: invalid source role: {:?}, {:?}, {:?}", node.name, node.pubkey, node.role);
@@ -591,76 +595,6 @@ impl RemoteAccountLoader {
             None => {},
         } 
     }
-
-    /// Check if the account is a sonic program.
-    pub fn is_sonic_program(&self, pubkey: &Pubkey) -> bool {
-        if pubkey.to_string().eq(&self.config.sonic_program_id) {
-            return self.has_account(pubkey);
-        }
-        false
-    }
-
-    /// Send a transaction to the base layer to update the status of the account.
-    pub fn send_status_to_baselayer(&self, program_id: &Pubkey, account: &Pubkey, value:u64) -> Option<Signature> {
-        let mut time = Measure::start("load_account_from_remote");
-        let keypair = Keypair::read_from_file(&self.config.keypair_file);
-        if let Err(e) = keypair {
-            error!("send_status_to_baselayer: failed to read keypair: {:?}", e);
-            return None;
-        }
-        let payer = keypair.unwrap();
-        // let program_id = Pubkey::from_str(SONIC_PROGRAM_ID).unwrap();
-
-        let setlocker_data = SetLockerInstruction {
-            instruction: hash_instruction_method("setlocker"), //[0x20, 0xda, 0x0f, 0x29, 0x6e, 0x40, 0xf2, 0x0f],
-            locker: payer.pubkey(),
-        };
-        let setvalue_data = SetValueInstruction {
-            instruction: hash_instruction_method("setvalue"), //[0x60, 0xca, 0x6c, 0x93, 0x6b, 0x11, 0x69, 0x5f],
-            value,
-        };
-
-        let mut transaction = Transaction::new_with_payer(
-            &[
-                Instruction::new_with_bincode(
-                    *program_id,
-                    &setlocker_data,
-                    vec![
-                        // AccountMeta::new_readonly(payer.pubkey(), true),
-                        AccountMeta::new(*account, false),
-                        AccountMeta::new(payer.pubkey(), false),
-                    ]
-                ),
-                Instruction::new_with_bincode(
-                    *program_id,
-                    &setvalue_data,
-                    vec![
-                        // AccountMeta::new_readonly(payer.pubkey(), true),
-                        AccountMeta::new(*account, false),
-                        AccountMeta::new(payer.pubkey(), false),
-                    ]
-                ),
-            ],
-            Some(&payer.pubkey()),
-        );
-        let blockhash = self.rpc_client.get_latest_blockhash().unwrap();
-        transaction.sign(&[&payer], blockhash);
-        let result = self.rpc_client.send_transaction(&transaction); //send_and_confirm_transaction(&transaction);
-        time.stop();
-        match result {
-            Ok(signature) => {
-                // println!("send_transaction_to_baselayer: success {:?}, {}", signature, time.as_us());
-                //reload the account
-                self.load_account_via_rpc(account, None, 0);
-                Some(signature)
-            },
-            Err(e) => {
-                error!("send_transaction_to_baselayer: failed: {:?}, {}", e, time.as_us());
-                None
-            }
-        }
-    }
-
 }
 
 
