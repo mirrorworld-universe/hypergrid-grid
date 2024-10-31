@@ -166,6 +166,16 @@ pub struct RpcProgramAccountsConfig {
     pub with_context: Option<bool>,
 }
 
+//Sonic: added
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcWalletCountConfig {
+    pub filters: Option<Vec<RpcFilterType>>,
+    #[serde(flatten)]
+    pub account_config: RpcAccountInfoConfig,
+    pub with_context: Option<bool>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum RpcTransactionLogsFilter {
