@@ -2838,8 +2838,10 @@ impl AccountsDb {
     }
 
     ///Sonic: restore remote accounts from the migrated accounts
-    fn restore_remote_accounts(&self) {
+    fn restore_remote_accounts(&self, genesis_config: &GenesisConfig) {
         info!("restore_remote_accounts: {:?}", thread::current().id());
+        let genesis_hash = genesis_config.hash();
+        self.accounts_cache.set_genesis_hash(genesis_hash.to_string());
         let pubkey = sonic_account_migrater::migrated_accounts::id();
         let ancestors = Ancestors::default();
         let result = self.load(&ancestors, &pubkey, LoadHint::Unspecified);
@@ -2852,6 +2854,7 @@ impl AccountsDb {
                         return;
                     }
                     info!("restore_remote_accounts: slot: {:?}, address: {:?}, source: {:?}", item.slot, item.address, item.source);
+                    println!("restore_remote_accounts: slot: {:?}, address: {:?}, source: {:?}", item.slot, item.address, item.source);
                     self.accounts_cache.load_accounts_from_remote(item.slot, vec![item.address], item.source)
                 });
             }
@@ -9291,7 +9294,7 @@ impl AccountsDb {
         self.accounts_index.log_secondary_indexes();
 
         //Sonic: restore remote accounts once the index is generated
-        self.restore_remote_accounts();
+        self.restore_remote_accounts(genesis_config);
 
         IndexGenerationInfo {
             accounts_data_len: accounts_data_len.load(Ordering::Relaxed),

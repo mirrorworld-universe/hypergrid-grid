@@ -3826,8 +3826,12 @@ impl Bank {
         self.collector_id =
             collector_id.expect("genesis processing failed because no staked nodes exist");
 
+        //Sonic: set genesis hash to accounts cache
+        let hash = genesis_config.hash();
+        self.rc.accounts.accounts_db.accounts_cache.set_genesis_hash(hash.to_string());
+
         self.blockhash_queue.write().unwrap().genesis_hash(
-            &genesis_config.hash(),
+            &hash,
             self.fee_rate_governor.lamports_per_signature,
         );
 
@@ -5050,7 +5054,7 @@ impl Bank {
     fn migrate_remote_accounts(&self, tx: &SanitizedTransaction, log_messages: Option<Vec<String>>) {
         let msg = tx.message();
         let account_keys = msg.account_keys();
-        info!("Bank.migrate_remote_accounts():{:?}", msg.instructions());
+        // info!("Bank.migrate_remote_accounts():{:?}", msg.instructions());
         let accounts_cache = &self.rc.accounts.accounts_db.accounts_cache;
         msg.instructions().iter().for_each(|ix| {
             if let Some(program_id) = account_keys.get(ix.program_id_index.into()) {

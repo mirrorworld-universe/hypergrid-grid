@@ -1,21 +1,14 @@
 use {
-    crate::{accounts_db::AccountsDb, accounts_hash::AccountHash},
-    dashmap::DashMap,
-    seqlock::SeqLock,
-    solana_sdk::{
+    crate::{accounts_db::AccountsDb, accounts_hash::AccountHash}, dashmap::DashMap, log::info, seqlock::SeqLock, solana_sdk::{
         account::{AccountSharedData, ReadableAccount},
         clock::Slot,
         pubkey::Pubkey,
-    },
-    std::{
-        collections::BTreeSet,
-        ops::Deref,
-        sync::{
+    }, sonic_hypergrid::remote_loader::RemoteAccountLoader, std::{
+        collections::BTreeSet, fmt::Write, ops::Deref, sync::{
             atomic::{AtomicBool, AtomicU64, Ordering},
             Arc, RwLock,
-        },
-    },
-    sonic_hypergrid::remote_loader::RemoteAccountLoader,
+        }
+    }
 };
 
 pub type SlotCache = Arc<SlotCacheInner>;
@@ -164,6 +157,7 @@ pub struct AccountsCache {
     max_flushed_root: AtomicU64,
     total_size: Arc<AtomicU64>,
     pub remote_loader: Arc<RemoteAccountLoader>, //Sonic: using RemoteAccountLoader
+    genesis_hash: RwLock<String>,
 }
 
 impl AccountsCache {
@@ -253,9 +247,17 @@ impl AccountsCache {
         self.remote_loader.has_account(pubkey)
     }
 
+    pub fn set_genesis_hash(&self, genesis_hash: String) {
+        log::info!("AccountsCache::set_genesis_hash, {:?}", genesis_hash);
+        println!("AccountsCache::set_genesis_hash, {}", genesis_hash);
+        self.genesis_hash.write().unwrap().write_str(genesis_hash.as_str()).unwrap();
+    }
+
     //Sonic: load accounts from remote
     pub fn load_accounts_from_remote(&self, slot: Slot, pubkeys: Vec<Pubkey>, source: Option<Pubkey>) {
-        RemoteAccountLoader::load_accounts(&self.remote_loader, slot, pubkeys, source);
+        let hash = self.genesis_hash.read().unwrap();
+        println!("AccountsCache::load_accounts_from_remote, {:?}, {:}, {:?}", pubkeys, hash, slot);
+        RemoteAccountLoader::load_accounts(&self.remote_loader, hash.as_str(), slot, pubkeys, source);
 
         // let remote_loader = self.remote_loader.clone();
         // thread::Builder::new()
@@ -271,6 +273,7 @@ impl AccountsCache {
 
     //Sonic: load accounts from remote
     pub fn deactivate_remote_accounts(&self, slot: Slot, pubkeys: Vec<Pubkey>) {
+        println!("AccountsCache::deactivate_remote_accounts, {:?}", pubkeys);
         RemoteAccountLoader::deactivate_accounts(&self.remote_loader, slot, pubkeys);
 
         // let remote_loader = self.remote_loader.clone();

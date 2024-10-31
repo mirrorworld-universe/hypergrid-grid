@@ -46,6 +46,7 @@ pub struct UiAccount {
     pub executable: bool,
     pub rent_epoch: Epoch,
     pub space: Option<u64>,
+    pub remote: bool, //Sonic: remote account
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -159,6 +160,7 @@ impl UiAccount {
             executable: account.executable(),
             rent_epoch: account.rent_epoch(),
             space: Some(space as u64),
+            remote: false, //Sonic: remote account
         }
     }
 
