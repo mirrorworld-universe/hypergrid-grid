@@ -2,7 +2,7 @@ use {
     crate::{config::Config, cosmos, http}, base64::{self, Engine}, core::fmt, dashmap::DashMap, log::*, serde_json::json, solana_client::rpc_client::RpcClient, solana_measure::measure::Measure, solana_sdk::{
         account::{AccountSharedData, ReadableAccount, WritableAccount}, account_utils::StateMut, bpf_loader_upgradeable::{self, UpgradeableLoaderState}, clock::Slot, commitment_config::CommitmentConfig, pubkey::Pubkey
     }, std::{
-        fs::File, io::Write, option_env, str::FromStr, sync::Arc, thread, time::Duration
+        fs::File, io::Write, env, str::FromStr, sync::Arc, thread, time::Duration
     }, tokio, zstd
 };
 
@@ -47,7 +47,7 @@ impl fmt::Debug for RemoteAccountLoader {
 
 impl Default for RemoteAccountLoader {
     fn default() -> Self {
-        let config_path: Option<&'static str> = option_env!("SONIC_CONFIG_FILE");
+        
         let default_config_path = {
             //get current directory
             let mut default_config_path = std::env::current_dir().expect("current directory");
@@ -55,7 +55,8 @@ impl Default for RemoteAccountLoader {
             default_config_path.extend(["hypergrid", "config.yml"]);
             default_config_path.to_str().unwrap().to_string()
         };
-        Self::new(config_path.unwrap_or(default_config_path.as_str()))
+        let config_path = env::var("SONIC_CONFIG_FILE").unwrap_or(default_config_path);
+        Self::new(&config_path)
     }
 }
 
@@ -223,7 +224,7 @@ impl RemoteAccountLoader {
 
     fn load_account_from_local_file(&self, genesis_hash: &str, slot: Slot, pubkey: &Pubkey, source: Option<Pubkey>) -> Option<AccountSharedData> {
         let path = format!("{}/{:?}_{:?}_{}_{:?}.json", self.config.accounts_path, pubkey, source.unwrap_or_default(), genesis_hash, slot);
-        println!("load_account_from_local_file: {}\n", path);
+        info!("load_account_from_local_file: {}\n", path);
         let file = File::open(path);
         match file {
             Ok(file) => {
@@ -248,7 +249,7 @@ impl RemoteAccountLoader {
             std::fs::create_dir_all(dir).unwrap_or_default();
         }
 
-        println!("save_account_to_local_file: {}\n", path);
+        info!("save_account_to_local_file: {}\n", path);
         let file = File::create(path.clone());
         match file {
             Ok(mut file) => {
@@ -376,7 +377,7 @@ impl RemoteAccountLoader {
     fn get_rpc_url_by_source(&self, source: Option<Pubkey>, genesis_hash: &str, slot: Slot) -> String {
         if let Some(source) = source {
             let path = format!("{}/hypergrid_{:?}_{}_{:?}.json", self.config.accounts_path, source, genesis_hash, slot);
-            println!("load hypergrid node from file: {}\n", path);
+            info!("load hypergrid node from file: {}\n", path);
             let file = File::open(path);
             match file {
                 Ok(file) => {
@@ -429,7 +430,7 @@ impl RemoteAccountLoader {
         }
 
         let account = RemoteAccountLoader::deserialize_from_json2(value.clone());
-        println!("deserialize_from_json account: {:?}", account);
+        info!("deserialize_from_json account: {:?}", account);
         account
 
         // let value_str = value.as_str().unwrap_or("");
@@ -486,7 +487,7 @@ impl RemoteAccountLoader {
         );
         account.remote = true;
 
-        println!("deserialize_from_json2 account: {:?}", account);
+        info!("deserialize_from_json2 account: {:?}", account);
         Some(account)
     }
 
@@ -510,7 +511,7 @@ impl RemoteAccountLoader {
                 std::fs::create_dir_all(dir).unwrap_or_default();
             }
 
-            println!("save hypergrid node to local file: {}\n", path);
+            info!("save hypergrid node to local file: {}\n", path);
             let file = File::create(path.clone());
             match file {
                 Ok(mut file) => {
@@ -547,12 +548,12 @@ impl RemoteAccountLoader {
                     role: node_role as i32,
                 };
 
-                println!("load_hypergrid_node: success: {:?}\n", node);
+                info!("load_hypergrid_node: success: {:?}\n", node);
 
                 return Some(node);
             }
         }
-        println!("get_hypergrid_nodes: not found: {:?}\n", url.clone());
+        info!("get_hypergrid_nodes: not found: {:?}\n", url.clone());
         None
     }
 
@@ -637,7 +638,7 @@ impl RemoteAccountLoader {
         if !self.enable || Self::ignored_account(pubkey) {
             return;
         }
-        println!("RemoteAccountLoader.deactivate_account: {}, {}", pubkey.to_string(), slot);
+        info!("RemoteAccountLoader.deactivate_account: {}, {}", pubkey.to_string(), slot);
         match self.get_account(pubkey) {
             Some(account) => {
                 self.account_cache.remove(pubkey);
