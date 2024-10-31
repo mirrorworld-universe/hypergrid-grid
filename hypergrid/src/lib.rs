@@ -2,5 +2,6 @@
 
 mod config;
 mod cosmos;
+mod http;
 pub mod remote_loader;
 
