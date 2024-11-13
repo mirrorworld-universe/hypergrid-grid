@@ -615,6 +615,7 @@ impl ReplayStage {
                     r_bank_forks.get_vote_only_mode_signal(),
                 )
             };
+            let mut last_threshold_failure_slot = 0;
 
             Self::reset_poh_recorder(
                 &my_pubkey,
@@ -890,21 +891,15 @@ impl ReplayStage {
 
                 let mut heaviest_fork_failures_time = Measure::start("heaviest_fork_failures_time");
                 if tower.is_recent(heaviest_bank.slot()) && !heaviest_fork_failures.is_empty() {
-                    info!(
-                        "Couldn't vote on heaviest fork: {:?}, heaviest_fork_failures: {:?}",
-                        heaviest_bank.slot(),
-                        heaviest_fork_failures
+                    Self::log_heaviest_fork_failures(
+                        &heaviest_fork_failures,
+                        &bank_forks,
+                        &tower,
+                        &progress,
+                        &ancestors,
+                        &heaviest_bank,
+                        &mut last_threshold_failure_slot,
                     );
-
-                    for r in &heaviest_fork_failures {
-                        if let HeaviestForkFailures::NoPropagatedConfirmation(slot, ..) = r {
-                            if let Some(latest_leader_slot) =
-                                progress.get_latest_leader_slot_must_exist(*slot)
-                            {
-                                progress.log_propagated_stats(latest_leader_slot, &bank_forks);
-                            }
-                        }
-                    }
                 }
                 heaviest_fork_failures_time.stop();
 
@@ -1942,16 +1937,17 @@ impl ReplayStage {
 
         assert!(!poh_recorder.read().unwrap().has_bank());
 
-        let (poh_slot, parent_slot) = match poh_recorder.read().unwrap().reached_leader_slot() {
-            PohLeaderStatus::Reached {
-                poh_slot,
-                parent_slot,
-            } => (poh_slot, parent_slot),
-            PohLeaderStatus::NotReached => {
-                trace!("{} poh_recorder hasn't reached_leader_slot", my_pubkey);
-                return;
-            }
-        };
+        let (poh_slot, parent_slot) =
+            match poh_recorder.read().unwrap().reached_leader_slot(my_pubkey) {
+                PohLeaderStatus::Reached {
+                    poh_slot,
+                    parent_slot,
+                } => (poh_slot, parent_slot),
+                PohLeaderStatus::NotReached => {
+                    trace!("{} poh_recorder hasn't reached_leader_slot", my_pubkey);
+                    return;
+                }
+            };
 
         trace!("{} reached_leader_slot", my_pubkey);
 
@@ -3695,7 +3691,7 @@ impl ReplayStage {
             // checks
             let (
                 is_locked_out,
-                vote_threshold,
+                vote_thresholds,
                 propagated_stake,
                 is_leader_slot,
                 fork_weight,
@@ -3708,7 +3704,7 @@ impl ReplayStage {
                     .unwrap();
                 (
                     fork_stats.is_locked_out,
-                    fork_stats.vote_threshold,
+                    &fork_stats.vote_threshold,
                     propagated_stats.propagated_validators_stake,
                     propagated_stats.is_leader_slot,
                     fork_stats.fork_weight(),
@@ -3725,13 +3721,22 @@ impl ReplayStage {
             if is_locked_out {
                 failure_reasons.push(HeaviestForkFailures::LockedOut(candidate_vote_bank.slot()));
             }
-            if let ThresholdDecision::FailedThreshold(vote_depth, fork_stake) = vote_threshold {
+            let mut threshold_passed = true;
+            for threshold_failure in vote_thresholds {
+                let &ThresholdDecision::FailedThreshold(vote_depth, fork_stake) = threshold_failure
+                else {
+                    continue;
+                };
                 failure_reasons.push(HeaviestForkFailures::FailedThreshold(
                     candidate_vote_bank.slot(),
                     vote_depth,
                     fork_stake,
                     total_threshold_stake,
                 ));
+                // Ignore shallow checks for voting purposes
+                if (vote_depth as usize) >= tower.threshold_depth {
+                    threshold_passed = false;
+                }
             }
             if !propagation_confirmed {
                 failure_reasons.push(HeaviestForkFailures::NoPropagatedConfirmation(
@@ -3742,7 +3747,7 @@ impl ReplayStage {
             }
 
             if !is_locked_out
-                && vote_threshold.passed()
+                && threshold_passed
                 && propagation_confirmed
                 && switch_fork_decision.can_vote()
             {
@@ -4221,6 +4226,64 @@ impl ReplayStage {
         }
     }
 
+    fn log_heaviest_fork_failures(
+        heaviest_fork_failures: &Vec<HeaviestForkFailures>,
+        bank_forks: &Arc<RwLock<BankForks>>,
+        tower: &Tower,
+        progress: &ProgressMap,
+        ancestors: &HashMap<Slot, HashSet<Slot>>,
+        heaviest_bank: &Arc<Bank>,
+        last_threshold_failure_slot: &mut Slot,
+    ) {
+        info!(
+            "Couldn't vote on heaviest fork: {:?}, heaviest_fork_failures: {:?}",
+            heaviest_bank.slot(),
+            heaviest_fork_failures
+        );
+
+        for failure in heaviest_fork_failures {
+            match failure {
+                HeaviestForkFailures::NoPropagatedConfirmation(slot, ..) => {
+                    if let Some(latest_leader_slot) =
+                        progress.get_latest_leader_slot_must_exist(*slot)
+                    {
+                        progress.log_propagated_stats(latest_leader_slot, bank_forks);
+                    }
+                }
+                &HeaviestForkFailures::FailedThreshold(
+                    slot,
+                    depth,
+                    observed_stake,
+                    total_stake,
+                ) => {
+                    if slot > *last_threshold_failure_slot {
+                        *last_threshold_failure_slot = slot;
+                        let in_partition = if let Some(last_voted_slot) = tower.last_voted_slot() {
+                            Self::is_partition_detected(
+                                ancestors,
+                                last_voted_slot,
+                                heaviest_bank.slot(),
+                            )
+                        } else {
+                            false
+                        };
+                        datapoint_info!(
+                            "replay_stage-threshold-failure",
+                            ("slot", slot as i64, i64),
+                            ("depth", depth as i64, i64),
+                            ("observed_stake", observed_stake as i64, i64),
+                            ("total_stake", total_stake as i64, i64),
+                            ("in_partition", in_partition, bool),
+                        );
+                    }
+                }
+                // These are already logged in the partition info
+                HeaviestForkFailures::LockedOut(_)
+                | HeaviestForkFailures::FailedSwitchThreshold(_, _, _) => (),
+            }
+        }
+    }
+
     pub fn join(self) -> thread::Result<()> {
         self.commitment_service.join()?;
         self.t_replay.join().map(|_| ())
@@ -4380,7 +4443,6 @@ pub(crate) mod tests {
                 working_bank.clone(),
                 None,
                 working_bank.ticks_per_slot(),
-                &Pubkey::default(),
                 blockstore.clone(),
                 &leader_schedule_cache,
                 &PohConfig::default(),

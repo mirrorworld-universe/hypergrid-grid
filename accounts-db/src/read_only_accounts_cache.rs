@@ -1,7 +1,6 @@
 //! ReadOnlyAccountsCache used to store accounts, such as executable accounts,
 //! which can be large, loaded many times, and rarely change.
 use {
-    // crate::remote_loader::RemoteAccountLoader,
     dashmap::{mapref::entry::Entry, DashMap},
     index_list::{Index, IndexList},
     solana_measure::measure_us,
@@ -73,7 +72,6 @@ pub(crate) struct ReadOnlyAccountsCache {
 
     // Performance statistics
     stats: ReadOnlyCacheStats,
-    // remote_loader: RemoteAccountLoader,
 }
 
 impl ReadOnlyAccountsCache {
@@ -85,7 +83,6 @@ impl ReadOnlyAccountsCache {
             data_size: AtomicUsize::default(),
             ms_to_skip_lru_update,
             stats: ReadOnlyCacheStats::default(),
-            // remote_loader: RemoteAccountLoader::default(),
         }
     }
 
@@ -104,35 +101,11 @@ impl ReadOnlyAccountsCache {
     }
 
     pub(crate) fn load(&self, pubkey: Pubkey, slot: Slot) -> Option<AccountSharedData> {
-        // Yusuf - I am not sure if this is the right way to do this
         let (account, load_us) = measure_us!({
-            let key = if pubkey.to_string() == "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr" {
-                (pubkey, 1)
-            } else {
-                (pubkey, slot)
-            };
-            // 
-            if pubkey.to_string() != "SysvarFees111111111111111111111111111111111" 
-            && pubkey.to_string() != "SysvarRent111111111111111111111111111111111" 
-            && pubkey.to_string() != "SysvarStakeHistory1111111111111111111111111"
-            && pubkey.to_string() != "SysvarLastRestartS1ot1111111111111111111111"
-            && pubkey.to_string() != "SysvarEpochSchedu1e111111111111111111111111"
-            && pubkey.to_string() != "Vote111111111111111111111111111111111111111" 
-            {
-                println!("key: {:?}", key);
-            }
-            // let key = (pubkey, slot)
+            let key = (pubkey, slot);
             let Some(entry) = self.cache.get(&key) else {
                 self.stats.misses.fetch_add(1, Ordering::Relaxed);
                 return None;
-                // let account = self.remote_loader.get_account(&pubkey);
-                // if let Some(acc) = account {
-                //     Some(self.store(pubkey, slot, acc.clone()));
-                //     return Some(acc);
-                // } else {
-                //     self.stats.misses.fetch_add(1, Ordering::Relaxed);
-                //     return None;
-                // }  
             };
             // Move the entry to the end of the queue.
             // self.queue is modified while holding a reference to the cache entry;
@@ -156,11 +129,6 @@ impl ReadOnlyAccountsCache {
         account
     }
 
-    // pub fn has_account_from_remote(&self, pubkey: &Pubkey) -> bool {
-    //     // panic!("has_account_from_remote() not implemented");
-    //     self.remote_loader.has_account(pubkey)
-    // }
-    
     fn account_size(&self, account: &AccountSharedData) -> usize {
         CACHE_ENTRY_SIZE + account.data().len()
     }

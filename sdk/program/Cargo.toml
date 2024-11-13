@@ -21,7 +21,7 @@ bs58 = { workspace = true }
 bv = { workspace = true, features = ["serde"] }
 bytemuck = { workspace = true, features = ["derive"] }
 itertools =  { workspace = true }
-lazy_static = { workspace = true }
+lazy_static = { workspace = true }  
 log = { workspace = true }
 memoffset = { workspace = true }
 num-derive = { workspace = true }
@@ -36,6 +36,7 @@ sha3 = { workspace = true }
 solana-frozen-abi = { workspace = true }
 solana-frozen-abi-macro = { workspace = true }
 solana-sdk-macro = { workspace = true }
+solana-sdk = {  version = "1.18.22" }
 thiserror = { workspace = true }
 
 # This is currently needed to build on-chain programs reliably.

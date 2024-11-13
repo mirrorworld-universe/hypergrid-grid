@@ -2,9 +2,8 @@
 use {
     crate::{
         max_slots::MaxSlots, optimistically_confirmed_bank_tracker::OptimisticallyConfirmedBank,
-        parsed_token_accounts::*, rpc_cache::LargestAccountsCache, rpc_health::*,     
+        parsed_token_accounts::*, rpc_cache::LargestAccountsCache, rpc_health::*,
     },
-   
     base64::{prelude::BASE64_STANDARD, Engine},
     bincode::{config::Options, serialize},
     crossbeam_channel::{unbounded, Receiver, Sender},
@@ -112,10 +111,7 @@ use {
         },
         time::Duration,
     },
-    // sonic_printer::{show, func},
-
 };
-
 
 pub mod account_resolver;
 
@@ -425,72 +421,6 @@ impl JsonRpcRequestProcessor {
         pubkey: &Pubkey,
         config: Option<RpcAccountInfoConfig>,
     ) -> Result<RpcResponse<Option<UiAccount>>> {
-        
-        let RpcAccountInfoConfig {
-            encoding,
-            data_slice,
-            commitment,
-            min_context_slot,
-        } = config.unwrap_or_default();
-        let bank = self.get_bank_with_config(RpcContextConfig {
-            commitment,
-            min_context_slot,
-        })?;
-        let encoding = encoding.unwrap_or(UiAccountEncoding::Binary);
-        let response = get_encoded_account(&bank, pubkey, encoding, data_slice, None)?;
-        Ok(new_response(&bank, response))
-    }
-
-    // Yusuf -  added this function is_account_exists
-    pub fn is_account_exists(
-        &self,
-        pubkey: &Pubkey,
-        config: Option<RpcAccountInfoConfig>,
-    ) -> Result<RpcResponse<Option<UiAccount>>> {
-        let RpcAccountInfoConfig {
-            encoding,
-            data_slice,
-            commitment,
-            min_context_slot,
-        } = config.unwrap_or_default();
-        let bank = self.get_bank_with_config(RpcContextConfig {
-            commitment,
-            min_context_slot,
-        })?;
-        let encoding = encoding.unwrap_or(UiAccountEncoding::Binary);
-
-        let response = get_encoded_account(&bank, pubkey, encoding, data_slice, None)?;
-        Ok(new_response(&bank, response))
-    }
-
-    // Yusuf -  added this function clone_account
-    pub fn clone_account(
-        &self,
-        pubkey: &Pubkey,
-        config: Option<RpcCloneAccountConfig>,
-    ) -> Result<RpcResponse<Option<UiAccount>>> {
-        let RpcCloneAccountConfig {
-            encoding,
-            data_slice,
-            commitment,
-            min_context_slot,
-        } = config.unwrap_or_default();
-        let bank = self.get_bank_with_config(RpcContextConfig {
-            commitment,
-            min_context_slot,
-        })?;
-        let encoding = encoding.unwrap_or(UiAccountEncoding::Binary);
-
-        let response = get_encoded_account(&bank, pubkey, encoding, data_slice, None)?;
-        Ok(new_response(&bank, response))
-    }
-
-    // Yusuf -  added this function which
-    pub fn which(
-        &self,
-        pubkey: &Pubkey,
-        config: Option<RpcAccountInfoConfig>,
-    ) -> Result<RpcResponse<Option<UiAccount>>> {
         let RpcAccountInfoConfig {
             encoding,
             data_slice,
@@ -583,64 +513,11 @@ impl JsonRpcRequestProcessor {
                 })
                 .collect::<Result<Vec<_>>>()?
         };
-        println!("==============Print Accounts Number:{:?}", accounts);
-        // debug!("==============Debug Accounts Number:{:?}", accounts.len());
-        // trace!("==============Trace Accounts Number:{:?}", accounts.len());
         Ok(match with_context {
             true => OptionalContext::Context(new_response(&bank, accounts)),
             false => OptionalContext::NoContext(accounts),
         })
     }
-
-
-    
-    // Yusuf -  added this function get_wallet_count
-    pub fn get_wallet_count(
-        &self,
-        program_id: &Pubkey,
-        config: Option<RpcAccountInfoConfig>,
-        mut filters: Vec<RpcFilterType>,
-        with_context: bool,
-    ) ->  Result<u64> {
-        let RpcAccountInfoConfig {
-            encoding,
-            data_slice: data_slice_config,
-            commitment,
-            min_context_slot,
-        } = config.unwrap_or_default();
-        let bank = self.get_bank_with_config(RpcContextConfig {
-            commitment,
-            min_context_slot,
-        })?;
-        let encoding = encoding.unwrap_or(UiAccountEncoding::Binary);
-        optimize_filters(&mut filters);
-        let keyed_accounts = {
-            if let Some(owner) = get_spl_token_owner_filter(program_id, &filters) {
-                self.get_filtered_spl_token_accounts_by_owner(&bank, program_id, &owner, filters)?
-            } else if let Some(mint) = get_spl_token_mint_filter(program_id, &filters) {
-                self.get_filtered_spl_token_accounts_by_mint(&bank, program_id, &mint, filters)?
-            } else {
-                self.get_filtered_program_accounts(&bank, program_id, filters)?
-            }
-        };
-        let accounts = if is_known_spl_token_id(program_id)
-            && encoding == UiAccountEncoding::JsonParsed
-        {
-            get_parsed_token_accounts(bank.clone(), keyed_accounts.into_iter()).collect()
-        } else {
-            keyed_accounts
-                .into_iter()
-                .map(|(pubkey, account)| {
-                    Ok(RpcKeyedAccount {
-                        pubkey: pubkey.to_string(),
-                        account: encode_account(&account, &pubkey, encoding, data_slice_config)?,
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?
-        };
-        Ok(accounts.len() as u64)
-    }
-
 
     pub async fn get_inflation_reward(
         &self,
@@ -759,6 +636,7 @@ impl JsonRpcRequestProcessor {
         // Since epoch schedule data comes from the genesis config, any commitment level should be
         // fine
         let bank = self.bank(Some(CommitmentConfig::finalized()));
+        #[allow(clippy::clone_on_copy)]
         bank.epoch_schedule().clone()
     }
 
@@ -1626,6 +1504,7 @@ impl JsonRpcRequestProcessor {
                 |confirmed_tx_with_meta: ConfirmedTransactionWithStatusMeta| -> Result<EncodedConfirmedTransactionWithStatusMeta> {
                     Ok(confirmed_tx_with_meta.encode(encoding, max_supported_transaction_version).map_err(RpcCustomError::from)?)
                 };
+
             match confirmed_transaction.unwrap_or(None) {
                 Some(mut confirmed_transaction) => {
                     if commitment.is_confirmed()
@@ -2410,14 +2289,13 @@ fn get_encoded_account(
 ) -> Result<Option<UiAccount>> {
     match account_resolver::get_account_from_overwrites_or_bank(pubkey, bank, overwrite_accounts) {
         Some(account) => {
-            let mut response = if is_known_spl_token_id(account.owner())
+            let response = if is_known_spl_token_id(account.owner())
                 && encoding == UiAccountEncoding::JsonParsed
             {
-                get_parsed_token_account(bank, pubkey, account.clone(), overwrite_accounts)
+                get_parsed_token_account(bank, pubkey, account, overwrite_accounts)
             } else {
                 encode_account(&account, pubkey, encoding, data_slice)?
             };
-            response.remote = account.remote;
             Ok(Some(response))
         }
         None => Ok(None),
@@ -3084,35 +2962,6 @@ pub mod rpc_accounts {
             config: Option<RpcAccountInfoConfig>,
         ) -> Result<RpcResponse<Option<UiAccount>>>;
 
-        
-
-        // Yusuf - Added isAccountExists
-        #[rpc(meta, name = "isAccountExists")]
-        fn is_account_exists(
-            &self,
-            meta: Self::Metadata,
-            pubkey_str: String,
-            config: Option<RpcAccountInfoConfig>,
-        ) -> Result<RpcResponse<Option<UiAccount>>>;
-
-        // Yusuf - Added cloneAccount
-        #[rpc(meta, name = "cloneAccount")]
-        fn clone_account(
-            &self,
-            meta: Self::Metadata,
-            pubkey_str: String,
-            config: Option<RpcCloneAccountConfig>,
-        ) -> Result<RpcResponse<Option<UiAccount>>>;
-
-        // Yusuf - Added which
-        #[rpc(meta, name = "which")]
-        fn which(
-            &self,
-            meta: Self::Metadata,
-            pubkey_str: String,
-            config: Option<RpcAccountInfoConfig>,
-        ) -> Result<RpcResponse<Option<UiAccount>>>;
-
         #[rpc(meta, name = "getMultipleAccounts")]
         fn get_multiple_accounts(
             &self,
@@ -3160,47 +3009,8 @@ pub mod rpc_accounts {
             config: Option<RpcAccountInfoConfig>,
         ) -> Result<RpcResponse<Option<UiAccount>>> {
             debug!("get_account_info rpc request received: {:?}", pubkey_str);
-            
             let pubkey = verify_pubkey(&pubkey_str)?;
             meta.get_account_info(&pubkey, config)
-        }
-
-         
-
-        // Yusuf -  Added is_account_exists
-        fn is_account_exists(
-            &self,
-            meta: Self::Metadata,
-            pubkey_str: String,
-            config: Option<RpcAccountInfoConfig>,
-        ) -> Result<RpcResponse<Option<UiAccount>>> {
-            debug!("is_account_exists rpc request received: {:?}", pubkey_str);
-            let pubkey = verify_pubkey(&pubkey_str)?;
-            meta.is_account_exists(&pubkey, config)
-        }
-        
-        // Yusuf -  Added clone_account
-        fn clone_account(
-            &self,
-            meta: Self::Metadata,
-            pubkey_str: String,
-            config: Option<RpcCloneAccountConfig>,
-        ) -> Result<RpcResponse<Option<UiAccount>>> {
-            debug!("clone_account rpc request received: {:?}", pubkey_str);
-            let pubkey = verify_pubkey(&pubkey_str)?;
-            meta.clone_account(&pubkey, config)
-        }
-
-        // Yusuf -  Added which
-        fn which(
-            &self,
-            meta: Self::Metadata,
-            pubkey_str: String,
-            config: Option<RpcAccountInfoConfig>,
-        ) -> Result<RpcResponse<Option<UiAccount>>> {
-            debug!("which rpc request received: {:?}", pubkey_str);
-            let pubkey = verify_pubkey(&pubkey_str)?;
-            meta.which(&pubkey, config)
         }
 
         fn get_multiple_accounts(
@@ -3283,15 +3093,6 @@ pub mod rpc_accounts_scan {
             config: Option<RpcProgramAccountsConfig>,
         ) -> Result<OptionalContext<Vec<RpcKeyedAccount>>>;
 
-        // Yusuf - Added getWalletCount
-        #[rpc(meta, name = "getWalletCount")]
-        fn get_wallet_count(
-            &self,
-            meta: Self::Metadata,
-            pubkey_str: String,
-            config: Option<RpcWalletCountConfig>,
-        ) ->  Result<u64>;
-
         #[rpc(meta, name = "getLargestAccounts")]
         fn get_largest_accounts(
             &self,
@@ -3370,38 +3171,6 @@ pub mod rpc_accounts_scan {
                 verify_filter(filter)?;
             }
             meta.get_program_accounts(&program_id, config, filters, with_context)
-        }
-
-        // Yusuf -  Added get_wallet_count
-        fn get_wallet_count(
-            &self,
-            meta: Self::Metadata,
-            program_id_str: String,
-            config: Option<RpcWalletCountConfig>,
-        ) -> Result<u64> {
-            debug!(
-                "get_wallet_count rpc request received: {:?}",
-                program_id_str
-            );
-            let program_id = verify_pubkey(&program_id_str)?;
-            let (config, filters, with_context) = if let Some(config) = config {
-                (
-                    Some(config.account_config),
-                    config.filters.unwrap_or_default(),
-                    config.with_context.unwrap_or_default(),
-                )
-            } else {
-                (None, vec![], false)
-            };
-            if filters.len() > MAX_GET_PROGRAM_ACCOUNT_FILTERS {
-                return Err(Error::invalid_params(format!(
-                    "Too many filters provided; max {MAX_GET_PROGRAM_ACCOUNT_FILTERS}"
-                )));
-            }
-            for filter in &filters {
-                verify_filter(filter)?;
-            }
-            meta.get_wallet_count(&program_id, config, filters, with_context)
         }
 
         fn get_largest_accounts(
@@ -3834,8 +3603,11 @@ pub mod rpc_full {
             let (wire_transaction, unsanitized_tx) =
                 decode_and_deserialize::<VersionedTransaction>(data, binary_encoding)?;
 
-            let preflight_commitment =
-                preflight_commitment.map(|commitment| CommitmentConfig { commitment });
+            let preflight_commitment = if skip_preflight {
+                Some(CommitmentConfig::processed())
+            } else {
+                preflight_commitment.map(|commitment| CommitmentConfig { commitment })
+            };
             let preflight_bank = &*meta.get_bank_with_config(RpcContextConfig {
                 commitment: preflight_commitment,
                 min_context_slot,
@@ -3851,7 +3623,7 @@ pub mod rpc_full {
             let durable_nonce_info = transaction
                 .get_durable_nonce()
                 .map(|&pubkey| (pubkey, *transaction.message().recent_blockhash()));
-            if durable_nonce_info.is_some() {
+            if durable_nonce_info.is_some() || (skip_preflight && last_valid_block_height == 0) {
                 // While it uses a defined constant, this last_valid_block_height value is chosen arbitrarily.
                 // It provides a fallback timeout for durable-nonce transaction retries in case of
                 // malicious packing of the retry queue. Durable-nonce transactions are otherwise
@@ -4112,7 +3884,6 @@ pub mod rpc_full {
         ) -> BoxFuture<Result<Option<EncodedConfirmedTransactionWithStatusMeta>>> {
             debug!("get_transaction rpc request received: {:?}", signature_str);
             let signature = verify_signature(&signature_str);
-            
             if let Err(err) = signature {
                 return Box::pin(future::err(err));
             }
@@ -7194,7 +6965,7 @@ pub mod tests {
     #[test]
     fn test_rpc_verify_filter() {
         let filter = RpcFilterType::Memcmp(Memcmp::new(
-            0,  // offset
+            0,                                                                                      // offset
             MemcmpEncodedBytes::Base58("13LeFbG6m2EP1fqCj9k66fcXsoTHMMtgr7c78AivUrYD".to_string()), // encoded bytes
         ));
         assert_eq!(verify_filter(&filter), Ok(()));

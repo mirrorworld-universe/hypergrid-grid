@@ -33,7 +33,6 @@
 //! It offers a high-level API that signs transactions
 //! on behalf of the caller, and a low-level API for when they have
 //! already been signed and verified.
-use rand::seq::index;
 #[cfg(feature = "dev-context-only-utils")]
 use solana_accounts_db::accounts_db::{
     ACCOUNTS_DB_CONFIG_FOR_BENCHMARKS, ACCOUNTS_DB_CONFIG_FOR_TESTING,
@@ -66,7 +65,6 @@ use {
     dashmap::{DashMap, DashSet},
     itertools::izip,
     log::*,
-    regex::Regex,
     percentage::Percentage,
     rayon::{
         iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator},
@@ -178,7 +176,6 @@ use {
         transaction_context::{
             ExecutionRecord, TransactionAccount, TransactionContext, TransactionReturnData,
         },
-        program_utils::limited_deserialize,
     },
     solana_stake_program::stake_state::{
         self, InflationPointCalculationEvent, PointValue, StakeStateV2,
@@ -690,12 +687,13 @@ pub struct Bank {
     /// slots to hard fork at
     hard_forks: Arc<RwLock<HardForks>>,
 
-    /// The number of transactions processed without error
+    /// The number of committed transactions since genesis.
     transaction_count: AtomicU64,
 
-    /// The number of non-vote transactions processed without error since the most recent boot from
-    /// snapshot or genesis. This value is not shared though the network, nor retained within
-    /// snapshots, but is preserved in `Bank::new_from_parent`.
+    /// The number of non-vote transactions committed since the most
+    /// recent boot from snapshot or genesis. This value is only stored in
+    /// blockstore for the RPC method "getPerformanceSamples". It is not
+    /// retained within snapshots, but is preserved in `Bank::new_from_parent`.
     non_vote_transaction_count_since_restart: AtomicU64,
 
     /// The number of transaction errors in this slot
@@ -1214,6 +1212,7 @@ impl Bank {
         parent.freeze();
         assert_ne!(slot, parent.slot());
 
+        #[allow(clippy::clone_on_copy)]
         let epoch_schedule = parent.epoch_schedule().clone();
         let epoch = epoch_schedule.get_epoch(slot);
 
@@ -1922,6 +1921,7 @@ impl Bank {
             fee_rate_governor: self.fee_rate_governor.clone(),
             collected_rent: self.collected_rent.load(Relaxed),
             rent_collector: self.rent_collector.clone(),
+            #[allow(clippy::clone_on_copy)]
             epoch_schedule: self.epoch_schedule.clone(),
             inflation: *self.inflation.read().unwrap(),
             stakes: &self.stakes_cache,
@@ -3750,6 +3750,7 @@ impl Bank {
         self.parent_hash
     }
 
+    #[allow(clippy::clone_on_copy)]
     fn process_genesis_config(
         &mut self,
         genesis_config: &GenesisConfig,
@@ -4548,11 +4549,6 @@ impl Bank {
                     upgrade_authority_address: _,
                 }) = programdata.state()
                 {
-                    //Sonic: if program is remote, set slot to 0.
-                    if programdata.remote { 
-                        
-                        return Ok(0);
-                    }
                     return Ok(slot);
                 }
             }
@@ -4697,11 +4693,6 @@ impl Bank {
                 .get(UpgradeableLoaderState::size_of_programdata_metadata()..)
                 .ok_or(Box::new(InstructionError::InvalidAccountData).into())
                 .and_then(|programdata| {
-                    //Sonic: if program account is remote, set slot to 0.
-                    let mut dep_slot = slot;
-                    if program_account.remote {
-                        dep_slot = 0;
-                    }
                     Self::load_program_from_bytes(
                         &mut load_program_metrics,
                         programdata,
@@ -4710,7 +4701,7 @@ impl Bank {
                             .data()
                             .len()
                             .saturating_add(programdata_account.data().len()),
-                        dep_slot,
+                        slot,
                         environments.program_runtime_v1.clone(),
                         reload,
                     )
@@ -4722,17 +4713,12 @@ impl Bank {
                 .get(LoaderV4State::program_data_offset()..)
                 .ok_or(Box::new(InstructionError::InvalidAccountData).into())
                 .and_then(|elf_bytes| {
-                    //Sonic: if program account is remote, set slot to 0.
-                    let mut dep_slot = slot;
-                    if program_account.remote {
-                        dep_slot = 0;
-                    }
                     Self::load_program_from_bytes(
                         &mut load_program_metrics,
                         elf_bytes,
                         &loader_v4::id(),
                         program_account.data().len(),
-                        dep_slot,
+                        slot,
                         environments.program_runtime_v2.clone(),
                         reload,
                     )
@@ -4745,21 +4731,6 @@ impl Bank {
 
         let mut timings = ExecuteDetailsTimings::default();
         load_program_metrics.submit_datapoint(&mut timings);
-        if !Arc::ptr_eq(
-            &environments.program_runtime_v1,
-            &loaded_programs_cache.environments.program_runtime_v1,
-        ) || !Arc::ptr_eq(
-            &environments.program_runtime_v2,
-            &loaded_programs_cache.environments.program_runtime_v2,
-        ) {
-            // There can be two entries per program when the environment changes.
-            // One for the old environment before the epoch boundary and one for the new environment after the epoch boundary.
-            // These two entries have the same deployment slot, so they must differ in their effective slot instead.
-            // This is done by setting the effective slot of the entry for the new environment to the epoch boundary.
-            loaded_program.effective_slot = loaded_program
-                .effective_slot
-                .max(self.epoch_schedule.get_first_slot_in_epoch(effective_epoch));
-        }
         if let Some(recompile) = recompile {
             loaded_program.tx_usage_counter =
                 AtomicU64::new(recompile.tx_usage_counter.load(Ordering::Relaxed));
@@ -4796,14 +4767,6 @@ impl Bank {
     ) -> TransactionExecutionResult {
         let transaction_accounts = std::mem::take(&mut loaded_transaction.accounts);
 
-        // Sonic: print remote account info
-        // if !tx.is_simple_vote_transaction() {
-        //     for (pubkey, account) in transaction_accounts.iter() {
-        //         let index = transaction_accounts.iter().position(|(key, _)| key == pubkey).unwrap(); 
-        //         println!("Bank.execute_loaded_transaction():{:?} remote: {} writable {} ", pubkey, account.remote, tx.message().is_writable(index));
-        //     }
-        // }
-
         fn transaction_accounts_lamports_sum(
             accounts: &[(Pubkey, AccountSharedData)],
             message: &SanitizedMessage,
@@ -4821,6 +4784,7 @@ impl Bank {
 
         let mut transaction_context = TransactionContext::new(
             transaction_accounts,
+            #[allow(clippy::clone_on_copy)]
             self.rent_collector.rent.clone(),
             compute_budget.max_invoke_stack_height,
             compute_budget.max_instruction_trace_length,
@@ -4852,10 +4816,6 @@ impl Bank {
             programs_loaded_for_tx_batch.latest_root_epoch,
         );
         let mut process_message_time = Measure::start("process_message_time");
-        //Sonic: print message
-        // if !tx.is_simple_vote_transaction() {
-        //     println!("MessageProcessor::process_message {:?}", tx.message());
-        // }
         let process_result = MessageProcessor::process_message(
             tx.message(),
             &loaded_transaction.program_indices,
@@ -4949,15 +4909,6 @@ impl Bank {
             None
         };
 
-        let remote_signature = self.post_status_to_baselayer(&tx, log_messages.clone());
-        let mut log_messages = log_messages.clone();
-        if remote_signature.is_some() {
-            
-            log_messages.as_mut().map(|log_messages| {
-                log_messages.push(format!("Sonic BaseLayer Transaction Signature: {}", remote_signature.unwrap().to_string()));
-            });
-        }
-
         TransactionExecutionResult::Executed {
             details: TransactionExecutionDetails {
                 status,
@@ -4970,56 +4921,6 @@ impl Bank {
             },
             programs_modified_by_tx: Box::new(programs_modified_by_tx),
         }
-    }
-
-    ///Sonic: post status to baselayer network.
-    fn post_status_to_baselayer(&self, tx: &SanitizedTransaction, log_messages: Option<Vec<String>>) -> Option<Signature> {
-        if tx.is_simple_vote_transaction() {
-            return None;
-        }
-        let msg = tx.message();
-        let account_keys = msg.account_keys();
-        let mut sonic_program: Option<&Pubkey> = None; 
-        let mut account: Option<&Pubkey> = None; 
-        let remote_loader = &self.rc.accounts.accounts_db.accounts_cache.remote_loader;
-        for ix in msg.instructions() {
-            if let Some(program_id) = account_keys.get(ix.program_id_index.into()) {
-
-                if remote_loader.is_sonic_program(program_id) {
-                    sonic_program = Some(program_id);
-                    account = account_keys.get(ix.accounts[0].into());
-                    break;
-                }
-            }
-        }
-
-        //Sonic: check if there are soinc program and account.
-        if !sonic_program.is_some() || !account.is_some() {
-            return None;
-        }
-
-        //Sonic: check if account is from remote.
-        if !remote_loader.has_account(account.unwrap()) {
-            return None;
-        }
-        
-        let mut signature: Option<Signature> = None;
-        log_messages.as_ref().map(|log_messages| {
-            let re = Regex::new(r"Fake NFT New Value: (\d+)").unwrap();
-            for log_message in log_messages.iter() {
-                println!("log_message: {:?}", log_message);
-
-                //Sonic: send states to baselayer
-                let caps = re.captures(log_message);
-                if let Some(caps) = caps {
-                    let value = caps.get(1).map_or("", |m| m.as_str());
-
-                    signature = remote_loader.send_status_to_baselayer(sonic_program.unwrap(), account.unwrap(), value.parse::<u64>().unwrap());
-                    break;
-                }
-            }
-        }); 
-        signature
     }
 
     fn replenish_program_cache(
@@ -5114,53 +5015,6 @@ impl Bank {
         loaded_programs_for_txs.unwrap()
     }
 
-    ///Sonic: check remote accounts in transaction
-    fn check_remote_accounts(&self, tx: &SanitizedTransaction) {
-        if tx.is_simple_vote_transaction() {
-            return;
-        }
-        let msg = tx.message();
-        let account_keys = msg.account_keys();
-        msg.instructions().iter().for_each(|ix| {
-            if let Some(program_id) = account_keys.get(ix.program_id_index.into()) {
-
-                if !sonic_account_migrater_program::check_id(program_id) { 
-                    return;
-                }
-                match limited_deserialize(&ix.data) {
-                    Err(_) => {
-                        return;
-                    },
-                    Ok(instruction) => {
-                        ix.accounts.iter().for_each(|account_index| {
-                            if msg.is_signer((*account_index).into()) || *account_index == ix.program_id_index {
-                                return;
-                            }
-                            let mut accounts:Vec<Pubkey> = vec![];
-                            if let Some(account_key) = account_keys.get((*account_index).into()) {
-                                accounts.push(*account_key);
-                            }
-                            match instruction {
-                                sonic_account_migrater_program::instruction::ProgramInstruction::MigrateRemoteAccounts => {
-                                    //load remote account...
-                                    self.rc.accounts.accounts_db.accounts_cache.load_accounts_from_remote(accounts, None);
-                                },
-                                sonic_account_migrater_program::instruction::ProgramInstruction::DeactivateRemoteAccounts => {
-                                    //deactivate remote account...
-                                    self.rc.accounts.accounts_db.accounts_cache.deactivate_remote_accounts(accounts);
-                                },
-                                sonic_account_migrater_program::instruction::ProgramInstruction::MigrateSourceAccounts { node_id } => {
-                                    //load remote account from source...
-                                    self.rc.accounts.accounts_db.accounts_cache.load_accounts_from_remote(accounts, Some(node_id));
-                                },
-                            }
-                        });
-                    },
-                }
-            }
-        });
-    }
-
     /// Returns a hash map of executable program accounts (program accounts that are not writable
     /// in the given transactions), and their owners, for the transactions with a valid
     /// blockhash or nonce.
@@ -5183,7 +5037,6 @@ impl Bank {
                     })
                     .is_some()
                 {
-                    self.check_remote_accounts(tx); //Socnic: check remote accounts
                     tx.message()
                         .account_keys()
                         .iter()
@@ -5295,6 +5148,7 @@ impl Bank {
         ));
 
         if programs_loaded_for_tx_batch.borrow().hit_max_limit {
+            error!("Discarding TX batch {:#?}", batch.sanitized_transactions());
             return LoadAndExecuteTransactionsOutput {
                 loaded_transactions: vec![],
                 execution_results: vec![],
@@ -5497,13 +5351,14 @@ impl Bank {
                 // replay could occur
                 signature_count += u64::from(tx.message().header().num_required_signatures);
                 executed_transactions_count += 1;
+
+                if !is_vote {
+                    executed_non_vote_transactions_count += 1;
+                }
             }
 
             match execution_result.flattened_result() {
                 Ok(()) => {
-                    if !is_vote {
-                        executed_non_vote_transactions_count += 1;
-                    }
                     executed_with_successful_result_count += 1;
                 }
                 Err(err) => {
@@ -7225,6 +7080,7 @@ impl Bank {
         if config.run_in_background {
             let ancestors = ancestors.clone();
             let accounts = Arc::clone(accounts);
+            #[allow(clippy::clone_on_copy)]
             let epoch_schedule = epoch_schedule.clone();
             let rent_collector = rent_collector.clone();
             let accounts_ = Arc::clone(&accounts);

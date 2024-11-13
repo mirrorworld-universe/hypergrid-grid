@@ -41,7 +41,6 @@ use {
         sync::{Arc, RwLock},
         time::{Duration, SystemTime, UNIX_EPOCH},
     },
-    // sonic_printer::{func, show},
 };
 
 #[derive(PartialEq, Eq)]
@@ -215,9 +214,8 @@ fn main() {
                 program_id: address,
                 loader: solana_sdk::bpf_loader_upgradeable::id(),
                 upgrade_authority: Pubkey::default(),
-                program_path: program_path.clone(),
+                program_path,
             });
-           
         }
     }
 

@@ -20,19 +20,17 @@
 //!
 //! [oracle]: https://docs.solanalabs.com/implemented-proposals/validator-timestamp-oracle
 
+
 use solana_sdk_macro::CloneZeroed;
 
-/// The default tick rate that the cluster attempts to achieve (160 per second).
-///
-/// Note that the actual tick rate at any given time should be expected to drift.
-pub const DEFAULT_TICKS_PER_SECOND: u64 = 160;
+
+pub const DEFAULT_TICKS_PER_SECOND: u64 = 240;
 
 #[cfg(test)]
-static_assertions::const_assert_eq!(MS_PER_TICK, 6);
+static_assertions::const_assert_eq!(MS_PER_TICK, 4);
 
 /// The number of milliseconds per tick (6).
 pub const MS_PER_TICK: u64 = 1000 / DEFAULT_TICKS_PER_SECOND;
-
 
 #[deprecated(since = "1.15.0", note = "Please use DEFAULT_MS_PER_SLOT instead")]
 /// The expected duration of a slot (400 milliseconds).
@@ -40,7 +38,7 @@ pub const SLOT_MS: u64 = DEFAULT_MS_PER_SLOT;
 
 // At 160 ticks/s, 64 ticks per slot implies that leader rotation and voting will happen
 // every 400 ms. A fast voting cadence ensures faster finality and convergence
-pub const DEFAULT_TICKS_PER_SLOT: u64 = 64;
+pub const DEFAULT_TICKS_PER_SLOT: u64 = 48;
 
 // GCP n1-standard hardware and also a xeon e5-2520 v4 are about this rate of hashes/s
 pub const DEFAULT_HASHES_PER_SECOND: u64 = 2_000_000;
@@ -103,7 +101,7 @@ pub const DEFAULT_SLOTS_PER_EPOCH: u64 = 2 * TICKS_PER_DAY / DEFAULT_TICKS_PER_S
 
 // leader schedule is governed by this
 pub const NUM_CONSECUTIVE_LEADER_SLOTS: u64 = 4;
-// Yusuf
+
 #[cfg(test)]
 static_assertions::const_assert_eq!(DEFAULT_MS_PER_SLOT, 400);
 /// The expected duration of a slot (400 milliseconds).
