@@ -18,6 +18,7 @@
 //! tracks the number of commits to the entire data store. So the latest
 //! commit for each slot entry would be indexed.
 
+use blake3::traits::digest::crypto_common::IvSizeUser;
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
 use {
@@ -2856,7 +2857,7 @@ impl AccountsDb {
                         return;
                     }
                     info!("restore_remote_accounts: slot: {:?}, address: {:?}, source: {:?}", item.slot, item.address, item.source);
-                    println!("restore_remote_accounts: slot: {:?}, address: {:?}, source: {:?}", item.slot, item.address, item.source);
+                    // println!("restore_remote_accounts: slot: {:?}, address: {:?}, source: {:?}", item.slot, item.address, item.source);
                     self.accounts_cache.load_accounts_from_remote(item.slot, vec![item.address], item.source)
                 });
             }
@@ -7755,28 +7756,43 @@ impl AccountsDb {
             
             //Sonic: calculate the total lamports of remote accounts
             let mut lamports: u64 = 0;
-            for chis in cache_hash_intermediates.clone() {
-                for item in chis {
-                    if item.pubkey.to_string().contains("11111111111111111") {
-                        continue;
-                    }
-                    if self.accounts_cache.has_account_from_remote(&item.pubkey){
-                        info!("_calculate_accounts_hash_from_storages, remote key: {:?}", item);
-                        lamports += item.lamports;
-                    } else {
-                        //Sonic: if the account is not in accounts_index, assume it was from a remote account.
-                        match self.accounts_index.get(&item.pubkey, config.ancestors, Some(slot)) {
-                            // we bail out pretty early for missing.
-                            AccountIndexGetResult::NotFound => {
-                                info!("_calculate_accounts_hash_from_storages, missing key: {:?}", item);
-                                // lamports += item.lamports;
-                            },
-                            _ => {},
+            let remote_accounts = self.accounts_cache.remote_loader.get_account_list();
+            if remote_accounts.len() > 0 {
+                info!("_calculate_accounts_hash_from_storages, remote_accounts: {:?}", remote_accounts);
+                println!("_calculate_accounts_hash_from_storages, remote_accounts: {:?}", remote_accounts);
+
+                let mut time = Measure::start("filter_remote_accounts");
+                let mut n = 0;
+                info!("_calculate_accounts_hash_from_storages, filter_remote_accounts starting... kind:{:?}, slot:{:?}", kind, slot);
+                println!("_calculate_accounts_hash_from_storages, filter_remote_accounts starting... kind:{:?}, slot:{:?}", kind, slot);
+                for chis in cache_hash_intermediates.clone() {
+                    for item in chis {
+                        n = n + 1;
+                        if item.pubkey.to_string().contains("11111111111111111") {
+                            continue;
+                        }
+                        if remote_accounts.contains(&item.pubkey){
+                            info!("_calculate_accounts_hash_from_storages, remote key: {:?}", item);
+                            println!("_calculate_accounts_hash_from_storages, remote key: {:?}", item);
+                            lamports += item.lamports;
+                        // } else {
+                        //     //Sonic: if the account is not in accounts_index, assume it was from a remote account.
+                        //     match self.accounts_index.get(&item.pubkey, config.ancestors, Some(slot)) {
+                        //         // we bail out pretty early for missing.
+                        //         AccountIndexGetResult::NotFound => {
+                        //             info!("_calculate_accounts_hash_from_storages, missing key: {:?}", item);
+                        //             // lamports += item.lamports;
+                        //         },
+                        //         _ => {},
+                        //     }
                         }
                     }
                 }
+                time.stop();
+                info!("_calculate_accounts_hash_from_storages, filter_remote_accounts, kind:{:?}, slot:{:?}, size:{:?}, time:{:?}us", kind, slot, n, time.as_us());
+                println!("_calculate_accounts_hash_from_storages, filter_remote_accounts, kind:{:?}, slot:{:?}, size:{:?}, time:{:?}us", kind, slot, n, time.as_us());
             }
-
+            
             // turn raw data into merkle tree hashes and sum of lamports
             let (accounts_hash, capitalization) =
                 accounts_hasher.rest_of_hash_calculation(&cache_hash_intermediates, &mut stats);

@@ -2,8 +2,8 @@ const { Connection, SystemProgram, TransactionInstruction, Keypair, PublicKey, T
 const BufferLayout = require('@solana/buffer-layout');
 const { Buffer } = require('buffer');
 
-let connection = new Connection("https://api.testnet.v1.sonic.game", "confirmed")
-// let connection = new Connection("http://127.0.0.1:8899", "confirmed")
+// let connection = new Connection("https://api.testnet.v1.sonic.game", "confirmed")
+let connection = new Connection("http://127.0.0.1:8899", "confirmed")
 
 //read keypair from local file
 const fs = require('fs');
