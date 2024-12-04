@@ -7759,12 +7759,12 @@ impl AccountsDb {
             let remote_accounts = self.accounts_cache.remote_loader.get_account_list();
             if remote_accounts.len() > 0 {
                 info!("_calculate_accounts_hash_from_storages, remote_accounts: {:?}", remote_accounts);
-                println!("_calculate_accounts_hash_from_storages, remote_accounts: {:?}", remote_accounts);
+                // println!("_calculate_accounts_hash_from_storages, remote_accounts: {:?}", remote_accounts);
 
                 let mut time = Measure::start("filter_remote_accounts");
                 let mut n = 0;
                 info!("_calculate_accounts_hash_from_storages, filter_remote_accounts starting... kind:{:?}, slot:{:?}", kind, slot);
-                println!("_calculate_accounts_hash_from_storages, filter_remote_accounts starting... kind:{:?}, slot:{:?}", kind, slot);
+                // println!("_calculate_accounts_hash_from_storages, filter_remote_accounts starting... kind:{:?}, slot:{:?}", kind, slot);
                 for chis in cache_hash_intermediates.clone() {
                     for item in chis {
                         n = n + 1;
@@ -7773,7 +7773,7 @@ impl AccountsDb {
                         }
                         if remote_accounts.contains(&item.pubkey){
                             info!("_calculate_accounts_hash_from_storages, remote key: {:?}", item);
-                            println!("_calculate_accounts_hash_from_storages, remote key: {:?}", item);
+                            // println!("_calculate_accounts_hash_from_storages, remote key: {:?}", item);
                             lamports += item.lamports;
                         // } else {
                         //     //Sonic: if the account is not in accounts_index, assume it was from a remote account.
@@ -7790,7 +7790,7 @@ impl AccountsDb {
                 }
                 time.stop();
                 info!("_calculate_accounts_hash_from_storages, filter_remote_accounts, kind:{:?}, slot:{:?}, size:{:?}, time:{:?}us", kind, slot, n, time.as_us());
-                println!("_calculate_accounts_hash_from_storages, filter_remote_accounts, kind:{:?}, slot:{:?}, size:{:?}, time:{:?}us", kind, slot, n, time.as_us());
+                // println!("_calculate_accounts_hash_from_storages, filter_remote_accounts, kind:{:?}, slot:{:?}, size:{:?}, time:{:?}us", kind, slot, n, time.as_us());
             }
             
             // turn raw data into merkle tree hashes and sum of lamports

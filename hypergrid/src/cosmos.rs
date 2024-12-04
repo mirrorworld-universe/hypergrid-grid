@@ -26,7 +26,7 @@ pub fn run_load_solana_account(pub_key: &str, version:  &str, source: &str, upda
     let app_path = std::path::Path::new(&cosmos_app_path);
     if !app_path.exists() {
         warn!("{} does not exist.", cosmos_app_path);
-        println!("{} does not exist.", cosmos_app_path);
+        // println!("{} does not exist.", cosmos_app_path);
         return;
     }
     
@@ -40,7 +40,7 @@ pub fn run_load_solana_account(pub_key: &str, version:  &str, source: &str, upda
         cosmos_app_path, pub_key, version, source, cosmos_home_path, COSMOS_SIGNER, COSMOS_CHAIN_ID);
     }
 
-    println!("cmd_str: {}", cmd_str);
+    // println!("cmd_str: {}", cmd_str);
     info!("cmd_str: {}", cmd_str);
     
     let output = Command::new("sh").arg("-c").arg(cmd_str).output();
