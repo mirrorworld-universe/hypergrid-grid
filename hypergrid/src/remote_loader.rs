@@ -2,8 +2,9 @@ use {
     crate::{config::Config, cosmos, http}, base64::{self, Engine}, core::fmt, dashmap::DashMap, log::*, serde_json::json, solana_client::rpc_client::RpcClient, solana_measure::measure::Measure, solana_sdk::{
         account::{AccountSharedData, ReadableAccount, WritableAccount}, account_utils::StateMut, bpf_loader_upgradeable::{self, UpgradeableLoaderState}, clock::Slot, commitment_config::CommitmentConfig, pubkey::Pubkey
     }, std::{
-        fs::File, io::Write, env, str::FromStr, sync::Arc, thread, time::Duration
-    }, tokio, zstd
+        collections::HashSet, env, fs::File, io::Write, str::FromStr, sync::Arc, thread, time::Duration
+    }, tokio, zstd,
+    ahash::AHashSet,
 };
 
 
@@ -136,6 +137,15 @@ impl RemoteAccountLoader {
         }
     }
 
+    pub fn get_account_list(&self) -> AHashSet<Pubkey> {
+        let mut pubkeys = AHashSet::new();
+        for ref_multi in self.account_cache.iter() {
+            let (pubkey, _) = ref_multi.pair();
+            pubkeys.insert(pubkey.clone()); 
+        }
+        pubkeys
+    }
+
     pub fn load_accounts(remote_loader: &Arc<Self>, genesis_hash: &str, slot: Slot, pubkeys: Vec<Pubkey>, source: Option<Pubkey>) {
         remote_loader.runtime().spawn({
             let loader = remote_loader.clone();
@@ -168,7 +178,7 @@ impl RemoteAccountLoader {
         }
 
         info!("Thread {:?}: load_account: {:?} from {:?}, solt: {:?}",  thread::current().id(), pubkey, source.unwrap_or_default(), slot);
-        println!("Thread {:?}: load_account: {:?} from {:?}, solt: {:?}",  thread::current().id(), pubkey, source.unwrap_or_default(), slot);
+        // println!("Thread {:?}: load_account: {:?} from {:?}, solt: {:?}",  thread::current().id(), pubkey, source.unwrap_or_default(), slot);
 
         //load the account from the local file first
         let account = self.load_account_from_local_file(genesis_hash, slot, pubkey, source);
@@ -231,6 +241,7 @@ impl RemoteAccountLoader {
                 // read file content to json
                 let account_data: serde_json::Value = serde_json::from_reader(file).unwrap();
                 debug!("load_account_from_local_file: account_data: {:?}", account_data);
+                println!("load_account_from_local_file: account_data: {:?}", account_data);
                 let account = RemoteAccountLoader::deserialize_from_json2(account_data);
                 account
             },
@@ -265,11 +276,11 @@ impl RemoteAccountLoader {
                     "lamports": account.lamports(),
                     "data": [
                         data,
-                        "base58"
+                        "base64"
                     ],
                     "owner": account.owner().to_string(),
                     "executable": account.executable(),
-                    "rent_epoch": account.rent_epoch(),
+                    "rentEpoch": account.rent_epoch(),
                 });
                 let result = serde_json::to_writer_pretty(&mut file, &account_data);
                 match result {
@@ -299,7 +310,7 @@ impl RemoteAccountLoader {
             return None;
         }
 
-        println!("Thread {:?}: load_account_via_oracle: {:?} at {} slot {:?} from {:?}",  thread::current().id(), pubkey, genesis_hash, slot, rpc_url.clone());
+        // println!("Thread {:?}: load_account_via_oracle: {:?} at {} slot {:?} from {:?}",  thread::current().id(), pubkey, genesis_hash, slot, rpc_url.clone());
         info!("Thread {:?}: load_account_via_oracle: {:?} at {} slot {:?} from {:?}",  thread::current().id(), pubkey, genesis_hash, slot, rpc_url.clone());
 
         let client = http::HttpClient::new(Duration::from_secs(30));
@@ -318,14 +329,14 @@ impl RemoteAccountLoader {
                 if let Ok(value) = value {
                     // let value: serde_json::Value = value.unwrap();
                     info!("load_account_via_hssn: success: {:?}\n", value);
-                    println!("load_account_via_oracle: success: {:?}", value);
+                    // println!("load_account_via_oracle: success: {:?}", value);
                     let account = RemoteAccountLoader::deserialize_from_json(value, "result");
                     return account;
                 }
             },
             Err(e) => {
                 warn!("load_account_from_oracle: not found: {:?}, {:?}\n", pubkey, e);
-                println!("load_account_from_oracle: not found: {:?}, {:?}\n", pubkey, e);
+                // println!("load_account_from_oracle: not found: {:?}, {:?}\n", pubkey, e);
             }
         }
 
@@ -344,7 +355,7 @@ impl RemoteAccountLoader {
             return None;
         }
 
-        println!("Thread {:?}: load_account_via_rpc: {:?} at {} slot {:?} from {:?}",  thread::current().id(), pubkey, genesis_hash, slot, rpc_url.clone());
+        // println!("Thread {:?}: load_account_via_rpc: {:?} at {} slot {:?} from {:?}",  thread::current().id(), pubkey, genesis_hash, slot, rpc_url.clone());
         info!("Thread {:?}: load_account_via_rpc: {:?} at {} slot {:?} from {:?}",  thread::current().id(), pubkey, genesis_hash, slot, rpc_url.clone());
 
         let rpc_client = RpcClient::new_with_timeout_and_commitment(rpc_url, Duration::from_secs(30), CommitmentConfig::confirmed());
@@ -459,6 +470,8 @@ impl RemoteAccountLoader {
             raw_data = data.as_str().unwrap_or("");
             encoding = "base64";
         }
+        // println!("deserialize_from_json2: {}, {}, {}", owner, raw_data, encoding);
+
         let lamports = value["lamports"].as_u64().unwrap_or(0);
         let rent_epoch = value["rentEpoch"].as_u64().unwrap_or(0);
         // let space = value["space"].as_u64().unwrap();
@@ -500,7 +513,7 @@ impl RemoteAccountLoader {
             "version": format!("{}-{}", genesis_hash, slot),
         });
         info!("load_hypergrid_nodes: {}, {:?}\n", url, data);
-        println!("load_hypergrid_nodes: {}, {:?}\n", url, data);
+        // println!("load_hypergrid_nodes: {}, {:?}\n", url, data);
         let client = http::HttpClient::new(Duration::from_secs(30));
         let res = client.post(url.clone(), &data);
         if let Ok(body) = res {
@@ -574,7 +587,7 @@ impl RemoteAccountLoader {
             return None;
         }
         info!("Thread {:?}: load_account_via_hssn: {:?}",  thread::current().id(), pubkey);
-        println!("Thread {:?}: load_account_via_hssn: {:?}",  thread::current().id(), pubkey);
+        // println!("Thread {:?}: load_account_via_hssn: {:?}",  thread::current().id(), pubkey);
 
         let url = format!("{:?}/hypergrid-ssn/hypergridssn/solana_account/{:?}/{:?}-{}-{:?}",self.config.hssn_rpc_url, pubkey, source.unwrap_or_default(), genesis_hash, slot);
         info!("load_account_from_hssn: {}\n", url);

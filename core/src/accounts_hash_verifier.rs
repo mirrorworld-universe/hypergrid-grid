@@ -290,6 +290,8 @@ impl AccountsHashVerifier {
         accounts_package: &AccountsPackage,
         snapshot_config: &SnapshotConfig,
     ) -> AccountsHashKind {
+        info!("calculate_and_verify_accounts_hash: {:?}, {:?}, {:?}", accounts_package.slot, accounts_package.block_height, accounts_package.package_kind);
+        println!("calculate_and_verify_accounts_hash: {:?}, {:?}, {:?}", accounts_package.slot, accounts_package.block_height, accounts_package.package_kind);
         let accounts_hash_calculation_kind = match accounts_package.package_kind {
             AccountsPackageKind::AccountsHashVerifier => CalcAccountsHashKind::Full,
             AccountsPackageKind::EpochAccountsHash => CalcAccountsHashKind::Full,
