@@ -241,7 +241,7 @@ impl RemoteAccountLoader {
                 // read file content to json
                 let account_data: serde_json::Value = serde_json::from_reader(file).unwrap();
                 debug!("load_account_from_local_file: account_data: {:?}", account_data);
-                println!("load_account_from_local_file: account_data: {:?}", account_data);
+                // println!("load_account_from_local_file: account_data: {:?}", account_data);
                 let account = RemoteAccountLoader::deserialize_from_json2(account_data);
                 account
             },
