@@ -249,7 +249,7 @@ impl AccountsCache {
 
     pub fn set_genesis_hash(&self, genesis_hash: String) {
         info!("AccountsCache::set_genesis_hash, {:?}", genesis_hash);
-        println!("AccountsCache::set_genesis_hash, {}", genesis_hash);
+        // println!("AccountsCache::set_genesis_hash, {}", genesis_hash);
         self.genesis_hash.write().unwrap().write_str(genesis_hash.as_str()).unwrap();
     }
 

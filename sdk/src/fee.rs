@@ -51,12 +51,12 @@ impl FeeStructure {
         
         //Sonic: get fee multiplier from environment variable
         let fee_multiplier = env::var("SONIC_FEE_MULTIPLIER").unwrap_or("10000".to_string());
-        println!("Sonic: SONIC_FEE_MULTIPLIER: {}", fee_multiplier);
+        // println!("Sonic: SONIC_FEE_MULTIPLIER: {}", fee_multiplier);
         let fee_multiplier = match fee_multiplier.parse() {
             Ok(f) => f,
             Err(_) => 10000,
         };
-        println!("Sonic: Fee multiplier: {}", fee_multiplier);
+        // println!("Sonic: Fee multiplier: {}", fee_multiplier);
 
         FeeStructure {
             lamports_per_signature: sol_to_lamports(sol_per_signature),
