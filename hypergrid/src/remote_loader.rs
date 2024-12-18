@@ -1,8 +1,9 @@
 use {
     crate::{config::Config, cosmos, http}, base64::{self, Engine}, core::fmt, dashmap::DashMap, log::*, serde_json::json, solana_client::rpc_client::RpcClient, solana_measure::measure::Measure, solana_sdk::{
+        genesis_config::ClusterType,
         account::{AccountSharedData, ReadableAccount, WritableAccount}, account_utils::StateMut, bpf_loader_upgradeable::{self, UpgradeableLoaderState}, clock::Slot, commitment_config::CommitmentConfig, pubkey::Pubkey
     }, std::{
-        collections::HashSet, env, fs::File, io::Write, str::FromStr, sync::Arc, thread, time::Duration
+        env, fs::File, io::Write, str::FromStr, sync::Arc, thread, time::Duration
     }, tokio, zstd,
     ahash::AHashSet,
 };
@@ -48,7 +49,8 @@ impl fmt::Debug for RemoteAccountLoader {
 
 impl Default for RemoteAccountLoader {
     fn default() -> Self {
-        
+        let cluster_type = env::var("SOLANA_RUN_SH_CLUSTER_TYPE").unwrap_or(ClusterType::STRINGS[0].to_string());
+        let cluster_type = ClusterType::from_str(cluster_type.as_str()).unwrap_or(ClusterType::Development);
         let default_config_path = {
             //get current directory
             let mut default_config_path = std::env::current_dir().expect("current directory");
@@ -57,15 +59,15 @@ impl Default for RemoteAccountLoader {
             default_config_path.to_str().unwrap().to_string()
         };
         let config_path = env::var("SONIC_CONFIG_FILE").unwrap_or(default_config_path);
-        Self::new(&config_path)
+        Self::new(&config_path, cluster_type)
     }
 }
 
 /// Remote account loader.
 impl RemoteAccountLoader {
     /// Create a new remote loader.
-    pub fn new(config_path: &str) -> Self {
-        let mut config = Config::default();
+    pub fn new(config_path: &str, cluster_type: ClusterType) -> Self {
+        let mut config = Config::new(cluster_type);
         match Config::load(config_path) {
             Ok(setting) => {
                 config = setting;
