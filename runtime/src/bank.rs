@@ -4845,6 +4845,11 @@ impl Bank {
             programs_loaded_for_tx_batch.upcoming_environments.clone(),
             programs_loaded_for_tx_batch.latest_root_epoch,
         );
+
+        //Sonic: get remote accounts.
+        let remote_accounts = self.rc.accounts.accounts_db.accounts_cache.remote_loader.get_account_list();
+        debug!("Sonic Bank.execute_loaded_transaction(): remote_accounts: {:?}", remote_accounts);
+
         let mut process_message_time = Measure::start("process_message_time");
         let process_result = MessageProcessor::process_message(
             tx.message(),
@@ -4860,6 +4865,7 @@ impl Bank {
             blockhash,
             lamports_per_signature,
             &mut executed_units,
+            Some(remote_accounts), //Sonic: pass remote accounts to process_message.
         );
         process_message_time.stop();
 

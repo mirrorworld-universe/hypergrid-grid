@@ -19,8 +19,11 @@ use {
         sysvar::instructions,
         transaction::TransactionError,
         transaction_context::{IndexOfAccount, InstructionAccount, TransactionContext},
+        pubkey::Pubkey, // Sonic: Add Pubkey
     },
     std::{cell::RefCell, rc::Rc, sync::Arc},
+    log::*, // Sonic: Add log
+    ahash::AHashSet, // Sonic: Add AHashSet
 };
 
 #[derive(Debug, Default, Clone, Deserialize, Serialize)]
@@ -56,6 +59,7 @@ impl MessageProcessor {
         blockhash: Hash,
         lamports_per_signature: u64,
         accumulated_consumed_units: &mut u64,
+        remote_accounts: Option<AHashSet<Pubkey>>, // Sonic: Add remote_accounts
     ) -> Result<(), TransactionError> {
         let mut invoke_context = InvokeContext::new(
             transaction_context,
@@ -111,15 +115,16 @@ impl MessageProcessor {
 
                 // Sonic: Check if the account is a remote account
                 let mut is_writable = message.is_writable(index_in_transaction);
-                let pubkey = message.account_keys().get(index_in_transaction).unwrap();
-                if let Some(index) = invoke_context.transaction_context.find_index_of_account(&pubkey) {
-                    let account = invoke_context.transaction_context.
-                        get_account_at_index(index).unwrap();
-                    if account.borrow().remote {
-                        // Sonic: If the account is a remote account, it is always not writable.
-                        is_writable = false;     
+                if let Some(remotes) = &remote_accounts {
+                    if !remotes.is_empty() {
+                        let pubkey = message.account_keys().get(index_in_transaction).unwrap();
+                        if remotes.contains(pubkey) {
+                            // Sonic: If the account is a remote account, it is always not writable.
+                            info!("Sonic Remote account: {}", pubkey);
+                            is_writable = false;
+                        }
                     }
-                }
+                } 
 
                 instruction_accounts.push(InstructionAccount {
                     index_in_transaction: index_in_transaction as IndexOfAccount,
@@ -316,6 +321,7 @@ mod tests {
             Hash::default(),
             0,
             &mut 0,
+            None, // Sonic: Add remote_accounts
         );
         assert!(result.is_ok());
         assert_eq!(
@@ -365,6 +371,7 @@ mod tests {
             Hash::default(),
             0,
             &mut 0,
+            None, // Sonic: Add remote_accounts
         );
         assert_eq!(
             result,
@@ -404,6 +411,7 @@ mod tests {
             Hash::default(),
             0,
             &mut 0,
+            None, // Sonic: Add remote_accounts
         );
         assert_eq!(
             result,
@@ -533,6 +541,7 @@ mod tests {
             Hash::default(),
             0,
             &mut 0,
+            None, // Sonic: Add remote_accounts
         );
         assert_eq!(
             result,
@@ -566,6 +575,7 @@ mod tests {
             Hash::default(),
             0,
             &mut 0,
+            None, // Sonic: Add remote_accounts
         );
         assert!(result.is_ok());
 
@@ -596,6 +606,7 @@ mod tests {
             Hash::default(),
             0,
             &mut 0,
+            None, // Sonic: Add remote_accounts
         );
         assert!(result.is_ok());
         assert_eq!(
@@ -683,6 +694,7 @@ mod tests {
             Hash::default(),
             0,
             &mut 0,
+            None, // Sonic: Add remote_accounts
         );
 
         assert_eq!(
