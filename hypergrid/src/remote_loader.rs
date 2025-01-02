@@ -117,6 +117,12 @@ impl RemoteAccountLoader {
         if !self.enable || Self::ignored_account(pubkey) {
             return None;
         }
+
+        // check if the cache is empty
+        if self.account_cache.is_empty() {
+            return None;
+        }
+
         // println!("RemoteAccountLoader.get_account: {:?}, {}", thread::current().id(), pubkey.to_string());
         match self.account_cache.get(pubkey) {
             Some(account) => {
@@ -132,6 +138,12 @@ impl RemoteAccountLoader {
         if !self.enable || Self::ignored_account(pubkey) {
             return false;
         }
+
+        // check if the cache is empty
+        if self.account_cache.is_empty() {
+            return false;
+        }
+
         // println!("RemoteAccountLoader.has_account: {:?}, {}", thread::current().id(), pubkey.to_string());
         match self.account_cache.contains_key(pubkey) {
             true => true,
@@ -140,6 +152,11 @@ impl RemoteAccountLoader {
     }
 
     pub fn get_account_list(&self) -> AHashSet<Pubkey> {
+        // check if the cache is empty
+        if self.account_cache.is_empty() {
+            return AHashSet::default();
+        }
+
         let mut pubkeys = AHashSet::new();
         for ref_multi in self.account_cache.iter() {
             let (pubkey, _) = ref_multi.pair();
@@ -153,7 +170,7 @@ impl RemoteAccountLoader {
             let loader = remote_loader.clone();
             let hash = genesis_hash.to_string();
             async move {
-                info!("AccountsCache::load_accounts_from_remote, {:?}", pubkeys);
+                info!("Sonic AccountsCache::load_accounts_from_remote, {:?}", pubkeys);
                 pubkeys.iter().for_each(|pubkey| {
                     //Sonic: load from remote
                     loader.load_account(&hash, slot, pubkey, source);
@@ -165,7 +182,7 @@ impl RemoteAccountLoader {
     pub fn deactivate_accounts(remote_loader: &Arc<Self>, slot: Slot, pubkeys: Vec<Pubkey>) {
         let loader = remote_loader.clone();
         remote_loader.runtime().spawn(async move {
-            info!("AccountsCache::deactivate_remote_accounts, {:?}", pubkeys);
+            info!("Sonic AccountsCache::deactivate_remote_accounts, {:?}", pubkeys);
             pubkeys.iter().for_each(|pubkey| {
                 //Sonic: deactivate account in cache
                 loader.deactivate_account(slot, &pubkey);
@@ -179,7 +196,7 @@ impl RemoteAccountLoader {
             return None;
         }
 
-        info!("Thread {:?}: load_account: {:?} from {:?}, solt: {:?}",  thread::current().id(), pubkey, source.unwrap_or_default(), slot);
+        info!("Sonic Thread {:?}: load_account: {:?} from {:?}, solt: {:?}",  thread::current().id(), pubkey, source.unwrap_or_default(), slot);
         // println!("Thread {:?}: load_account: {:?} from {:?}, solt: {:?}",  thread::current().id(), pubkey, source.unwrap_or_default(), slot);
 
         //load the account from the local file first
@@ -199,7 +216,7 @@ impl RemoteAccountLoader {
         if let Some(account_cache) = self.account_cache.get(pubkey) {
             let (account1, slot1) = account_cache.clone();
             if slot == slot1  {
-                info!("******* cache: {}\n", pubkey.to_string());
+                info!("Sonic cache: {}\n", pubkey.to_string());
                 return Some(account1);
             }
         }
@@ -236,19 +253,19 @@ impl RemoteAccountLoader {
 
     fn load_account_from_local_file(&self, genesis_hash: &str, slot: Slot, pubkey: &Pubkey, source: Option<Pubkey>) -> Option<AccountSharedData> {
         let path = format!("{}/{:?}_{:?}_{}_{:?}.json", self.config.accounts_path, pubkey, source.unwrap_or_default(), genesis_hash, slot);
-        info!("load_account_from_local_file: {}\n", path);
+        info!("Sonic load_account_from_local_file: {}\n", path);
         let file = File::open(path);
         match file {
             Ok(file) => {
                 // read file content to json
                 let account_data: serde_json::Value = serde_json::from_reader(file).unwrap();
-                debug!("load_account_from_local_file: account_data: {:?}", account_data);
+                debug!("Sonic load_account_from_local_file: account_data: {:?}", account_data);
                 // println!("load_account_from_local_file: account_data: {:?}", account_data);
                 let account = RemoteAccountLoader::deserialize_from_json2(account_data);
                 account
             },
             Err(e) => {
-                error!("load_account_from_local_file: failed to open file: {:?}\n", e);
+                error!("Sonic load_account_from_local_file: failed to open file: {:?}\n", e);
                 None
             }
         }
@@ -262,7 +279,7 @@ impl RemoteAccountLoader {
             std::fs::create_dir_all(dir).unwrap_or_default();
         }
 
-        info!("save_account_to_local_file: {}\n", path);
+        info!("Sonic save_account_to_local_file: {}\n", path);
         let file = File::create(path.clone());
         match file {
             Ok(mut file) => {
@@ -287,15 +304,15 @@ impl RemoteAccountLoader {
                 let result = serde_json::to_writer_pretty(&mut file, &account_data);
                 match result {
                     Ok(_) => {
-                        info!("save_account_to_local_file: success: {}\n", path);
+                        info!("Sonic save_account_to_local_file: success: {}\n", path);
                     },
                     Err(e) => {
-                        error!("save_account_to_local_file: failed to write file: {:?}\n", e);
+                        error!("Sonic save_account_to_local_file: failed to write file: {:?}\n", e);
                     }
                 }
             },
             Err(e) => {
-                error!("save_account_to_local_file: failed to create file: {:?}\n", e);
+                error!("Sonic save_account_to_local_file: failed to create file: {:?}\n", e);
             }
         }
     }
@@ -313,7 +330,7 @@ impl RemoteAccountLoader {
         }
 
         // println!("Thread {:?}: load_account_via_oracle: {:?} at {} slot {:?} from {:?}",  thread::current().id(), pubkey, genesis_hash, slot, rpc_url.clone());
-        info!("Thread {:?}: load_account_via_oracle: {:?} at {} slot {:?} from {:?}",  thread::current().id(), pubkey, genesis_hash, slot, rpc_url.clone());
+        info!("Sonic Thread {:?}: load_account_via_oracle: {:?} at {} slot {:?} from {:?}",  thread::current().id(), pubkey, genesis_hash, slot, rpc_url.clone());
 
         let client = http::HttpClient::new(Duration::from_secs(30));
         let url = format!("{}/solana/GetAccountInfo", self.config.oracle_url);
@@ -322,7 +339,7 @@ impl RemoteAccountLoader {
             "address": pubkey.to_string(),
             "version": format!("{:?}-{}-{}", source.unwrap_or_default(), genesis_hash, slot),
         });
-        info!("load_account_from_oracle: {}\n", url);
+        info!("Sonic load_account_from_oracle: {}\n", url);
         let res = client.post(url.clone(), &data);
         match res {
             Ok(body) => {
@@ -330,14 +347,14 @@ impl RemoteAccountLoader {
                 let value: serde_json::Result<serde_json::Value> = serde_json::from_str(&body);
                 if let Ok(value) = value {
                     // let value: serde_json::Value = value.unwrap();
-                    info!("load_account_via_hssn: success: {:?}\n", value);
+                    info!("Sonic load_account_via_hssn: success: {:?}\n", value);
                     // println!("load_account_via_oracle: success: {:?}", value);
                     let account = RemoteAccountLoader::deserialize_from_json(value, "result");
                     return account;
                 }
             },
             Err(e) => {
-                warn!("load_account_from_oracle: not found: {:?}, {:?}\n", pubkey, e);
+                warn!("Sonic load_account_from_oracle: not found: {:?}, {:?}\n", pubkey, e);
                 // println!("load_account_from_oracle: not found: {:?}, {:?}\n", pubkey, e);
             }
         }
@@ -358,7 +375,7 @@ impl RemoteAccountLoader {
         }
 
         // println!("Thread {:?}: load_account_via_rpc: {:?} at {} slot {:?} from {:?}",  thread::current().id(), pubkey, genesis_hash, slot, rpc_url.clone());
-        info!("Thread {:?}: load_account_via_rpc: {:?} at {} slot {:?} from {:?}",  thread::current().id(), pubkey, genesis_hash, slot, rpc_url.clone());
+        info!("Sonic Thread {:?}: load_account_via_rpc: {:?} at {} slot {:?} from {:?}",  thread::current().id(), pubkey, genesis_hash, slot, rpc_url.clone());
 
         let rpc_client = RpcClient::new_with_timeout_and_commitment(rpc_url, Duration::from_secs(30), CommitmentConfig::confirmed());
 
@@ -381,7 +398,7 @@ impl RemoteAccountLoader {
                 Some(account)
             },
             Err(e) => {
-                error!("load_account_via_rpc: failed to load account: {:?}\n", e);
+                error!("Sonic load_account_via_rpc: failed to load account: {:?}\n", e);
                 None
             }
         }
@@ -390,13 +407,13 @@ impl RemoteAccountLoader {
     fn get_rpc_url_by_source(&self, source: Option<Pubkey>, genesis_hash: &str, slot: Slot) -> String {
         if let Some(source) = source {
             let path = format!("{}/hypergrid_{:?}_{}_{:?}.json", self.config.accounts_path, source, genesis_hash, slot);
-            info!("load hypergrid node from file: {}\n", path);
+            info!("Sonic load hypergrid node from file: {}\n", path);
             let file = File::open(path);
             match file {
                 Ok(file) => {
                     // read file content to json
                     let _data: serde_json::Value = serde_json::from_reader(file).unwrap();
-                    debug!("load_account_from_local_file: account_data: {:?}", _data);
+                    debug!("Sonic load_account_from_local_file: account_data: {:?}", _data);
                     let node = _data.get("hypergridNode").unwrap();
                     let node_id = node["pubkey"].as_str().unwrap();
                     let node_name = node["name"].as_str().unwrap();
@@ -407,12 +424,12 @@ impl RemoteAccountLoader {
                     if node_role == 2 || node_role == 3 || node_role == 4 {
                         return node_url.to_string();
                     } else {
-                        info!("load hypergrid node from file: invalid source role: {:?}, {:?}, {:?}", node_name, node_id, node_role);
+                        info!("Sonic load hypergrid node from file: invalid source role: {:?}, {:?}, {:?}", node_name, node_id, node_role);
                         return "".to_string();
                     }
                 },
                 Err(e) => {
-                    info!("load hypergrid node from file: failed to open file: {:?}\n", e);
+                    info!("Sonic load hypergrid node from file: failed to open file: {:?}\n", e);
                 }
             }
 
@@ -422,7 +439,7 @@ impl RemoteAccountLoader {
                 if node.role == NODE_TYPE_SONIC || node.role == NODE_TYPE_GRID || node.role == NODE_TYPE_L1 {
                     return node.rpc;
                 } else {
-                    info!("load_account_via_rpc: invalid source role: {:?}, {:?}, {:?}", node.name, node.pubkey, node.role);
+                    info!("Sonic load_account_via_rpc: invalid source role: {:?}, {:?}, {:?}", node.name, node.pubkey, node.role);
                 }
             }
             return "".to_string();
@@ -443,7 +460,7 @@ impl RemoteAccountLoader {
         }
 
         let account = RemoteAccountLoader::deserialize_from_json2(value.clone());
-        info!("deserialize_from_json account: {:?}", account);
+        info!("Sonic deserialize_from_json account: {:?}", account);
         account
 
         // let value_str = value.as_str().unwrap_or("");
@@ -502,7 +519,7 @@ impl RemoteAccountLoader {
         );
         account.remote = true;
 
-        info!("deserialize_from_json2 account: {:?}", account);
+        info!("Sonic deserialize_from_json2 account: {:?}", account);
         Some(account)
     }
 
@@ -514,7 +531,7 @@ impl RemoteAccountLoader {
             "address": source.to_string(),
             "version": format!("{}-{}", genesis_hash, slot),
         });
-        info!("load_hypergrid_nodes: {}, {:?}\n", url, data);
+        info!("Sonic load_hypergrid_nodes: {}, {:?}\n", url, data);
         // println!("load_hypergrid_nodes: {}, {:?}\n", url, data);
         let client = http::HttpClient::new(Duration::from_secs(30));
         let res = client.post(url.clone(), &data);
@@ -526,22 +543,22 @@ impl RemoteAccountLoader {
                 std::fs::create_dir_all(dir).unwrap_or_default();
             }
 
-            info!("save hypergrid node to local file: {}\n", path);
+            info!("Sonic save hypergrid node to local file: {}\n", path);
             let file = File::create(path.clone());
             match file {
                 Ok(mut file) => {
                     let result = file.write_all(body.as_bytes());
                     match result {
                         Ok(_) => {
-                            info!("save hypergrid node to local file: success: {}\n", path);
+                            info!("Sonic save hypergrid node to local file: success: {}\n", path);
                         },
                         Err(e) => {
-                            warn!("save hypergrid node to local file: failed to write file: {:?}\n", e);
+                            warn!("Sonic save hypergrid node to local file: failed to write file: {:?}\n", e);
                         }
                     }
                 },
                 Err(e) => {
-                    warn!("save hypergrid node to local file: failed to create file: {:?}\n", e);
+                    warn!("Sonic save hypergrid node to local file: failed to create file: {:?}\n", e);
                 }
             }
 
@@ -563,12 +580,12 @@ impl RemoteAccountLoader {
                     role: node_role as i32,
                 };
 
-                info!("load_hypergrid_node: success: {:?}\n", node);
+                info!("Sonic load_hypergrid_node: success: {:?}\n", node);
 
                 return Some(node);
             }
         }
-        info!("get_hypergrid_nodes: not found: {:?}\n", url.clone());
+        info!("Sonic get_hypergrid_nodes: not found: {:?}\n", url.clone());
         None
     }
 
@@ -588,26 +605,26 @@ impl RemoteAccountLoader {
             // print!("******* skip: {}\n", pubkey.to_string());
             return None;
         }
-        info!("Thread {:?}: load_account_via_hssn: {:?}",  thread::current().id(), pubkey);
+        info!("Sonic Thread {:?}: load_account_via_hssn: {:?}",  thread::current().id(), pubkey);
         // println!("Thread {:?}: load_account_via_hssn: {:?}",  thread::current().id(), pubkey);
 
         let url = format!("{:?}/hypergrid-ssn/hypergridssn/solana_account/{:?}/{:?}-{}-{:?}",self.config.hssn_rpc_url, pubkey, source.unwrap_or_default(), genesis_hash, slot);
-        info!("load_account_from_hssn: {}\n", url);
+        info!("Sonic load_account_from_hssn: {}\n", url);
         let res = self.http_client.get(url);
         let mut account: Option<AccountSharedData> = None;
         match res {
             Ok(body) => {
-                info!("respone: {:?}", body);
+                info!("Sonic respone: {:?}", body);
                 //convert the response body to json
                 let value: serde_json::Result<serde_json::Value> = serde_json::from_str(&body);
                 if let Ok(value) = value {
                     // let value: serde_json::Value = value.unwrap();
-                    info!("load_account_via_hssn: success: {:?}\n", value);
+                    info!("Sonic load_account_via_hssn: success: {:?}\n", value);
                     account = RemoteAccountLoader::deserialize_from_json(value, "solanaAccount");
                 } 
             },
             Err(e) => {
-                warn!("load_account_from_hssn: not found: {:?}, {:?}\n", pubkey, e);
+                warn!("Sonic load_account_from_hssn: not found: {:?}, {:?}\n", pubkey, e);
             }
         }
 
@@ -616,7 +633,7 @@ impl RemoteAccountLoader {
                 Some(account)
             },
             None => {
-                info!("load_account_from_hssn: not found: {:?}\n", pubkey);
+                info!("Sonic load_account_from_hssn: not found: {:?}\n", pubkey);
                 let account = self.load_account_via_oracle(pubkey, source, genesis_hash, slot);
                 if let Some(account) = account {
                     //load the account from the source
@@ -653,7 +670,7 @@ impl RemoteAccountLoader {
         if !self.enable || Self::ignored_account(pubkey) {
             return;
         }
-        info!("RemoteAccountLoader.deactivate_account: {}, {}", pubkey.to_string(), slot);
+        info!("Sonic RemoteAccountLoader.deactivate_account: {}, {}", pubkey.to_string(), slot);
         match self.get_account(pubkey) {
             Some(account) => {
                 self.account_cache.remove(pubkey);

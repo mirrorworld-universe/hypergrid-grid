@@ -24,6 +24,7 @@ dataDir=$PWD
 	--rpc-pubsub-enable-block-subscription \
 	--rpc-pubsub-enable-vote-subscription \
 	--rpc-threads 128 \
+	--rpc-send-service-max-retries 10 \
 	--account-index program-id \
 	--account-index spl-token-owner \
 	--account-index spl-token-mint \

@@ -6731,6 +6731,7 @@ dependencies = [
 name = "solana-program-runtime"
 version = "1.18.0"
 dependencies = [
+ "ahash 0.8.7",
  "assert_matches",
  "base64 0.21.7",
  "bincode",

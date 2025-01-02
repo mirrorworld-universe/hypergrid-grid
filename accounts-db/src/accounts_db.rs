@@ -2840,7 +2840,7 @@ impl AccountsDb {
 
     ///Sonic: restore remote accounts from the migrated accounts
     fn restore_remote_accounts(&self, genesis_config: &GenesisConfig) {
-        info!("restore_remote_accounts: {:?}", thread::current().id());
+        info!("Sonic restore_remote_accounts: {:?}", thread::current().id());
         let genesis_hash = genesis_config.hash();
         self.accounts_cache.set_genesis_hash(genesis_hash.to_string());
         let pubkey = sonic_account_migrater::migrated_accounts::id();
@@ -2851,16 +2851,16 @@ impl AccountsDb {
             if let MigratedAccountsState::MigratedAccounts(accounts) = state {
                 accounts.iter().for_each(|item | {
                     if self.account_in_indexes(&item.address) {
-                        info!("restore_remote_accounts: already exists: slot: {:?}, address: {:?}, source: {:?}", item.slot, item.address, item.source);
+                        info!("Sonic restore_remote_accounts: already exists: slot: {:?}, address: {:?}, source: {:?}", item.slot, item.address, item.source);
                         return;
                     }
-                    info!("restore_remote_accounts: slot: {:?}, address: {:?}, source: {:?}", item.slot, item.address, item.source);
+                    info!("Sonic restore_remote_accounts: slot: {:?}, address: {:?}, source: {:?}", item.slot, item.address, item.source);
                     // println!("restore_remote_accounts: slot: {:?}, address: {:?}, source: {:?}", item.slot, item.address, item.source);
                     self.accounts_cache.load_accounts_from_remote(item.slot, vec![item.address], item.source)
                 });
             }
         } else {
-            warn!("restore_remote_accounts: failed to load migrated accounts at {:?}", pubkey);
+            warn!("Sonic restore_remote_accounts: failed to load migrated accounts at {:?}", pubkey);
         }
     }
 
@@ -5101,7 +5101,7 @@ impl AccountsDb {
             AccountIndexGetResult::NotFound => {
                 // Sonic: check if the pubkey is from remote in cache.
                 if ancestors.len() > 1 && self.accounts_cache.has_account_from_remote(pubkey) {
-                    // println!("******AccountsDb.read_index_for_accessor_or_load_slow: {:?} {}", std::thread::current().id(), pubkey.to_string());
+                    info!("Sonic chenck has_account_from_remote: {:?} {}", std::thread::current().id(), pubkey.to_string());
                     return Some((0, StorageLocation::Cached, None)); //Sonic: return a dummy slot number
                 }
                 return None;
@@ -7712,12 +7712,12 @@ impl AccountsDb {
             let mut lamports: u64 = 0;
             let remote_accounts = self.accounts_cache.remote_loader.get_account_list();
             if remote_accounts.len() > 0 {
-                info!("_calculate_accounts_hash_from_storages, remote_accounts: {:?}", remote_accounts);
+                info!("Sonic _calculate_accounts_hash_from_storages, remote_accounts: {:?}", remote_accounts);
                 // println!("_calculate_accounts_hash_from_storages, remote_accounts: {:?}", remote_accounts);
 
                 let mut time = Measure::start("filter_remote_accounts");
                 let mut n = 0;
-                info!("_calculate_accounts_hash_from_storages, filter_remote_accounts starting... kind:{:?}, slot:{:?}", kind, slot);
+                info!("Sonic _calculate_accounts_hash_from_storages, filter_remote_accounts starting... kind:{:?}, slot:{:?}", kind, slot);
                 // println!("_calculate_accounts_hash_from_storages, filter_remote_accounts starting... kind:{:?}, slot:{:?}", kind, slot);
                 for chis in cache_hash_intermediates.clone() {
                     for item in chis {
@@ -7726,7 +7726,7 @@ impl AccountsDb {
                             continue;
                         }
                         if remote_accounts.contains(&item.pubkey){
-                            info!("_calculate_accounts_hash_from_storages, remote key: {:?}", item);
+                            info!("Sonic _calculate_accounts_hash_from_storages, remote key: {:?}", item);
                             // println!("_calculate_accounts_hash_from_storages, remote key: {:?}", item);
                             lamports += item.lamports;
                         // } else {
@@ -7743,7 +7743,7 @@ impl AccountsDb {
                     }
                 }
                 time.stop();
-                info!("_calculate_accounts_hash_from_storages, filter_remote_accounts, kind:{:?}, slot:{:?}, size:{:?}, time:{:?}us", kind, slot, n, time.as_us());
+                info!("Sonic _calculate_accounts_hash_from_storages, filter_remote_accounts, kind:{:?}, slot:{:?}, size:{:?}, time:{:?}us", kind, slot, n, time.as_us());
                 // println!("_calculate_accounts_hash_from_storages, filter_remote_accounts, kind:{:?}, slot:{:?}, size:{:?}, time:{:?}us", kind, slot, n, time.as_us());
             }
             

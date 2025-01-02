@@ -248,7 +248,7 @@ impl AccountsCache {
     }
 
     pub fn set_genesis_hash(&self, genesis_hash: String) {
-        info!("AccountsCache::set_genesis_hash, {:?}", genesis_hash);
+        info!("Sonic AccountsCache::set_genesis_hash, {:?}", genesis_hash);
         // println!("AccountsCache::set_genesis_hash, {}", genesis_hash);
         self.genesis_hash.write().unwrap().write_str(genesis_hash.as_str()).unwrap();
     }
@@ -256,7 +256,7 @@ impl AccountsCache {
     //Sonic: load accounts from remote
     pub fn load_accounts_from_remote(&self, slot: Slot, pubkeys: Vec<Pubkey>, source: Option<Pubkey>) {
         let hash = self.genesis_hash.read().unwrap();
-        info!("AccountsCache::load_accounts_from_remote, {:?}, {:}, {:?}", pubkeys, hash, slot);
+        info!("Sonic AccountsCache::load_accounts_from_remote, {:?}, {:}, {:?}", pubkeys, hash, slot);
         RemoteAccountLoader::load_accounts(&self.remote_loader, hash.as_str(), slot, pubkeys, source);
 
         // let remote_loader = self.remote_loader.clone();
@@ -273,7 +273,7 @@ impl AccountsCache {
 
     //Sonic: load accounts from remote
     pub fn deactivate_remote_accounts(&self, slot: Slot, pubkeys: Vec<Pubkey>) {
-        info!("AccountsCache::deactivate_remote_accounts, {:?}", pubkeys);
+        info!("Sonic AccountsCache::deactivate_remote_accounts, {:?}", pubkeys);
         RemoteAccountLoader::deactivate_accounts(&self.remote_loader, slot, pubkeys);
 
         // let remote_loader = self.remote_loader.clone();
