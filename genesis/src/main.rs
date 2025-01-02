@@ -113,7 +113,7 @@ fn add_custom_accounts(
     genesis_config: &mut GenesisConfig,
 ) {
     // Sonic: Add the native mint
-    println!("Adding account {:?} to the genesis config", inline_spl_token::native_mint::id());
+    println!("Sonic Adding account {:?} to the genesis config", inline_spl_token::native_mint::id());
     let native_mint_account = solana_sdk::account::AccountSharedData::from(Account {
         owner: inline_spl_token::id(),
         data: inline_spl_token::native_mint::ACCOUNT_DATA.to_vec(),
@@ -124,7 +124,7 @@ fn add_custom_accounts(
     genesis_config.add_account(inline_spl_token::native_mint::id(), native_mint_account);
 
     // Sonic: Add the native mint 2022
-    println!("Adding account {:?} to the genesis config", inline_spl_token_2022::native_mint::id());
+    println!("Sonic Adding account {:?} to the genesis config", inline_spl_token_2022::native_mint::id());
     let native_mint_account = solana_sdk::account::AccountSharedData::from(Account {
         owner: inline_spl_token_2022::id(),
         data: inline_spl_token::native_mint::ACCOUNT_DATA.to_vec(),
@@ -135,7 +135,7 @@ fn add_custom_accounts(
     genesis_config.add_account(inline_spl_token_2022::native_mint::id(), native_mint_account);
 
     // Sonic: Add Sonic account migrater
-    println!("Adding account {:?} to the genesis config", sonic_account_migrater::migrated_accounts::id());
+    println!("println Adding account {:?} to the genesis config", sonic_account_migrater::migrated_accounts::id());
     let migrater_data_account = solana_sdk::account::AccountSharedData::from(Account {
         owner: sonic_account_migrater::program::id(),
         data: vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
@@ -150,7 +150,7 @@ fn add_custom_accounts(
     genesis_config.add_account(sonic_account_migrater::migrated_accounts::id(), migrater_data_account);
 
     // Sonic: Add Sonic fee settlement data account
-    println!("Adding account {:?} to the genesis config", sonic_fee_settlement::data_account::id());
+    println!("println Adding account {:?} to the genesis config", sonic_fee_settlement::data_account::id());
     let migrater_data_account = solana_sdk::account::AccountSharedData::from(Account {
         owner: sonic_fee_settlement::program::id(),
         data: vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
