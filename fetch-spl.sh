@@ -7,6 +7,7 @@
 set -e
 
 upgradeableLoader=BPFLoaderUpgradeab1e11111111111111111111111
+upgradeAuthority=${SOLANA_RUN_SH_UPGRADE_AUTHORITY:-none}
 
 fetch_program() {
   declare name=$1
@@ -17,7 +18,7 @@ fetch_program() {
   declare so=spl_$name-$version.so
 
   if [[ $loader == "$upgradeableLoader" ]]; then
-    genesis_args+=(--upgradeable-program "$address" "$loader" "$so" none)
+    genesis_args+=(--upgradeable-program "$address" "$loader" "$so" "$upgradeAuthority")
   else
     genesis_args+=(--bpf-program "$address" "$loader" "$so")
   fi
