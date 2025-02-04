@@ -2,6 +2,7 @@
 //!
 //! Steps to add a new feature are outlined below. Note that these steps only cover
 //! the process of getting a feature into the core Solana code.
+//!
 //! - For features that are unambiguously good (ie bug fixes), these steps are sufficient.
 //! - For features that should go up for community vote (ie fee structure changes), more
 //!   information on the additional steps to follow can be found at:
@@ -463,7 +464,7 @@ pub mod preserve_rent_epoch_for_rent_exempt_accounts {
 }
 
 pub mod enable_bpf_loader_extend_program_ix {
-    solana_sdk::declare_id!("8Zs9W7D9MpSEtUWSQdGniZk2cNmV22y6FLJwCx53asme");
+    solana_sdk::declare_id!("JC5GB7HH2BD5NuFfiWBV76XAnsvEpPz8LgPEvVb1tn8Q");
 }
 
 pub mod enable_early_verification_of_account_modifications {
