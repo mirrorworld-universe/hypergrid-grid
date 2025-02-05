@@ -58,12 +58,12 @@ fi
 if [[ -e "$ledgerDir"/genesis.bin || -e "$ledgerDir"/genesis.tar.bz2 ]]; then
   echo "Use existing genesis"
 else
-  export SOLANA_RUN_SH_UPGRADE_AUTHORITY=`solana address`
+  export SOLANA_RUN_SH_UPGRADE_AUTHORITY=$(solana address)
   ./fetch-spl.sh
   if [[ -r spl-genesis-args.sh ]]; then
     SPL_GENESIS_ARGS=$(cat spl-genesis-args.sh)
   fi
-  
+
   if [[ -r primordial_accounts_to_genesis.yml ]]; then
     SOLANA_RUN_SH_GENESIS_ARGS="--primordial-accounts-file primordial_accounts_to_genesis.yml"
   fi
@@ -73,12 +73,11 @@ else
     --hashes-per-tick sleep \
     --faucet-lamports $SOLANA_FAUCET_LAMPORTS \
     --bootstrap-validator \
-      "$validator_identity" \
-      "$validator_vote_account" \
-      "$validator_stake_account" \
+    "$validator_identity" \
+    "$validator_vote_account" \
+    "$validator_stake_account" \
     --ledger "$ledgerDir" \
     --cluster-type "$SOLANA_RUN_SH_CLUSTER_TYPE" \
     $SPL_GENESIS_ARGS \
     $SOLANA_RUN_SH_GENESIS_ARGS
 fi
-
