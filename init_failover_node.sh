@@ -59,3 +59,25 @@ if [[ -e $vote_account_identity ]]; then
 else
   solana-keygen new --no-passphrase -so "$vote_account_identity"
 fi
+
+validator_stake_account="$dataDir/validator-stake-account.json"
+if [[ -e $validator_stake_account ]]; then
+  echo "Use existing validator stake account keypair"
+else
+  solana-keygen new --no-passphrase -so "$validator_stake_account"
+fi
+
+authorized_withdrawer_identity="$dataDir/authorized-withdrawer-identity.json"
+if [[ -e $authorized_withdrawer_identity ]]; then
+  echo "Use existing authorized withdrawal identity keypair"
+else
+  solana-keygen new --no-passphrase -so "$authorized_withdrawer_identity"
+fi
+
+# Only create the vote account if it doesn't already exist
+
+# ./bin/solana create-vote-account -ut \
+#   --fee-payer $secondary_validator_identity \
+#   $vote_account_identity \
+#   $secondary_validator_identity \
+#   $authorized_withdrawer_identity
