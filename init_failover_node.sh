@@ -1,15 +1,11 @@
 #!/usr/bin/env bash
 #
-# Run a minimal Solana cluster.  Ctrl-C to exit.
+# Run a minimal secondary failover node for existing cluster.  Ctrl-C to exit.
 #
 # Before running this script ensure standard Solana programs are available
 # in the PATH, or that `cargo build` ran successfully
 #
 set -e
-
-SOLANA_FAUCET_LAMPORTS=500000000000000000
-SOLANA_RUN_SH_CLUSTER_TYPE=mainnet-beta
-PATH=./bin:$PATH
 
 ok=true
 for program in solana-{faucet,genesis,keygen,validator}; do
@@ -36,18 +32,34 @@ if ! solana address; then
   echo Generating default keypair
   solana-keygen new --no-passphrase
 fi
+
+set -x
+if ! solana address; then
+  echo Generating default keypair
+  solana-keygen new --no-passphrase
+fi
+
 validator_identity="$dataDir/validator-identity.json"
 if [[ -e $validator_identity ]]; then
   echo "Use existing validator keypair"
 else
   solana-keygen new --no-passphrase -so "$validator_identity"
 fi
-validator_vote_account="$dataDir/validator-vote-account.json"
-if [[ -e $validator_vote_account ]]; then
-  echo "Use existing validator vote account keypair"
+
+secondary_validator_identity="$dataDir/secondary-validator-identity.json"
+if [[ -e $secondary_validator_identity ]]; then
+  echo "Use existing secondary validator keypair"
 else
-  solana-keygen new --no-passphrase -so "$validator_vote_account"
+  solana-keygen new --no-passphrase -so "$secondary_validator_identity"
 fi
+
+vote_account_identity="$dataDir/vote_account_identity.json"
+if [[ -e $vote_account_identity ]]; then
+  echo "Use existing vote account keypair"
+else
+  solana-keygen new --no-passphrase -so "$vote_account_identity"
+fi
+
 validator_stake_account="$dataDir/validator-stake-account.json"
 if [[ -e $validator_stake_account ]]; then
   echo "Use existing validator stake account keypair"
@@ -55,29 +67,17 @@ else
   solana-keygen new --no-passphrase -so "$validator_stake_account"
 fi
 
-if [[ -e "$ledgerDir"/genesis.bin || -e "$ledgerDir"/genesis.tar.bz2 ]]; then
-  echo "Use existing genesis"
+authorized_withdrawer_identity="$dataDir/authorized-withdrawer-identity.json"
+if [[ -e $authorized_withdrawer_identity ]]; then
+  echo "Use existing authorized withdrawal identity keypair"
 else
-  export SOLANA_RUN_SH_UPGRADE_AUTHORITY=$(solana address)
-  ./fetch-spl.sh
-  if [[ -r spl-genesis-args.sh ]]; then
-    SPL_GENESIS_ARGS=$(cat spl-genesis-args.sh)
-  fi
-
-  if [[ -r primordial_accounts_to_genesis.yml ]]; then
-    SOLANA_RUN_SH_GENESIS_ARGS="--primordial-accounts-file primordial_accounts_to_genesis.yml"
-  fi
-
-  # shellcheck disable=SC2086
-  solana-genesis \
-    --hashes-per-tick sleep \
-    --faucet-lamports $SOLANA_FAUCET_LAMPORTS \
-    --bootstrap-validator \
-    "$validator_identity" \
-    "$validator_vote_account" \
-    "$validator_stake_account" \
-    --ledger "$ledgerDir" \
-    --cluster-type "$SOLANA_RUN_SH_CLUSTER_TYPE" \
-    $SPL_GENESIS_ARGS \
-    $SOLANA_RUN_SH_GENESIS_ARGS
+  solana-keygen new --no-passphrase -so "$authorized_withdrawer_identity"
 fi
+
+# Only create the vote account if it doesn't already exist
+
+# ./bin/solana create-vote-account -ut \
+#   --fee-payer $secondary_validator_identity \
+#   $vote_account_identity \
+#   $secondary_validator_identity \
+#   $authorized_withdrawer_identity
