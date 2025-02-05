@@ -52,3 +52,10 @@ if [[ -e $secondary_validator_identity ]]; then
 else
   solana-keygen new --no-passphrase -so "$secondary_validator_identity"
 fi
+
+vote_account_identity="$dataDir/vote_account_identity.json"
+if [[ -e $vote_account_identity ]]; then
+  echo "Use existing vote account keypair"
+else
+  solana-keygen new --no-passphrase -so "$vote_account_identity"
+fi

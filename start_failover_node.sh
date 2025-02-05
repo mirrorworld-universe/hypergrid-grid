@@ -11,11 +11,13 @@ KNOWN_VALIDATOR=${KNOWN_VALIDATOR:-"8DBhFQTe1WsvWZYhHYv86ku4JM4AuWvxtZMRYBQHhHVg
 ENTRYPOINT=${ENTRYPOINT:-"api.mainnet-internal.sonic.game:8001"}
 
 validator_identity="$dataDir/validator-identity.json"
+vote_account_identity="$dataDir/vote_account_identity.json"
 secondary_validator_identity="$dataDir/secondary-validator-identity.json"
 
 ./bin/solana-validator \
   --identity $secondary_validator_identity \
   --authorized-voter $validator_identity \
+  --vote-account $vote_account_identity \
   --known-validator $KNOWN_VALIDATOR \
   --only-known-rpc \
   --ledger $ledgerDir \
