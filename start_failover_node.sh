@@ -6,9 +6,9 @@ ledgerDir=$PWD/ledger
 # For production, please change these variables to match the correct
 # genesis hash, known validator, and entrypoints
 #
-GENESIS_HASH=${GENESIS_HASH:-"JDUh2fZyE8xLqSafQptssomfiutoPHQdzT242wMrhzXF"}
+GENESIS_HASH=${GENESIS_HASH:-"Cmz2Q9FETPotP8oLVQeRZvGvjdaDxJ2CdTviE4xStNZt"}
 KNOWN_VALIDATOR=${KNOWN_VALIDATOR:-"8DBhFQTe1WsvWZYhHYv86ku4JM4AuWvxtZMRYBQHhHVg"}
-ENTRYPOINT=${ENTRYPOINT:-"api.mainnet-internal.sonic.game:8001"}
+ENTRYPOINT=${ENTRYPOINT:-"54.70.168.130:8001"}
 
 validator_identity="$dataDir/validator-identity.json"
 vote_account_identity="$dataDir/vote_account_identity.json"
