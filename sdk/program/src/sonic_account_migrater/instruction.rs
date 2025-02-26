@@ -18,4 +18,6 @@ pub enum ProgramInstruction {
         node_id: Pubkey,
         addresses: Vec<Pubkey>,
     },
+    //Initialize data account
+    InitializeDataAccount,
 }
