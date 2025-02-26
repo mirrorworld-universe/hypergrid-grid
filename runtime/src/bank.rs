@@ -561,6 +561,7 @@ impl PartialEq for Bank {
             cluster_type: _,
             lazy_rent_collection: _,
             rewards_pool_pubkeys: _,
+            genesis_accounts_pubkeys: _, // Sonic: genesis accounts pubkeys
             transaction_debug_keys: _,
             transaction_log_collector_config: _,
             transaction_log_collector: _,
@@ -797,6 +798,9 @@ pub struct Bank {
     // this is temporary field only to remove rewards_pool entirely
     pub rewards_pool_pubkeys: Arc<HashSet<Pubkey>>,
 
+    // Sonic: genesis accounts pubkeys
+    pub genesis_accounts_pubkeys: Arc<HashSet<Pubkey>>,
+
     transaction_debug_keys: Option<Arc<HashSet<Pubkey>>>,
 
     // Global configuration for how transaction logs should be collected across all banks
@@ -1010,6 +1014,7 @@ impl Bank {
             cluster_type: Option::<ClusterType>::default(),
             lazy_rent_collection: AtomicBool::default(),
             rewards_pool_pubkeys: Arc::<HashSet<Pubkey>>::default(),
+            genesis_accounts_pubkeys: Arc::<HashSet<Pubkey>>::default(), // Sonic: genesis accounts pubkeys
             transaction_debug_keys: Option::<Arc<HashSet<Pubkey>>>::default(),
             transaction_log_collector_config: Arc::<RwLock<TransactionLogCollectorConfig>>::default(
             ),
@@ -1257,6 +1262,10 @@ impl Bank {
         let (rewards_pool_pubkeys, rewards_pool_pubkeys_time_us) =
             measure_us!(parent.rewards_pool_pubkeys.clone());
 
+        // Sonic: genesis accounts pubkeys
+        let (genesis_accounts_pubkeys, genesis_accounts_pubkeys_time_us) =
+            measure_us!(parent.genesis_accounts_pubkeys.clone());
+
         let (transaction_debug_keys, transaction_debug_keys_time_us) =
             measure_us!(parent.transaction_debug_keys.clone());
 
@@ -1317,6 +1326,7 @@ impl Bank {
             cluster_type: parent.cluster_type,
             lazy_rent_collection: AtomicBool::new(parent.lazy_rent_collection.load(Relaxed)),
             rewards_pool_pubkeys,
+            genesis_accounts_pubkeys, //Sonic: genesis accounts pubkeys
             transaction_debug_keys,
             transaction_log_collector_config,
             transaction_log_collector: Arc::new(RwLock::new(TransactionLogCollector::default())),
@@ -1824,6 +1834,7 @@ impl Bank {
             cluster_type: Some(genesis_config.cluster_type),
             lazy_rent_collection: AtomicBool::default(),
             rewards_pool_pubkeys: Arc::<HashSet<Pubkey>>::default(),
+            genesis_accounts_pubkeys: Arc::<HashSet<Pubkey>>::default(), //Sonic: genesis accounts pubkeys
             transaction_debug_keys: debug_keys,
             transaction_log_collector_config: Arc::<RwLock<TransactionLogCollectorConfig>>::default(
             ),
@@ -5045,6 +5056,21 @@ impl Bank {
                                     }
                                 }
                             },
+                            sonic_account_migrater_program::instruction::ProgramInstruction::InitializeDataAccount => {
+                                has_local_account = true;
+                                ix.accounts.iter().for_each(|account_index| {
+                                    //Sonic: check if the signer account is a genesis account.
+                                    if msg.is_signer(*account_index as usize) {
+                                        let account = account_keys.get(*account_index as usize).unwrap();
+                                        if self.genesis_accounts_pubkeys.contains(account) {
+                                            // Sonic: if the signer account is a genesis account, the instruction will pass to runtime,
+                                            // otherwise an error will be thrown.
+                                            has_local_account = false;
+                                            return;
+                                        }
+                                    }
+                                });
+                            },
                         }
                     },
                 }
@@ -6790,6 +6816,14 @@ impl Bank {
     ) {
         self.rewards_pool_pubkeys =
             Arc::new(genesis_config.rewards_pools.keys().cloned().collect());
+        
+        // Sonic: Initialize the genesis accounts
+        let mut init_accounts = HashSet::new();
+        genesis_config.accounts.iter().for_each(|(pubkey, account)| {
+            if account.owner == solana_sdk::system_program::id() {
+                init_accounts.insert(*pubkey);
+            }
+        });
 
         self.apply_feature_activations(
             ApplyFeatureActivationsCaller::FinishInit,
