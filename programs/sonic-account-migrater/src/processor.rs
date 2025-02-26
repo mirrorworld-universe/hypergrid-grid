@@ -26,11 +26,48 @@ declare_process_instruction!(Entrypoint, DEFAULT_COMPUTE_UNITS, |invoke_context|
             node_id,
             addresses,
         } => Processor::migrate_source_accounts(invoke_context, node_id, addresses),
+        ProgramInstruction::InitializeDataAccount => Processor::initialize_data_account(invoke_context),
     }
 });
 
 pub struct Processor;
 impl Processor {
+    fn initialize_data_account(invoke_context: &mut InvokeContext,) -> Result<(), InstructionError> {
+        let transaction_context = &invoke_context.transaction_context;
+        let instruction_context = transaction_context.get_current_instruction_context()?;
+
+        let n = instruction_context.get_number_of_instruction_accounts();
+        if n < 1 {
+            ic_msg!(invoke_context, "No accounts provided");
+            return Err(InstructionError::NotEnoughAccountKeys);
+        }
+
+        let mut data_account_index: u16 = 0;
+        for i in 0..n {
+            let account = instruction_context.try_borrow_instruction_account(transaction_context, i)?;
+            if migrated_accounts::check_id(account.get_key()) && !account.is_signer() && account.is_writable() {
+                ic_msg!(invoke_context, "Account {:?} is not signer and writable.", account.get_key());
+                data_account_index = i;
+            }
+        }
+        
+        let mut data_account = instruction_context.try_borrow_instruction_account(transaction_context, data_account_index)?;
+        if let MigratedAccountsState::MigratedAccounts(_) = data_account.get_state()? {
+            ic_msg!(invoke_context, "data account is alread initialized."); 
+            return Err(InstructionError::InvalidAccountData);
+        } else {
+            let accouts: HashMap<Pubkey, MigratedAccount> = HashMap::new();
+            let state = MigratedAccountsState::MigratedAccounts(accouts.values().cloned().collect::<Vec<MigratedAccount>>());
+            let serialized_data = bincode::serialize(&state).map_err(|_| InstructionError::GenericError)?;
+            data_account.set_data_from_slice(&serialized_data)?;
+        }
+
+        let clock = invoke_context.get_sysvar_cache().get_clock()?;
+        ic_msg!(invoke_context, "Data Account is initialized at slot {}.", clock.slot);
+
+        Ok(())
+    }
+
     fn migrate_remote_accounts(
         invoke_context: &mut InvokeContext,
         addresses: Vec<Pubkey>,
@@ -73,6 +110,7 @@ impl Processor {
             });
         } else {
             ic_msg!(invoke_context, "data account is not initialized."); 
+            return Err(InstructionError::InvalidAccountData);
         }
 
         let clock = invoke_context.get_sysvar_cache().get_clock()?;
@@ -150,6 +188,7 @@ impl Processor {
             });
         } else {
             ic_msg!(invoke_context, "Data account is not initialized."); 
+            return Err(InstructionError::InvalidAccountData);
         }
         
         let clock = invoke_context.get_sysvar_cache().get_clock()?;
