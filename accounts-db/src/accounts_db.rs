@@ -18,7 +18,6 @@
 //! tracks the number of commits to the entire data store. So the latest
 //! commit for each slot entry would be indexed.
 
-use blake3::traits::digest::crypto_common::IvSizeUser;
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
 use {
@@ -114,6 +113,7 @@ use {
         thread::{self, sleep, Builder},
         time::{Duration, Instant},
     },
+    ahash::AHashSet,
     tempfile::TempDir,
 };
 
@@ -7719,10 +7719,20 @@ impl AccountsDb {
                 end: PUBKEY_BINS_FOR_CALCULATING_HASHES,
             };
 
+            //Sonic: get remote accounts to excude their lamports from the hash calculation
+            let historical_accounts = self.accounts_cache.remote_loader.get_historical_accounts();
+            info!("calculate_accounts_hash_from_storages: slot:{slot}, kind: {kind:?}, historical_accounts: {historical_accounts:?}"); 
+            let mut remote_accounts:AHashSet<Pubkey> = AHashSet::new();
+            historical_accounts.iter().for_each(|(pubkey, slot)| {
+                remote_accounts.insert(*pubkey);
+            });
+            info!("calculate_accounts_hash_from_storages: slot:{slot}, kind: {kind:?}, remote_accounts: {remote_accounts:?}");
+
             let accounts_hasher = AccountsHasher {
                 zero_lamport_accounts: kind.zero_lamport_accounts(),
                 dir_for_temp_cache_files: transient_accounts_hash_cache_path,
                 active_stats: &self.active_stats,
+                remote_accounts: Arc::new(remote_accounts), //Sonic: add remote_accounts
             };
 
             // get raw data by scanning
@@ -7754,45 +7764,6 @@ impl AccountsDb {
                 .map(|d| d.as_ref().unwrap().get_cache_hash_data())
                 .collect::<Vec<_>>();
             
-            //Sonic: calculate the total lamports of remote accounts
-            let mut lamports: u64 = 0;
-            let remote_accounts = self.accounts_cache.remote_loader.get_account_list();
-            if remote_accounts.len() > 0 {
-                info!("Sonic _calculate_accounts_hash_from_storages, remote_accounts: {:?}", remote_accounts);
-                // println!("_calculate_accounts_hash_from_storages, remote_accounts: {:?}", remote_accounts);
-
-                let mut time = Measure::start("filter_remote_accounts");
-                let mut n = 0;
-                info!("Sonic _calculate_accounts_hash_from_storages, filter_remote_accounts starting... kind:{:?}, slot:{:?}", kind, slot);
-                // println!("_calculate_accounts_hash_from_storages, filter_remote_accounts starting... kind:{:?}, slot:{:?}", kind, slot);
-                for chis in cache_hash_intermediates.clone() {
-                    for item in chis {
-                        n = n + 1;
-                        if item.pubkey.to_string().contains("11111111111111111") {
-                            continue;
-                        }
-                        if remote_accounts.contains(&item.pubkey){
-                            info!("Sonic _calculate_accounts_hash_from_storages, remote key: {:?}", item);
-                            // println!("_calculate_accounts_hash_from_storages, remote key: {:?}", item);
-                            lamports += item.lamports;
-                        // } else {
-                        //     //Sonic: if the account is not in accounts_index, assume it was from a remote account.
-                        //     match self.accounts_index.get(&item.pubkey, config.ancestors, Some(slot)) {
-                        //         // we bail out pretty early for missing.
-                        //         AccountIndexGetResult::NotFound => {
-                        //             info!("_calculate_accounts_hash_from_storages, missing key: {:?}", item);
-                        //             // lamports += item.lamports;
-                        //         },
-                        //         _ => {},
-                        //     }
-                        }
-                    }
-                }
-                time.stop();
-                info!("Sonic _calculate_accounts_hash_from_storages, filter_remote_accounts, kind:{:?}, slot:{:?}, size:{:?}, time:{:?}us", kind, slot, n, time.as_us());
-                // println!("_calculate_accounts_hash_from_storages, filter_remote_accounts, kind:{:?}, slot:{:?}, size:{:?}, time:{:?}us", kind, slot, n, time.as_us());
-            }
-            
             // turn raw data into merkle tree hashes and sum of lamports
             let (accounts_hash, capitalization) =
                 accounts_hasher.rest_of_hash_calculation(&cache_hash_intermediates, &mut stats);
@@ -7802,9 +7773,8 @@ impl AccountsDb {
                     AccountsHashKind::Incremental(IncrementalAccountsHash(accounts_hash))
                 }
             };
-            //Sonic: subtract the lamports of remote accounts from the capitalization
-            let capitalization = capitalization - lamports;
-
+            // Sonic:
+            info!("calculate_accounts_hash_from_storages: kind: {kind:?}, stats: {stats:?}");
             info!("calculate_accounts_hash_from_storages: slot: {slot}, {accounts_hash:?}, capitalization: {capitalization}");
             Ok((accounts_hash, capitalization))
         };

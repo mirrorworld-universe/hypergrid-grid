@@ -28,6 +28,7 @@ use {
         },
         thread, time,
     },
+    ahash::AHashSet,
     tempfile::tempfile_in,
 };
 pub const MERKLE_FANOUT: usize = 16;
@@ -473,6 +474,7 @@ pub struct AccountsHasher<'a> {
     /// The directory where temporary cache files are put
     pub dir_for_temp_cache_files: PathBuf,
     pub(crate) active_stats: &'a ActiveStats,
+    pub remote_accounts: Arc<AHashSet<Pubkey>>,// Sonic: accounts to exclude from hash calculation
 }
 
 /// Pointer to a specific item in chunked accounts hash slices.
@@ -1150,6 +1152,10 @@ impl<'a> AccountsHasher<'a> {
 
         let mut overall_sum = 0;
 
+        // Sonic: skip accounts that are remote
+        let remote_accounts = self.remote_accounts.clone();
+        // info!("de_dup_accounts_in_parallel: remote accounts: {remote_accounts:?}");
+
         while let Some(pointer) = working_set.pop() {
             let key = &sorted_data_by_pubkey[pointer.slot_group_index][pointer.offset].pubkey;
 
@@ -1163,9 +1169,15 @@ impl<'a> AccountsHasher<'a> {
 
             // add lamports and get hash
             if item.lamports != 0 {
-                overall_sum = Self::checked_cast_for_capitalization(
-                    item.lamports as u128 + overall_sum as u128,
-                );
+                // Sonic: skip accounts that are remote
+                if remote_accounts.is_empty() || !remote_accounts.contains(&item.pubkey) {
+                    overall_sum = Self::checked_cast_for_capitalization(
+                        item.lamports as u128 + overall_sum as u128,
+                    );
+                } else {
+                    info!("de_dup_accounts_in_parallel: Skipping remote account: {:?}, pointer:{:?}", item.pubkey, pointer);
+                }
+                
                 hashes.write(&item.hash.0);
             } else {
                 // if lamports == 0, check if they should be included
@@ -1333,6 +1345,7 @@ mod tests {
                 zero_lamport_accounts: ZeroLamportAccounts::Excluded,
                 dir_for_temp_cache_files,
                 active_stats: &ACTIVE_STATS,
+                remote_accounts: Arc::new(AHashSet::default()), //Sonic: add remote_accounts
             }
         }
     }
