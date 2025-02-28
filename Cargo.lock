@@ -5301,6 +5301,7 @@ dependencies = [
 name = "solana-accounts-db"
 version = "1.18.0"
 dependencies = [
+ "ahash 0.8.7",
  "arrayref",
  "assert_matches",
  "bincode",

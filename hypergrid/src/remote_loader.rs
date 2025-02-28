@@ -165,6 +165,34 @@ impl RemoteAccountLoader {
         pubkeys
     }
 
+    pub fn get_historical_accounts(&self) -> AHashSet<(Pubkey, Slot)> {
+        // let path = format!("{}/{:?}_{:?}_{}_{:?}.json", self.config.accounts_path, pubkey, source.unwrap_or_default(), genesis_hash, slot);
+
+        // list all file in the path: self.config.accounts_path
+        let mut pubkeys = AHashSet::new();
+        let path = std::path::Path::new(&self.config.accounts_path);
+        if path.exists() {
+            let entries = std::fs::read_dir(path).unwrap();
+            for entry in entries {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                let file_name = path.file_name().unwrap().to_str().unwrap();
+                if !file_name.ends_with(".json") || file_name.starts_with("hypergrid_") {
+                    continue;
+                }
+                let parts: Vec<&str> = file_name.split("_").collect();
+                if parts.len() == 4 {
+                    let pubkey = Pubkey::from_str(parts[0]).unwrap();
+                    let slot = parts[3].split(".").collect::<Vec<&str>>()[0];
+                    //convert slot to u64
+                    let slot = slot.parse::<u64>().unwrap();
+                    pubkeys.insert((pubkey, slot));
+                }
+            }
+        }
+        pubkeys
+    }
+
     pub fn load_accounts(remote_loader: &Arc<Self>, genesis_hash: &str, slot: Slot, pubkeys: Vec<Pubkey>, source: Option<Pubkey>) {
         remote_loader.runtime().spawn({
             let loader = remote_loader.clone();
