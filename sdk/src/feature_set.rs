@@ -144,7 +144,7 @@ pub mod zk_token_sdk_enabled {
 }
 
 pub mod curve25519_syscall_enabled {
-    solana_sdk::declare_id!("7rcw5UtqgDTBBv2EcynNfYckgdAaH1MAsCjKgXMkN7Ri");
+    solana_sdk::declare_id!("GCMvKQfeE4jaBuSeXcz47M2vijmY8hJicoMLBbP2XvjL");
 }
 
 pub mod curve25519_restrict_msm_length {
@@ -464,7 +464,7 @@ pub mod preserve_rent_epoch_for_rent_exempt_accounts {
 }
 
 pub mod enable_bpf_loader_extend_program_ix {
-    solana_sdk::declare_id!("JC5GB7HH2BD5NuFfiWBV76XAnsvEpPz8LgPEvVb1tn8Q");
+    solana_sdk::declare_id!("2py6M1fNSBn331NzLedQzYon8w3uDSn79Htpostb11cd");
 }
 
 pub mod enable_early_verification_of_account_modifications {
