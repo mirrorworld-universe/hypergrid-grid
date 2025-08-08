@@ -6,7 +6,7 @@ ledgerDir=$PWD/ledger
 # For production, please change these variables to match the correct
 # genesis hash, known validator, and entrypoints
 #
-GENESIS_HASH=${GENESIS_HASH:-"Cmz2Q9FETPotP8oLVQeRZvGvjdaDxJ2CdTviE4xStNZt"}
+GENESIS_HASH=${GENESIS_HASH:-"AkeT79MNAcsWeuECsTW7vnz6K3w5zqUWkgHYTZSZeJWT"}
 KNOWN_VALIDATOR=${KNOWN_VALIDATOR:-"8DBhFQTe1WsvWZYhHYv86ku4JM4AuWvxtZMRYBQHhHVg"}
 ENTRYPOINT=${ENTRYPOINT:-"54.70.168.130:8001"}
 
