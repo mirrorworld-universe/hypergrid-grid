@@ -62,7 +62,7 @@ impl ClusterType {
                 Some(Hash::from_str("4uhcVJyU9pJkvQyS88uRDiswHXSCkY3zQawwpjk2NsNY").unwrap())
             }
             Self::Devnet => {
-                Some(Hash::from_str("HNyy9nVwWiV4E5LJDivPxAmqWJtepG3uNzejLPXKgawa").unwrap())
+                Some(Hash::from_str("7fQiSmTTk4m7AKBFJuPAV4jzVVEcpAjmUbs7xFSPiGZs").unwrap())
             }
             Self::Development => None,
         }
