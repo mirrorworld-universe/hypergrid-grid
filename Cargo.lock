@@ -7823,7 +7823,7 @@ dependencies = [
 
 [[package]]
 name = "sonic-account-migrater-program"
-version = "1.18.23"
+version = "1.18.26"
 dependencies = [
  "bincode",
  "bytemuck",
@@ -7842,7 +7842,7 @@ dependencies = [
 
 [[package]]
 name = "sonic-fee-settlement-program"
-version = "1.18.23"
+version = "1.18.26"
 dependencies = [
  "bincode",
  "bytemuck",
@@ -7861,7 +7861,7 @@ dependencies = [
 
 [[package]]
 name = "sonic-hypergrid"
-version = "1.18.23"
+version = "1.18.26"
 dependencies = [
  "ahash 0.8.7",
  "base64 0.21.7",
