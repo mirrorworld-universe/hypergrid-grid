@@ -288,40 +288,25 @@ impl RemoteAccountLoader {
             }
         }
 
-        let account: Option<AccountSharedData>;
-        match source {
-            Some(source) => {
-                account = self.load_account_via_hssn(pubkey, Some(source), genesis_hash, slot);
-            }
-            None => {
-                account = self.load_account_via_oracle(pubkey, None, genesis_hash, slot);
-            }
+        let account = if let Some(source) = source {
+            self.load_account_via_hssn(pubkey, Some(source), genesis_hash, slot)
+        } else {
+            self.load_account_via_oracle(pubkey, None, genesis_hash, slot)
+        }?;
+
+        //Sonic: insert the account to the cache
+        self.account_cache.insert(*pubkey, (account.clone(), slot));
+
+        //Sonic: save the account to the local file
+        self.save_account_to_local_file(genesis_hash, slot, pubkey, source, account.clone());
+
+        //Sonic: check if programdata account exists
+        if let Some(programdata_address) = Self::has_programdata_account(account.clone()) {
+            //Sonic: load programdata account from remote
+            self.load_account(genesis_hash, slot, &programdata_address, source);
         }
 
-        match account {
-            Some(account) => {
-                //Sonic: insert the account to the cache
-                self.account_cache.insert(*pubkey, (account.clone(), slot));
-
-                //Sonic: save the account to the local file
-                self.save_account_to_local_file(
-                    genesis_hash,
-                    slot,
-                    pubkey,
-                    source,
-                    account.clone(),
-                );
-
-                //Sonic: check if programdata account exists
-                if let Some(programdata_address) = Self::has_programdata_account(account.clone()) {
-                    //Sonic: load programdata account from remote
-                    self.load_account(genesis_hash, slot, &programdata_address, source);
-                }
-
-                Some(account)
-            }
-            None => None,
-        }
+        Some(account)
     }
 
     fn load_account_from_local_file(
@@ -491,6 +476,7 @@ impl RemoteAccountLoader {
     }
 
     /// Load the account from the RPC.
+    #[allow(dead_code)]
     fn load_account_via_rpc(
         &self,
         pubkey: &Pubkey,
@@ -894,20 +880,16 @@ impl RemoteAccountLoader {
             pubkey.to_string(),
             slot
         );
-        match self.get_account(pubkey) {
-            Some(account) => {
-                self.account_cache.remove(pubkey);
 
-                //remove the related programdata account
-                match Self::has_programdata_account(account) {
-                    Some(programdata_address) => {
-                        self.account_cache.remove(&programdata_address);
-                    }
-                    None => {}
-                }
-            }
-            None => {}
-        }
+        let Some(account) = self.get_account(pubkey) else {
+            return;
+        };
+        self.account_cache.remove(pubkey);
+        //remove the related programdata account
+        let Some(programdata_address) = Self::has_programdata_account(account) else {
+            return;
+        };
+        self.account_cache.remove(&programdata_address);
     }
 }
 
