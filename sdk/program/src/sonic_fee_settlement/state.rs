@@ -17,7 +17,7 @@ pub enum SettlementState {
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone, AbiExample, AbiEnumVisitor)]
 pub struct SettlementAccount {
     pub owner: Pubkey,
-    pub account_type: SettlementAccountType, 
+    pub account_type: SettlementAccountType,
     pub amount: u64,
     pub withdrawable: u64,
     pub withdrawed: u64,

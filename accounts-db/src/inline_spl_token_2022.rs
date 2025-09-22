@@ -17,7 +17,7 @@ impl GenericTokenAccount for Account {
     }
 }
 
-//Sonic: added this 
+//Sonic: added this
 pub mod native_mint {
     solana_sdk::declare_id!("9pan9bMn5HatX4EJdBwg9VgCa7Uz5HL8N1m5D3NdXejP");
 }

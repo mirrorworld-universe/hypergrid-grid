@@ -17,6 +17,6 @@ pub enum MigratedAccountsState {
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone, AbiExample, AbiEnumVisitor)]
 pub struct MigratedAccount {
     pub address: Pubkey,
-    pub source: Option<Pubkey>, 
+    pub source: Option<Pubkey>,
     pub slot: u64,
 }

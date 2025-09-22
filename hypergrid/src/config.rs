@@ -1,8 +1,7 @@
 use {
-    serde_derive::{Deserialize, Serialize}, solana_sdk::genesis_config::ClusterType, std::{
-        fs::File, io,
-        path::Path,
-    }
+    serde_derive::{Deserialize, Serialize},
+    solana_sdk::genesis_config::ClusterType,
+    std::{fs::File, io, path::Path},
 };
 
 fn load_config_file<T, P>(config_file: P) -> Result<T, io::Error>
@@ -53,19 +52,19 @@ impl Config {
         let mut hssn_rpc_url: String = "https://exapi.testnet.hssn.sonic.game".to_string();
 
         match cluster_type {
-            ClusterType::Development => {},
+            ClusterType::Development => {}
             ClusterType::Devnet => {
                 baselayer_rpc_url = "https://api.devnet.solana.com".to_string();
                 hssn_rpc_url = "https://exapi.devnet.hssn.sonic.game".to_string();
-            },
+            }
             ClusterType::Testnet => {
                 baselayer_rpc_url = "https://api.testnet.solana.com".to_string();
                 hssn_rpc_url = "https://exapi.testnet.hssn.sonic.game".to_string();
-            },
+            }
             ClusterType::MainnetBeta => {
                 baselayer_rpc_url = "https://api.mainnet-beta.solana.com".to_string();
                 hssn_rpc_url = "https://exapi.mainnet.hssn.sonic.game".to_string();
-            },
+            }
         }
 
         let keypair_file = "~/.config/solana/id.json".to_string();

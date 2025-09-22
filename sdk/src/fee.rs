@@ -1,8 +1,7 @@
 //! Fee structures.
-use crate::native_token::sol_to_lamports;
 #[cfg(not(target_os = "solana"))]
 use solana_program::message::SanitizedMessage;
-use std::env;
+use {crate::native_token::sol_to_lamports, std::env};
 
 /// A fee and its associated compute unit limit
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
@@ -48,7 +47,7 @@ impl FeeStructure {
                 fee: sol_to_lamports(*sol),
             })
             .collect::<Vec<_>>();
-        
+
         //Sonic: get fee multiplier from environment variable
         let fee_multiplier = env::var("SONIC_FEE_MULTIPLIER").unwrap_or("10000".to_string());
         // println!("Sonic: SONIC_FEE_MULTIPLIER: {}", fee_multiplier);
