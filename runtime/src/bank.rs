@@ -5119,10 +5119,10 @@ impl Bank {
                     return;
                 }
 
-                log_messages.as_ref().map(|log_messages| {
+                if let Some(log_messages) = &log_messages {
                     let re = Regex::new(r"Account (\w+) is migrated at slot (\d+) from (\w+)\.").unwrap();
                     let re2 = Regex::new(r"Account (\w+) is deactivated in cache\.").unwrap();
-                    for log_message in log_messages.iter() {
+                    for log_message in log_messages {
                         info!("log_message: {:?}", log_message);
 
                         let caps = re.captures(log_message);
@@ -5147,7 +5147,7 @@ impl Bank {
                             }
                         }
                     }
-                });
+                };
 
                 // let slot = self.slot();
                 // let data = ix.data.clone();
