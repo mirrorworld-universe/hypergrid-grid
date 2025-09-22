@@ -1263,7 +1263,7 @@ impl Bank {
             measure_us!(parent.rewards_pool_pubkeys.clone());
 
         // Sonic: genesis accounts pubkeys
-        let (genesis_accounts_pubkeys, genesis_accounts_pubkeys_time_us) =
+        let (genesis_accounts_pubkeys, _genesis_accounts_pubkeys_time_us) =
             measure_us!(parent.genesis_accounts_pubkeys.clone());
 
         let (transaction_debug_keys, transaction_debug_keys_time_us) =
@@ -5013,9 +5013,9 @@ impl Bank {
 
         //Sonic: post-execution handling
         //Sonic: tx is not be a vote or simulate transaction and its execution status is ok.
-        if !tx.is_simple_vote_transaction() && !account_overrides.is_some() && status.is_ok() {
+        if !tx.is_simple_vote_transaction() && account_overrides.is_none() && status.is_ok() {
             //Socnic: migrate remote accounts.
-            self.migrate_remote_accounts(&tx, log_messages.clone());
+            self.migrate_remote_accounts(tx, log_messages.clone());
         }
 
         TransactionExecutionResult::Executed {
@@ -5099,7 +5099,7 @@ impl Bank {
                 }
             }
         }
-        return false;
+        false
     }
 
     ///Sonic: check transaction log messages and migrate/deactivate remote accounts.

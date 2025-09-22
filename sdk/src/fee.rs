@@ -51,10 +51,7 @@ impl FeeStructure {
         //Sonic: get fee multiplier from environment variable
         let fee_multiplier = env::var("SONIC_FEE_MULTIPLIER").unwrap_or("10000".to_string());
         // println!("Sonic: SONIC_FEE_MULTIPLIER: {}", fee_multiplier);
-        let fee_multiplier = match fee_multiplier.parse() {
-            Ok(f) => f,
-            Err(_) => 10000,
-        };
+        let fee_multiplier = fee_multiplier.parse().unwrap_or(10000);
         // println!("Sonic: Fee multiplier: {}", fee_multiplier);
 
         FeeStructure {
@@ -103,7 +100,7 @@ impl FeeStructure {
         // } else {
         //     // 1.0 // multiplier that has no effect
         //     //Sonic: custom congestion multiplier
-        //     self.fee_multiplier as f64 / 10000 as f64
+        //     self.fee_multiplier as f64 / 10000_f64
         // };
 
         let signature_fee = message

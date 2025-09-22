@@ -239,13 +239,7 @@ impl AccountsCache {
             None => {
                 //Sonic: load from remote
                 let account = self.remote_loader.get_account(pubkey);
-                match account {
-                    Some(acc) => {
-                        //Sonic: store into cache
-                        Some(self.store(slot, pubkey, acc))
-                    }
-                    None => None,
-                }
+                account.map(|acc| self.store(slot, pubkey, acc))
                 // None
             }
         }

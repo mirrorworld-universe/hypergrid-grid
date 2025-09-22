@@ -157,11 +157,11 @@ impl Processor {
                 slot
             );
             accouts.insert(
-                address.clone(),
+                *address,
                 MigratedAccount {
-                    address: address.clone(),
+                    address: *address,
                     source: None,
-                    slot: slot,
+                    slot,
                 },
             );
         }
@@ -262,9 +262,9 @@ impl Processor {
                 node_id
             );
             accouts.insert(
-                address.clone(),
+                *address,
                 MigratedAccount {
-                    address: address.clone(),
+                    address: *address,
                     source: Some(node_id),
                     slot,
                 },

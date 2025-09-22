@@ -131,7 +131,7 @@ impl MessageProcessor {
                     index_in_caller: index_in_transaction as IndexOfAccount,
                     index_in_callee,
                     is_signer: message.is_signer(index_in_transaction),
-                    is_writable: is_writable, //Sonic: replace message.is_writable(index_in_transaction),
+                    is_writable, //Sonic: replace message.is_writable(index_in_transaction),
                 });
             }
 

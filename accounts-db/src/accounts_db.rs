@@ -7688,7 +7688,7 @@ impl AccountsDb {
             let historical_accounts = self.accounts_cache.remote_loader.get_historical_accounts();
             info!("calculate_accounts_hash_from_storages: slot:{slot}, kind: {kind:?}, historical_accounts: {historical_accounts:?}");
             let mut remote_accounts: AHashSet<Pubkey> = AHashSet::new();
-            historical_accounts.iter().for_each(|(pubkey, slot)| {
+            historical_accounts.iter().for_each(|(pubkey, _slot)| {
                 remote_accounts.insert(*pubkey);
             });
             info!("calculate_accounts_hash_from_storages: slot:{slot}, kind: {kind:?}, remote_accounts: {remote_accounts:?}");

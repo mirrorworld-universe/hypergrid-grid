@@ -47,7 +47,7 @@ impl HttpClient {
                     Ok(response) => {
                         let status = response.status();
                         let body = response.text().await.unwrap_or("".to_string());
-                        if status.is_success() && body.len() > 0 {
+                        if status.is_success() && !body.is_empty() {
                             Ok(body)
                         } else {
                             error!("Error: {:?}, {:?}", status, body);
@@ -56,12 +56,12 @@ impl HttpClient {
                     }
                     Err(e) => {
                         error!("Error: {:?}", e);
-                        return Err(format!("Error: {:?}", e));
+                        Err(format!("Error: {:?}", e))
                     }
                 }
             })
         });
-        return res;
+        res
     }
 
     pub fn post<U: ToString>(&self, url: U, data: &Value) -> Result<String, String> {
@@ -80,7 +80,7 @@ impl HttpClient {
                     Ok(response) => {
                         let status = response.status();
                         let body = response.text().await.unwrap_or("".to_string());
-                        if status.is_success() && body.len() > 0 {
+                        if status.is_success() && !body.is_empty() {
                             Ok(body)
                         } else {
                             error!("Error: {:?}, {:?}", status, body);
@@ -89,12 +89,12 @@ impl HttpClient {
                     }
                     Err(e) => {
                         error!("Error: {:?}", e);
-                        return Err(format!("Error: {:?}", e));
+                        Err(format!("Error: {:?}", e))
                     }
                 }
             })
         });
-        return res;
+        res
     }
 
     pub fn runtime(&self) -> &tokio::runtime::Runtime {
