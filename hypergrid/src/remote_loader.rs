@@ -142,7 +142,7 @@ impl RemoteAccountLoader {
         match self.account_cache.get(pubkey) {
             Some(account) => {
                 // println!("RemoteAccountLoader.get_account: {} match.", pubkey.to_string());
-                return Some(account.0.clone());
+                Some(account.0.clone())
             }
             None => None, // self.load_account(pubkey),
         }
@@ -175,7 +175,7 @@ impl RemoteAccountLoader {
         let mut pubkeys = AHashSet::new();
         for ref_multi in self.account_cache.iter() {
             let (pubkey, _) = ref_multi.pair();
-            pubkeys.insert(pubkey.clone());
+            pubkeys.insert(*pubkey);
         }
         pubkeys
     }
@@ -195,10 +195,10 @@ impl RemoteAccountLoader {
                 if !file_name.ends_with(".json") || file_name.starts_with("hypergrid_") {
                     continue;
                 }
-                let parts: Vec<&str> = file_name.split("_").collect();
+                let parts: Vec<&str> = file_name.split('_').collect();
                 if parts.len() == 4 {
                     let pubkey = Pubkey::from_str(parts[0]).unwrap();
-                    let slot = parts[3].split(".").collect::<Vec<&str>>()[0];
+                    let slot = parts[3].split('.').collect::<Vec<&str>>()[0];
                     //convert slot to u64
                     let slot = slot.parse::<u64>().unwrap();
                     pubkeys.insert((pubkey, slot));
@@ -240,7 +240,7 @@ impl RemoteAccountLoader {
             );
             pubkeys.iter().for_each(|pubkey| {
                 //Sonic: deactivate account in cache
-                loader.deactivate_account(slot, &pubkey);
+                loader.deactivate_account(slot, pubkey);
             });
         });
     }
@@ -270,8 +270,7 @@ impl RemoteAccountLoader {
         let account = self.load_account_from_local_file(genesis_hash, slot, pubkey, source);
         if let Some(account) = account {
             //Sonic: insert the account to the cache
-            self.account_cache
-                .insert(pubkey.clone(), (account.clone(), slot));
+            self.account_cache.insert(*pubkey, (account.clone(), slot));
 
             //Sonic: check if programdata account exists
             if let Some(programdata_address) = Self::has_programdata_account(account.clone()) {
@@ -302,8 +301,7 @@ impl RemoteAccountLoader {
         match account {
             Some(account) => {
                 //Sonic: insert the account to the cache
-                self.account_cache
-                    .insert(pubkey.clone(), (account.clone(), slot));
+                self.account_cache.insert(*pubkey, (account.clone(), slot));
 
                 //Sonic: save the account to the local file
                 self.save_account_to_local_file(
@@ -352,8 +350,8 @@ impl RemoteAccountLoader {
                     account_data
                 );
                 // println!("load_account_from_local_file: account_data: {:?}", account_data);
-                let account = RemoteAccountLoader::deserialize_from_json2(account_data);
-                account
+
+                RemoteAccountLoader::deserialize_from_json2(account_data)
             }
             Err(e) => {
                 error!(
@@ -392,7 +390,7 @@ impl RemoteAccountLoader {
         match file {
             Ok(mut file) => {
                 let data = {
-                    if account.data().len() < 1 {
+                    if account.data().is_empty() {
                         "".to_string()
                     } else {
                         base64::engine::general_purpose::STANDARD.encode(account.data())
@@ -612,7 +610,7 @@ impl RemoteAccountLoader {
                     );
                 }
             }
-            return "".to_string();
+            "".to_string()
         } else {
             self.config.baselayer_rpc_url.clone()
         }
@@ -883,7 +881,7 @@ impl RemoteAccountLoader {
             return Some(programdata_address);
         }
 
-        return None;
+        None
     }
 
     /// Deactivate the account in the cache.
@@ -923,7 +921,7 @@ mod tests {
         let loader = RemoteAccountLoader::default();
         let pubkey = Pubkey::from_str("4WTUyXNcf6QCEj76b3aRDLPewkPGkXFZkkyf3A3vua1z").unwrap();
         let account = loader.get_account(&pubkey);
-        assert_eq!(account.is_none(), true);
+        assert!(account.is_none());
     }
 
     #[test]
@@ -931,7 +929,7 @@ mod tests {
         let loader = RemoteAccountLoader::default();
         let pubkey = Pubkey::from_str("4WTUyXNcf6QCEj76b3aRDLPewkPGkXFZkkyf3A3vua1z").unwrap();
         let account = loader.has_account(&pubkey);
-        assert_eq!(account, false);
+        assert!(!account);
     }
 
     #[test]
@@ -939,7 +937,7 @@ mod tests {
         let loader = RemoteAccountLoader::default();
         let pubkey = Pubkey::from_str("4WTUyXNcf6QCEj76b3aRDLPewkPGkXFZkkyf3A3vua1z").unwrap();
         let account = loader.load_account("", 0, &pubkey, None);
-        assert_eq!(account.is_none(), true);
+        assert!(account.is_none());
     }
 
     #[test]
@@ -948,7 +946,7 @@ mod tests {
         let pubkey = Pubkey::from_str("4WTUyXNcf6QCEj76b3aRDLPewkPGkXFZkkyf3A3vua1z").unwrap();
         loader.deactivate_account(0, &pubkey);
         let account = loader.get_account(&pubkey);
-        assert_eq!(account.is_none(), true);
+        assert!(account.is_none());
     }
 
     #[test]
@@ -957,7 +955,7 @@ mod tests {
         let pubkey = Pubkey::from_str("4WTUyXNcf6QCEj76b3aRDLPewkPGkXFZkkyf3A3vua1z").unwrap();
         loader.deactivate_account(0, &pubkey);
         let account = loader.has_account(&pubkey);
-        assert_eq!(account, false);
+        assert!(!account);
     }
 
     #[test]
@@ -965,6 +963,6 @@ mod tests {
         let loader = RemoteAccountLoader::default();
         let pubkey = Pubkey::from_str("4WTUyXNcf6QCEj76b3aRDLPewkPGkXFZkkyf3A3vua1z").unwrap();
         let account = loader.load_account("", 0, &pubkey, None);
-        assert_eq!(account.is_none(), true);
+        assert!(account.is_none());
     }
 }
