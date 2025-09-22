@@ -525,11 +525,11 @@ impl JsonRpcRequestProcessor {
         program_id: &Pubkey,
         config: Option<RpcAccountInfoConfig>,
         mut filters: Vec<RpcFilterType>,
-        with_context: bool,
+        _with_context: bool,
     ) -> Result<u64> {
         let RpcAccountInfoConfig {
             encoding,
-            data_slice: data_slice_config,
+            data_slice: _data_slice_config,
             commitment,
             min_context_slot,
         } = config.unwrap_or_default();
@@ -537,7 +537,7 @@ impl JsonRpcRequestProcessor {
             commitment,
             min_context_slot,
         })?;
-        let encoding = encoding.unwrap_or(UiAccountEncoding::Binary);
+        let _encoding = encoding.unwrap_or(UiAccountEncoding::Binary);
         optimize_filters(&mut filters);
         let keyed_accounts = {
             if let Some(owner) = get_spl_token_owner_filter(program_id, &filters) {
