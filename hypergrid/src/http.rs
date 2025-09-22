@@ -1,6 +1,5 @@
 use {
     log::*,
-    reqwest,
     serde_json::Value,
     std::{result::Result, sync::Arc, time::Duration},
 };

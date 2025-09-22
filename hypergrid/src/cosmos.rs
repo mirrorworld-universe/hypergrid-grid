@@ -28,26 +28,31 @@ pub fn run_load_solana_account(pub_key: &str, version: &str, source: &str, updat
     }
 
     //format the command string
-    let cmd_str: String;
-    if update {
-        cmd_str = format!("{} tx hypergridssn update-solana-account {} {} --home {} --from {} --chain-id {} --gas 50000000 --keyring-backend test -y", 
-        cosmos_app_path, pub_key, version, cosmos_home_path, COSMOS_SIGNER, COSMOS_CHAIN_ID);
-    } else {
-        cmd_str = format!("{} tx hypergridssn create-solana-account {} {} {} --home {} --from {} --chain-id {} --gas 50000000 --keyring-backend test -y", 
-        cosmos_app_path, pub_key, version, source, cosmos_home_path, COSMOS_SIGNER, COSMOS_CHAIN_ID);
-    }
+    let mut cmd = Command::new(cosmos_app_path);
+    cmd.arg("tx")
+        .arg("hypergridssn")
+        .args(&if update {
+            vec!["update-solana-account", pub_key, version]
+        } else {
+            vec!["create-solana-account", pub_key, version, source]
+        })
+        .args(["--home", &cosmos_home_path])
+        .args(["--from", COSMOS_SIGNER])
+        .args(["--chain-id", COSMOS_CHAIN_ID])
+        .args(["--gas", "50000000"])
+        .args(["--keyring-backend", "test"])
+        .arg("-y");
 
-    // println!("cmd_str: {}", cmd_str);
-    info!("cmd_str: {}", cmd_str);
+    info!("cmd_str: {cmd:?}");
 
-    let output = Command::new("sh").arg("-c").arg(cmd_str).output();
-    match output {
+    match cmd.output() {
         Ok(output) => {
             let output_str = String::from_utf8_lossy(&output.stdout);
             info!("output: {:?}", output_str);
             // println!("{:?}", String::from_utf8_lossy(&output.stdout));
         }
         Err(e) => {
+            // TODO: print stderr as well
             error!("Error: {:?}", e);
         }
     }
