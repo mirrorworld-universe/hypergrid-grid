@@ -823,33 +823,21 @@ impl RemoteAccountLoader {
             }
         }
 
-        match account {
-            Some(account) => Some(account),
-            None => {
-                info!("Sonic load_account_from_hssn: not found: {:?}\n", pubkey);
-                let account = self.load_account_via_oracle(pubkey, source, genesis_hash, slot);
-                if let Some(account) = account {
-                    //load the account from the source
-                    let version = format!(
-                        "{:?}_{}_{:?}",
-                        source.unwrap_or_default(),
-                        genesis_hash,
-                        slot
-                    );
-                    if let Some(source) = source {
-                        cosmos::run_load_solana_account(
-                            pubkey.to_string().as_str(),
-                            version.as_str(),
-                            source.to_string().as_str(),
-                            false,
-                        );
-                    }
-                    Some(account)
-                } else {
-                    None
-                }
-            }
+        if let Some(account) = account {
+            return Some(account);
         }
+
+        info!("Sonic load_account_from_hssn: not found: {:?}\n", pubkey);
+        let account = self.load_account_via_oracle(pubkey, source, genesis_hash, slot)?;
+
+        if let Some(source) = source {
+            // load the account from the source
+            let version = format!("{source}_{genesis_hash}_{slot}");
+
+            cosmos::run_load_solana_account(pubkey, &version, &source, false);
+        }
+
+        Some(account)
     }
 
     /// Check if the account has a programdata account.
