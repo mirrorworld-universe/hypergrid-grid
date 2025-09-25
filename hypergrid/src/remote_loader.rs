@@ -321,14 +321,11 @@ impl RemoteAccountLoader {
         match file {
             Ok(file) => {
                 // read file content to json
-                let account_data: serde_json::Value = serde_json::from_reader(file).unwrap();
-                debug!(
-                    "Sonic load_account_from_local_file: account_data: {:?}",
-                    account_data
-                );
-                // println!("load_account_from_local_file: account_data: {:?}", account_data);
+                let mut account = serde_json::from_reader::<_, AccountSharedData>(file).unwrap();
+                account.remote = true;
+                debug!("Sonic load_account_from_local_file: account: {account:?}");
 
-                RemoteAccountLoader::deserialize_from_json2(account_data)
+                Some(account)
             }
             Err(e) => {
                 error!(
@@ -446,13 +443,11 @@ impl RemoteAccountLoader {
         match res {
             Ok(body) => {
                 //convert the response body to json
-                let value: serde_json::Result<serde_json::Value> = serde_json::from_str(&body);
-                if let Ok(value) = value {
-                    // let value: serde_json::Value = value.unwrap();
-                    info!("Sonic load_account_via_hssn: success: {:?}\n", value);
-                    // println!("load_account_via_oracle: success: {:?}", value);
-                    let account = RemoteAccountLoader::deserialize_from_json(value, "result");
-                    return account;
+                if let Ok(mut account) = serde_json::from_str::<AccountSharedData>(&body) {
+                    // XXX: it's set by default to false by serde
+                    account.remote = true;
+                    info!("Sonic load_account_via_hssn: success: {account:?}\n");
+                    return Some(account);
                 }
             }
             Err(e) => {
@@ -594,88 +589,6 @@ impl RemoteAccountLoader {
         }
     }
 
-    fn deserialize_from_json(
-        account_data: serde_json::Value,
-        key: &str,
-    ) -> Option<AccountSharedData> {
-        let result = &account_data[key];
-        if result.is_null() {
-            return None;
-        }
-
-        let value = &result["value"];
-        if value.is_null() {
-            return None;
-        }
-
-        let account = RemoteAccountLoader::deserialize_from_json2(value.clone());
-        info!("Sonic deserialize_from_json account: {:?}", account);
-        account
-
-        // let value_str = value.as_str().unwrap_or("");
-        // let value: serde_json::Result<serde_json::Value> = serde_json::from_str(value_str);
-        // if let Ok(value) = value {
-        //     let account = RemoteAccountLoader::deserialize_from_json2(value);
-        //     info!("deserialize_from_json account: {:?}", account);
-        //     account
-        // } else {
-        //     None
-        // }
-    }
-
-    fn deserialize_from_json2(value: serde_json::Value) -> Option<AccountSharedData> {
-        let owner = value["owner"].as_str().unwrap_or("");
-        if owner.eq("") {
-            return None;
-        }
-        let data = &value["data"];
-        let encoding;
-        let raw_data;
-        if data.is_array() {
-            raw_data = data[0].as_str().unwrap_or("");
-            encoding = data[1].as_str().unwrap_or("");
-        } else {
-            raw_data = data.as_str().unwrap_or("");
-            encoding = "base64";
-        }
-        // println!("deserialize_from_json2: {}, {}, {}", owner, raw_data, encoding);
-
-        let lamports = value["lamports"].as_u64().unwrap_or(0);
-        let rent_epoch = value["rentEpoch"].as_u64().unwrap_or(0);
-        // let space = value["space"].as_u64().unwrap();
-        let executable = value["executable"].as_bool().unwrap_or(false);
-        // if owner.eq("Feature111111111111111111111111111111111111") {
-        //     return None;
-        // }
-
-        let data = match encoding {
-            "base58" => bs58::decode(raw_data).into_vec().unwrap_or_default(),
-            "base64" => base64::engine::general_purpose::STANDARD
-                .decode(raw_data)
-                .unwrap_or_default(),
-            "base64+zstd" => {
-                let decoded = base64::engine::general_purpose::STANDARD
-                    .decode(raw_data)
-                    .unwrap_or_default();
-                let decompressed = zstd::decode_all(decoded.as_slice()).unwrap_or_default();
-                decompressed
-            }
-            _ => Vec::new(), // Add wildcard pattern to cover all other possible values
-        };
-
-        let mut account = AccountSharedData::create(
-            lamports,
-            data,
-            Pubkey::from_str(owner).unwrap(),
-            executable,
-            rent_epoch,
-        );
-        account.remote = true;
-
-        info!("Sonic deserialize_from_json2 account: {:?}", account);
-        Some(account)
-    }
-
     fn load_hypergrid_node(
         config: Config,
         source: Pubkey,
@@ -794,17 +707,14 @@ impl RemoteAccountLoader {
             slot
         );
         info!("Sonic load_account_from_hssn: {}\n", url);
-        let res = self.http_client.get(url);
-        let mut account: Option<AccountSharedData> = None;
-        match res {
+        match self.http_client.get(url) {
             Ok(body) => {
                 info!("Sonic respone: {:?}", body);
                 //convert the response body to json
-                let value: serde_json::Result<serde_json::Value> = serde_json::from_str(&body);
-                if let Ok(value) = value {
+                if let Ok(value) = serde_json::from_str(&body) {
                     // let value: serde_json::Value = value.unwrap();
                     info!("Sonic load_account_via_hssn: success: {:?}\n", value);
-                    account = RemoteAccountLoader::deserialize_from_json(value, "solanaAccount");
+                    return Some(value);
                 }
             }
             Err(e) => {
@@ -813,10 +723,6 @@ impl RemoteAccountLoader {
                     pubkey, e
                 );
             }
-        }
-
-        if let Some(account) = account {
-            return Some(account);
         }
 
         info!("Sonic load_account_from_hssn: not found: {:?}\n", pubkey);
