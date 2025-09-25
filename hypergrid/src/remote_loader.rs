@@ -42,8 +42,6 @@ pub struct RemoteAccountLoader {
     http_client: http::HttpClient,
     /// Cache of accounts loaded from the remote.
     account_cache: AccountCacheKeyMap,
-    /// Enable or disable the remote loader.
-    enable: bool,
     config: Config,
     runtime: Option<tokio::runtime::Runtime>,
 }
@@ -99,7 +97,6 @@ impl RemoteAccountLoader {
             // Duration::from_secs(30), CommitmentConfig::confirmed()),
             http_client: http::HttpClient::new(Duration::from_secs(30)),
             account_cache: AccountCacheKeyMap::default(),
-            enable: true,
             config,
             runtime: Some(
                 tokio::runtime::Builder::new_multi_thread()
@@ -129,12 +126,7 @@ impl RemoteAccountLoader {
 
     /// Get the account from the cache.
     pub fn get_account(&self, pubkey: &Pubkey) -> Option<AccountSharedData> {
-        if !self.enable || Self::ignored_account(pubkey) {
-            return None;
-        }
-
-        // check if the cache is empty
-        if self.account_cache.is_empty() {
+        if Self::ignored_account(pubkey) {
             return None;
         }
 
@@ -150,7 +142,7 @@ impl RemoteAccountLoader {
 
     /// Check if the account is in the cache.
     pub fn has_account(&self, pubkey: &Pubkey) -> bool {
-        if !self.enable || Self::ignored_account(pubkey) {
+        if Self::ignored_account(pubkey) {
             return false;
         }
 
@@ -253,7 +245,7 @@ impl RemoteAccountLoader {
         pubkey: &Pubkey,
         source: Option<Pubkey>,
     ) -> Option<AccountSharedData> {
-        if !self.enable || Self::ignored_account(pubkey) {
+        if Self::ignored_account(pubkey) {
             return None;
         }
 
@@ -860,7 +852,7 @@ impl RemoteAccountLoader {
 
     /// Deactivate the account in the cache.
     pub fn deactivate_account(&self, slot: Slot, pubkey: &Pubkey) {
-        if !self.enable || Self::ignored_account(pubkey) {
+        if Self::ignored_account(pubkey) {
             return;
         }
         info!(
