@@ -1,5 +1,5 @@
 use {
-    crate::{config::Config, cosmos, http},
+    crate::{config::Config, cosmos},
     ahash::AHashSet,
     base64::{self, Engine},
     dashmap::DashMap,
@@ -81,7 +81,7 @@ impl From<NodeType> for i64 {
 pub struct RemoteAccountLoader {
     ///RPC client used to send requests to the remote.
     // rpc_client: RpcClient,
-    http_client: http::HttpClient,
+    http_client: reqwest::blocking::Client,
     /// Cache of accounts loaded from the remote.
     account_cache: AccountCacheKeyMap,
     config: Config,
@@ -127,7 +127,10 @@ impl RemoteAccountLoader {
         Self {
             // rpc_client: RpcClient::new_with_timeout_and_commitment(&config.baselayer_rpc_url,
             // Duration::from_secs(30), CommitmentConfig::confirmed()),
-            http_client: http::HttpClient::new(Duration::from_secs(30)),
+            http_client: reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(30))
+                .build()
+                .unwrap(),
             account_cache: AccountCacheKeyMap::default(),
             config,
             runtime: tokio::runtime::Builder::new_multi_thread()
@@ -425,7 +428,6 @@ impl RemoteAccountLoader {
             rpc_url.clone()
         );
 
-        let client = http::HttpClient::new(Duration::from_secs(30));
         let url = format!("{}/solana/GetAccountInfo", self.config.oracle_url);
         let data = json!({
             "rpc": rpc_url,
@@ -433,27 +435,26 @@ impl RemoteAccountLoader {
             "version": format!("{:?}-{}-{}", source.unwrap_or_default(), genesis_hash, slot),
         });
         info!("Sonic load_account_from_oracle: {}\n", url);
-        let res = client.post(url.clone(), &data);
-        match res {
-            Ok(body) => {
-                //convert the response body to json
-                if let Ok(mut account) = serde_json::from_str::<AccountSharedData>(&body) {
-                    // XXX: it's set by default to false by serde
-                    account.remote = true;
-                    info!("Sonic load_account_via_hssn: success: {account:?}\n");
-                    return Some(account);
-                }
-            }
-            Err(e) => {
+        let resp = match self.http_client.post(&url).json(&data).send() {
+            Ok(resp) => resp,
+            Err(err) => {
                 warn!(
-                    "Sonic load_account_from_oracle: not found: {:?}, {:?}\n",
-                    pubkey, e
+                    "Sonic load_account_from_oracle: not found in url {url}: {pubkey}, {err:?}\n"
                 );
-                // println!("load_account_from_oracle: not found: {:?}, {:?}\n", pubkey, e);
+                return None;
             }
-        }
-
-        None
+        };
+        let mut account = match resp.json::<AccountSharedData>() {
+            Ok(a) => a,
+            Err(err) => {
+                warn!("Invalid account from oracle {url}: {err}");
+                return None;
+            }
+        };
+        // XXX: it's set by default to false by serde
+        account.remote = true;
+        info!("Sonic load_account_via_hssn: success: {account:?}\n");
+        Some(account)
     }
 
     /// Load the account from the RPC.
@@ -541,7 +542,7 @@ impl RemoteAccountLoader {
                     serde_json::from_reader(file).unwrap();
                 debug!("Sonic load hypergrid node from file: {hypergrid_node:?}");
 
-                return node_url.to_string();
+                return hypergrid_node.rpc.to_string();
             }
             Err(e) => {
                 info!(
@@ -551,40 +552,50 @@ impl RemoteAccountLoader {
             }
         }
 
-        let node = Self::load_hypergrid_node(self.config.clone(), source, genesis_hash, slot);
-        if let Some(node) = node {
-            return node.rpc;
-        }
-        "".to_string()
+        self.load_hypergrid_node(source, genesis_hash, slot)
+            .map(|node| node.rpc)
+            .unwrap_or_default()
     }
 
     fn load_hypergrid_node(
-        config: Config,
+        &self,
         source: Pubkey,
         genesis_hash: &str,
         slot: Slot,
     ) -> Option<HypergridNode> {
         // let url = format!("{}/hypergrid-ssn/hypergridssn/hypergrid_node/{}", config.hssn_rpc_url, source.to_string());
-        let url = format!("{}/hssn/HypergridNode", config.oracle_url);
+        let url = format!("{}/hssn/HypergridNode", self.config.oracle_url);
         let data = json!({
-            "rpc": config.hssn_rpc_url,
+            "rpc": self.config.hssn_rpc_url,
             "address": source.to_string(),
             "version": format!("{}-{}", genesis_hash, slot),
         });
         info!("Sonic load_hypergrid_nodes: {}, {:?}\n", url, data);
         // println!("load_hypergrid_nodes: {}, {:?}\n", url, data);
-        let client = http::HttpClient::new(Duration::from_secs(30));
-        let body = match client.post(url.clone(), &data) {
+        let resp = match self.http_client.post(&url).json(&data).send() {
             Ok(body) => body,
             Err(err) => {
                 info!("Sonic get_hypergrid_nodes: not found for {url}. Err: {err:?}\n");
                 return None;
             }
         };
+
+        //convert the response body to json
+        let node = match resp.json() {
+            Ok(HypergridNodeFileContent { hypergrid_node }) => {
+                info!("Sonic load_hypergrid_node: success: {hypergrid_node:?}\n");
+                hypergrid_node
+            }
+            Err(err) => {
+                error!("Invalid hypergrid nodes from url {url}. Err: {err:?}");
+                return None;
+            }
+        };
+
         //sace the response to local file
         let path = format!(
             "{}/hypergrid_{:?}_{}_{:?}.json",
-            config.accounts_path, source, genesis_hash, slot
+            self.config.accounts_path, source, genesis_hash, slot
         );
         let dir = std::path::Path::new(&path).parent().unwrap();
         if !dir.exists() {
@@ -592,21 +603,11 @@ impl RemoteAccountLoader {
         }
 
         info!("Sonic save hypergrid node to local file: {}\n", path);
-        if let Err(err) = std::fs::write(&path, body.as_bytes()) {
+        if let Err(err) = std::fs::write(&path, serde_json::to_vec(&node).expect("Always valid")) {
             warn!("Failed to save to hypergrid nodes to file {path}: {err}");
         }
 
-        //convert the response body to json
-        match serde_json::from_str::<HypergridNodeFileContent>(&body) {
-            Ok(HypergridNodeFileContent { hypergrid_node }) => {
-                info!("Sonic load_hypergrid_node: success: {hypergrid_node:?}\n");
-                Some(hypergrid_node)
-            }
-            Err(err) => {
-                error!("Failed to get hypergrid nodes from url {url}. Err: {err:?}");
-                None
-            }
-        }
+        Some(node)
     }
 
     // fn load_hypergrid_nodes(&self) {
@@ -647,11 +648,11 @@ impl RemoteAccountLoader {
             slot
         );
         info!("Sonic load_account_from_hssn: {}\n", url);
-        match self.http_client.get(url) {
-            Ok(body) => {
-                info!("Sonic respone: {:?}", body);
+        match self.http_client.get(url).send() {
+            Ok(resp) => {
+                info!("Sonic respone: {resp:?}");
                 //convert the response body to json
-                if let Ok(value) = serde_json::from_str(&body) {
+                if let Ok(value) = resp.json() {
                     info!("Sonic load_account_via_hssn: success: {:?}\n", value);
                     return Some(value);
                 }
