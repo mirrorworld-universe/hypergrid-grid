@@ -4,6 +4,7 @@ use {
     base64::{self, Engine},
     dashmap::DashMap,
     log::*,
+    serde::{Deserialize, Serialize},
     serde_json::json,
     solana_client::rpc_client::RpcClient,
     solana_measure::measure::Measure,
@@ -16,24 +17,65 @@ use {
         genesis_config::ClusterType,
         pubkey::Pubkey,
     },
-    std::{env, fs::File, io::Write, str::FromStr, sync::Arc, thread, time::Duration},
+    std::{env, fs::File, str::FromStr, sync::Arc, thread, time::Duration},
+    thiserror::Error,
     tokio,
 };
 
 type AccountCacheKeyMap = DashMap<Pubkey, (AccountSharedData, Slot)>;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct HypergridNode {
     pub pubkey: Pubkey,
     pub name: String,
     pub rpc: String,
-    pub role: i32, // 0: unknown, 1: HSSN, 2: Sonic Grid, 3: Grid, 4: Solana L1
+    pub role: NodeType,
 }
 
-// const NODE_TYPE_HSSN: i32 = 1;
-const NODE_TYPE_SONIC: i32 = 2;
-const NODE_TYPE_GRID: i32 = 3;
-const NODE_TYPE_L1: i32 = 4;
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HypergridNodeFileContent {
+    hypergrid_node: HypergridNode,
+}
+
+#[allow(clippy::upper_case_acronyms)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "i64", into = "i64")]
+enum NodeType {
+    HSSN = 1,
+    Sonic = 2,
+    Grid = 3,
+    L1 = 4,
+}
+
+#[derive(Debug, Error)]
+enum NodeTypeErr {
+    #[error("Node is unknown (node role is 0)")]
+    UnknownNode,
+    #[error("Invalid node type {0}")]
+    InvalidNode(i64),
+}
+
+impl TryFrom<i64> for NodeType {
+    type Error = NodeTypeErr;
+    fn try_from(n: i64) -> Result<Self, Self::Error> {
+        match n {
+            0 => Err(Self::Error::UnknownNode),
+            1 => Ok(Self::HSSN),
+            2 => Ok(Self::Sonic),
+            3 => Ok(Self::Grid),
+            4 => Ok(Self::L1),
+            n => Err(Self::Error::InvalidNode(n)),
+        }
+    }
+}
+
+impl From<NodeType> for i64 {
+    fn from(nt: NodeType) -> Self {
+        nt as Self
+    }
+}
 
 #[derive(Debug)]
 pub struct RemoteAccountLoader {
@@ -483,62 +525,37 @@ impl RemoteAccountLoader {
         genesis_hash: &str,
         slot: Slot,
     ) -> String {
-        if let Some(source) = source {
-            let path = format!(
-                "{}/hypergrid_{:?}_{}_{:?}.json",
-                self.config.accounts_path, source, genesis_hash, slot
-            );
-            info!("Sonic load hypergrid node from file: {}\n", path);
-            let file = File::open(path);
-            match file {
-                Ok(file) => {
-                    // read file content to json
-                    let _data: serde_json::Value = serde_json::from_reader(file).unwrap();
-                    debug!(
-                        "Sonic load_account_from_local_file: account_data: {:?}",
-                        _data
-                    );
-                    let node = _data.get("hypergridNode").unwrap();
-                    let node_id = node["pubkey"].as_str().unwrap();
-                    let node_name = node["name"].as_str().unwrap();
-                    let node_url = node["rpc"].as_str().unwrap();
-                    let node_role = node["role"].as_i64().unwrap();
-                    // println!("node: {}, {}", node_id, node_url);
+        let Some(source) = source else {
+            return self.config.baselayer_rpc_url.clone();
+        };
+        let path = format!(
+            "{}/hypergrid_{:?}_{}_{:?}.json",
+            self.config.accounts_path, source, genesis_hash, slot
+        );
+        info!("Sonic load hypergrid node from file: {}\n", path);
+        let file = File::open(path);
+        match file {
+            Ok(file) => {
+                // read file content to json
+                let HypergridNodeFileContent { hypergrid_node } =
+                    serde_json::from_reader(file).unwrap();
+                debug!("Sonic load hypergrid node from file: {hypergrid_node:?}");
 
-                    if node_role == 2 || node_role == 3 || node_role == 4 {
-                        return node_url.to_string();
-                    } else {
-                        info!("Sonic load hypergrid node from file: invalid source role: {:?}, {:?}, {:?}", node_name, node_id, node_role);
-                        return "".to_string();
-                    }
-                }
-                Err(e) => {
-                    info!(
-                        "Sonic load hypergrid node from file: failed to open file: {:?}\n",
-                        e
-                    );
-                }
+                return node_url.to_string();
             }
-
-            let node = Self::load_hypergrid_node(self.config.clone(), source, genesis_hash, slot);
-            if let Some(node) = node {
-                //Only call rpc of nodes (2: Sonic Grid, 3: Grid, 4: Solana L1)
-                if node.role == NODE_TYPE_SONIC
-                    || node.role == NODE_TYPE_GRID
-                    || node.role == NODE_TYPE_L1
-                {
-                    return node.rpc;
-                } else {
-                    info!(
-                        "Sonic load_account_via_rpc: invalid source role: {:?}, {:?}, {:?}",
-                        node.name, node.pubkey, node.role
-                    );
-                }
+            Err(e) => {
+                info!(
+                    "Sonic load hypergrid node from file: failed to open file: {:?}\n",
+                    e
+                );
             }
-            "".to_string()
-        } else {
-            self.config.baselayer_rpc_url.clone()
         }
+
+        let node = Self::load_hypergrid_node(self.config.clone(), source, genesis_hash, slot);
+        if let Some(node) = node {
+            return node.rpc;
+        }
+        "".to_string()
     }
 
     fn load_hypergrid_node(
@@ -557,68 +574,39 @@ impl RemoteAccountLoader {
         info!("Sonic load_hypergrid_nodes: {}, {:?}\n", url, data);
         // println!("load_hypergrid_nodes: {}, {:?}\n", url, data);
         let client = http::HttpClient::new(Duration::from_secs(30));
-        let res = client.post(url.clone(), &data);
-        if let Ok(body) = res {
-            //sace the response to local file
-            let path = format!(
-                "{}/hypergrid_{:?}_{}_{:?}.json",
-                config.accounts_path, source, genesis_hash, slot
-            );
-            let dir = std::path::Path::new(&path).parent().unwrap();
-            if !dir.exists() {
-                std::fs::create_dir_all(dir).unwrap_or_default();
+        let body = match client.post(url.clone(), &data) {
+            Ok(body) => body,
+            Err(err) => {
+                info!("Sonic get_hypergrid_nodes: not found for {url}. Err: {err:?}\n");
+                return None;
             }
+        };
+        //sace the response to local file
+        let path = format!(
+            "{}/hypergrid_{:?}_{}_{:?}.json",
+            config.accounts_path, source, genesis_hash, slot
+        );
+        let dir = std::path::Path::new(&path).parent().unwrap();
+        if !dir.exists() {
+            std::fs::create_dir_all(dir).unwrap_or_default();
+        }
 
-            info!("Sonic save hypergrid node to local file: {}\n", path);
-            let file = File::create(path.clone());
-            match file {
-                Ok(mut file) => {
-                    let result = file.write_all(body.as_bytes());
-                    match result {
-                        Ok(_) => {
-                            info!(
-                                "Sonic save hypergrid node to local file: success: {}\n",
-                                path
-                            );
-                        }
-                        Err(e) => {
-                            warn!("Sonic save hypergrid node to local file: failed to write file: {:?}\n", e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!(
-                        "Sonic save hypergrid node to local file: failed to create file: {:?}\n",
-                        e
-                    );
-                }
+        info!("Sonic save hypergrid node to local file: {}\n", path);
+        if let Err(err) = std::fs::write(&path, body.as_bytes()) {
+            warn!("Failed to save to hypergrid nodes to file {path}: {err}");
+        }
+
+        //convert the response body to json
+        match serde_json::from_str::<HypergridNodeFileContent>(&body) {
+            Ok(HypergridNodeFileContent { hypergrid_node }) => {
+                info!("Sonic load_hypergrid_node: success: {hypergrid_node:?}\n");
+                Some(hypergrid_node)
             }
-
-            //convert the response body to json
-            let value: serde_json::Result<serde_json::Value> = serde_json::from_str(&body);
-            if let Ok(value) = value {
-                // let value: serde_json::Value = value.unwrap();
-
-                let node = value.get("hypergridNode").unwrap();
-                // println!("load_hypergrid_node: success: {:?}\n", node);
-                let node_id = node["pubkey"].as_str().unwrap();
-                let node_name = node["name"].as_str().unwrap();
-                let node_url = node["rpc"].as_str().unwrap();
-                let node_role = node["role"].as_i64().unwrap();
-                let node = HypergridNode {
-                    pubkey: Pubkey::from_str(node_id).unwrap(),
-                    name: node_name.to_string(),
-                    rpc: node_url.to_string(),
-                    role: node_role as i32,
-                };
-
-                info!("Sonic load_hypergrid_node: success: {:?}\n", node);
-
-                return Some(node);
+            Err(err) => {
+                error!("Failed to get hypergrid nodes from url {url}. Err: {err:?}");
+                None
             }
         }
-        info!("Sonic get_hypergrid_nodes: not found: {:?}\n", url.clone());
-        None
     }
 
     // fn load_hypergrid_nodes(&self) {
@@ -664,7 +652,6 @@ impl RemoteAccountLoader {
                 info!("Sonic respone: {:?}", body);
                 //convert the response body to json
                 if let Ok(value) = serde_json::from_str(&body) {
-                    // let value: serde_json::Value = value.unwrap();
                     info!("Sonic load_account_via_hssn: success: {:?}\n", value);
                     return Some(value);
                 }
