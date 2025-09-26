@@ -65,6 +65,9 @@ tar = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 
+#Sonic: add tokio to use runtime handles for remote account loader to spawn blocking tasks
+tokio = { workspace = true, features = ["rt"] }
+
 [lib]
 crate-type = ["lib"]
 name = "solana_accounts_db"
