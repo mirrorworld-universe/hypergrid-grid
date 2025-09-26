@@ -3963,7 +3963,8 @@ impl RpcClient {
 
                 //Sonic: to fix the issue of "missing field `remote`".
                 let mut result_json = result_json.clone();
-                if result_json["value"].is_object() && result_json["value"].get("remote").is_none() {
+                if result_json["value"].is_object() && result_json["value"].get("remote").is_none()
+                {
                     //set remote to false if it is null
                     result_json["value"]["remote"] = false.into();
                 }
@@ -4841,7 +4842,8 @@ impl RpcClient {
 
                 //Sonic: to fix the issue of "missing field `remote`".
                 let mut result_json = result_json.clone();
-                if result_json["value"].is_object() && result_json["value"].get("remote").is_none() {
+                if result_json["value"].is_object() && result_json["value"].get("remote").is_none()
+                {
                     //set remote to false if it is null
                     result_json["value"]["remote"] = false.into();
                 }

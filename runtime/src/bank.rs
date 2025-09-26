@@ -65,13 +65,13 @@ use {
     dashmap::{DashMap, DashSet},
     itertools::izip,
     log::*,
-    regex::Regex,
     percentage::Percentage,
     rayon::{
         iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator},
         slice::ParallelSlice,
         ThreadPool, ThreadPoolBuilder,
     },
+    regex::Regex,
     solana_accounts_db::{
         account_overrides::AccountOverrides,
         accounts::{
@@ -160,6 +160,7 @@ use {
         nonce_account,
         packet::PACKET_DATA_SIZE,
         precompiles::get_precompiles,
+        program_utils::limited_deserialize,
         pubkey::Pubkey,
         rent::RentDue,
         saturating_add_assign,
@@ -177,7 +178,6 @@ use {
         transaction_context::{
             ExecutionRecord, TransactionAccount, TransactionContext, TransactionReturnData,
         },
-        program_utils::limited_deserialize,
     },
     solana_stake_program::stake_state::{
         self, InflationPointCalculationEvent, PointValue, StakeStateV2,
@@ -195,6 +195,7 @@ use {
         path::PathBuf,
         rc::Rc,
         slice,
+        str::FromStr,
         sync::{
             atomic::{
                 AtomicBool, AtomicI64, AtomicU64, AtomicUsize,
@@ -204,7 +205,6 @@ use {
         },
         thread::Builder,
         time::{Duration, Instant},
-        str::FromStr,
     },
 };
 
@@ -1257,7 +1257,7 @@ impl Bank {
             measure_us!(parent.rewards_pool_pubkeys.clone());
 
         // Sonic: genesis accounts pubkeys
-        let (genesis_accounts_pubkeys, genesis_accounts_pubkeys_time_us) =
+        let (genesis_accounts_pubkeys, _genesis_accounts_pubkeys_time_us) =
             measure_us!(parent.genesis_accounts_pubkeys.clone());
 
         let (transaction_debug_keys, transaction_debug_keys_time_us) =
@@ -3807,12 +3807,16 @@ impl Bank {
 
         //Sonic: set genesis hash to accounts cache
         let hash = genesis_config.hash();
-        self.rc.accounts.accounts_db.accounts_cache.set_genesis_hash(hash.to_string());
+        self.rc
+            .accounts
+            .accounts_db
+            .accounts_cache
+            .set_genesis_hash(hash.to_string());
 
-        self.blockhash_queue.write().unwrap().genesis_hash(
-            &hash,
-            self.fee_rate_governor.lamports_per_signature,
-        );
+        self.blockhash_queue
+            .write()
+            .unwrap()
+            .genesis_hash(&hash, self.fee_rate_governor.lamports_per_signature);
 
         self.hashes_per_tick = genesis_config.hashes_per_tick();
         self.ticks_per_slot = genesis_config.ticks_per_slot();
@@ -4568,7 +4572,7 @@ impl Bank {
                 }) = programdata.state()
                 {
                     //Sonic: if program is remote, set slot to 0.
-                    if programdata.remote { 
+                    if programdata.remote {
                         return Ok(0);
                     }
                     return Ok(slot);
@@ -4805,7 +4809,10 @@ impl Bank {
         if !tx.is_simple_vote_transaction() && self.check_remote_accounts(tx) {
             //Sonic: throw Error if there is local account in account parameters.
             info!("Sonic: Remote account migration failed, there is local account in account parameters.");
-            return TransactionExecutionResult::NotExecuted(TransactionError::InstructionError(0, InstructionError::InvalidInstructionData));
+            return TransactionExecutionResult::NotExecuted(TransactionError::InstructionError(
+                0,
+                InstructionError::InvalidInstructionData,
+            ));
         }
 
         fn transaction_accounts_lamports_sum(
@@ -4858,8 +4865,17 @@ impl Bank {
         );
 
         //Sonic: get remote accounts.
-        let remote_accounts = self.rc.accounts.accounts_db.accounts_cache.remote_loader.get_account_list();
-        debug!("Sonic Bank.execute_loaded_transaction(): remote_accounts: {:?}", remote_accounts);
+        let remote_accounts = self
+            .rc
+            .accounts
+            .accounts_db
+            .accounts_cache
+            .remote_loader
+            .get_account_list();
+        debug!(
+            "Sonic Bank.execute_loaded_transaction(): remote_accounts: {:?}",
+            remote_accounts
+        );
 
         let mut process_message_time = Measure::start("process_message_time");
         let process_result = MessageProcessor::process_message(
@@ -4958,9 +4974,9 @@ impl Bank {
 
         //Sonic: post-execution handling
         //Sonic: tx is not be a vote or simulate transaction and its execution status is ok.
-        if !tx.is_simple_vote_transaction() && !account_overrides.is_some() && status.is_ok() {
+        if !tx.is_simple_vote_transaction() && account_overrides.is_none() && status.is_ok() {
             //Socnic: migrate remote accounts.
-            self.migrate_remote_accounts(&tx, log_messages.clone()); 
+            self.migrate_remote_accounts(tx, log_messages.clone());
         }
 
         TransactionExecutionResult::Executed {
@@ -4984,16 +5000,19 @@ impl Bank {
         // msg.instructions().iter().for_each(|ix: &solana_sdk::instruction::CompiledInstruction| {
         for (ix_index, ix) in msg.instructions().iter().enumerate() {
             if let Some(program_id) = account_keys.get(ix.program_id_index.into()) {
-                if !sonic_account_migrater_program::check_id(program_id) { 
+                if !sonic_account_migrater_program::check_id(program_id) {
                     return false;
                 }
 
-                info!("Bank.check_remote_accounts():{:?}, {:?}", program_id, ix.data);
+                info!(
+                    "Bank.check_remote_accounts():{:?}, {:?}",
+                    program_id, ix.data
+                );
                 match limited_deserialize(&ix.data) {
                     Err(_) => {
                         warn!("Bank.check_remote_accounts():limited_deserialize error");
                         return false;
-                    },
+                    }
                     Ok(instruction) => {
                         match &instruction {
                             sonic_account_migrater_program::instruction::ProgramInstruction::MigrateRemoteAccounts{addresses} => {
@@ -5037,15 +5056,19 @@ impl Bank {
                                 return true;
                             },
                         }
-                    },
+                    }
                 }
             }
         }
-        return false;
+        false
     }
 
     ///Sonic: check transaction log messages and migrate/deactivate remote accounts.
-    fn migrate_remote_accounts(&self, tx: &SanitizedTransaction, log_messages: Option<Vec<String>>) {
+    fn migrate_remote_accounts(
+        &self,
+        tx: &SanitizedTransaction,
+        log_messages: Option<Vec<String>>,
+    ) {
         let msg = tx.message();
         let account_keys = msg.account_keys();
         // info!("Bank.migrate_remote_accounts():{:?}", msg.instructions());
@@ -5053,22 +5076,22 @@ impl Bank {
         msg.instructions().iter().for_each(|ix| {
             if let Some(program_id) = account_keys.get(ix.program_id_index.into()) {
 
-                if !sonic_account_migrater_program::check_id(program_id) { 
+                if !sonic_account_migrater_program::check_id(program_id) {
                     return;
                 }
-                
-                log_messages.as_ref().map(|log_messages| {
+
+                if let Some(log_messages) = &log_messages {
                     let re = Regex::new(r"Account (\w+) is migrated at slot (\d+) from (\w+)\.").unwrap();
                     let re2 = Regex::new(r"Account (\w+) is deactivated in cache\.").unwrap();
-                    for log_message in log_messages.iter() {
+                    for log_message in log_messages {
                         info!("log_message: {:?}", log_message);
-        
+
                         let caps = re.captures(log_message);
                         if let Some(caps) = caps {
                             let address = caps.get(1).map_or("", |m| m.as_str());
                             let slot = caps.get(2).map_or("", |m| m.as_str());
                             let node_id = caps.get(3).map_or("", |m| m.as_str());
-                            
+
                             let address = Pubkey::from_str(address).unwrap();
                             let slot = slot.parse::<u64>().unwrap();
                             let source: Option<Pubkey> = Pubkey::from_str(node_id).map(Option::Some).unwrap_or(Option::None);
@@ -5085,7 +5108,7 @@ impl Bank {
                             }
                         }
                     }
-                }); 
+                };
 
                 // let slot = self.slot();
                 // let data = ix.data.clone();
@@ -6806,17 +6829,21 @@ impl Bank {
     ) {
         self.rewards_pool_pubkeys =
             Arc::new(genesis_config.rewards_pools.keys().cloned().collect());
-        
+
         // Sonic: Initialize the genesis accounts
         let mut init_accounts = HashSet::new();
-        genesis_config.accounts.iter().for_each(|(pubkey, account)| {
-            if account.owner == solana_sdk::system_program::id() {
-                init_accounts.insert(*pubkey);
-            }
-        });
+        genesis_config
+            .accounts
+            .iter()
+            .for_each(|(pubkey, account)| {
+                if account.owner == solana_sdk::system_program::id() {
+                    init_accounts.insert(*pubkey);
+                }
+            });
         self.genesis_accounts_pubkeys = Arc::new(init_accounts);
         info!(
-            "finish_init, genesis_accounts_pubkeys: {:?}", self.genesis_accounts_pubkeys
+            "finish_init, genesis_accounts_pubkeys: {:?}",
+            self.genesis_accounts_pubkeys
         );
 
         self.apply_feature_activations(

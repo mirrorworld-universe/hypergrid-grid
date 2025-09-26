@@ -1,8 +1,7 @@
 //! Fee structures.
-use crate::native_token::sol_to_lamports;
 #[cfg(not(target_os = "solana"))]
 use solana_program::message::SanitizedMessage;
-use std::env;
+use {crate::native_token::sol_to_lamports, std::env};
 
 /// A fee and its associated compute unit limit
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
@@ -30,7 +29,7 @@ pub struct FeeStructure {
     /// Compute unit fee bins
     pub compute_fee_bins: Vec<FeeBin>,
     ///Sonic: congestion multiplier
-    fee_multiplier: u32,
+    pub fee_multiplier: u32,
 }
 
 pub const ACCOUNT_DATA_COST_PAGE_SIZE: u64 = 32_u64.saturating_mul(1024);
@@ -48,14 +47,11 @@ impl FeeStructure {
                 fee: sol_to_lamports(*sol),
             })
             .collect::<Vec<_>>();
-        
+
         //Sonic: get fee multiplier from environment variable
         let fee_multiplier = env::var("SONIC_FEE_MULTIPLIER").unwrap_or("10000".to_string());
         // println!("Sonic: SONIC_FEE_MULTIPLIER: {}", fee_multiplier);
-        let fee_multiplier = match fee_multiplier.parse() {
-            Ok(f) => f,
-            Err(_) => 10000,
-        };
+        let fee_multiplier = fee_multiplier.parse().unwrap_or(10000);
         // println!("Sonic: Fee multiplier: {}", fee_multiplier);
 
         FeeStructure {
@@ -103,7 +99,7 @@ impl FeeStructure {
         } else {
             // 1.0 // multiplier that has no effect
             //Sonic: custom congestion multiplier
-            self.fee_multiplier as f64 / 10000 as f64
+            self.fee_multiplier as f64 / 10000_f64
         };
 
         let signature_fee = message

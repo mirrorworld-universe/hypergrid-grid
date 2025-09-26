@@ -1022,7 +1022,7 @@ pub fn init_or_update(config_file: &str, is_init: bool, check_only: bool) -> Res
                 return Err(
                     "solana-install no longer supports installing by channel. Please specify \
                         a release version as vX.Y.Z."
-                        .to_string()
+                        .to_string(),
                 )
             }
         }

@@ -1,14 +1,23 @@
 use {
-    crate::{accounts_db::AccountsDb, accounts_hash::AccountHash}, dashmap::DashMap, log::info, seqlock::SeqLock, solana_sdk::{
+    crate::{accounts_db::AccountsDb, accounts_hash::AccountHash},
+    dashmap::DashMap,
+    log::info,
+    seqlock::SeqLock,
+    solana_sdk::{
         account::{AccountSharedData, ReadableAccount},
         clock::Slot,
         pubkey::Pubkey,
-    }, sonic_hypergrid::remote_loader::RemoteAccountLoader, std::{
-        collections::BTreeSet, fmt::Write, ops::Deref, sync::{
+    },
+    sonic_hypergrid::remote_loader::RemoteAccountLoader,
+    std::{
+        collections::BTreeSet,
+        fmt::Write,
+        ops::Deref,
+        sync::{
             atomic::{AtomicBool, AtomicU64, Ordering},
             Arc, RwLock,
-        }
-    }
+        },
+    },
 };
 
 pub type SlotCache = Arc<SlotCacheInner>;
@@ -222,23 +231,17 @@ impl AccountsCache {
     pub fn load(&self, slot: Slot, pubkey: &Pubkey) -> Option<CachedAccount> {
         // self.slot_cache(slot)
         //     .and_then(|slot_cache| slot_cache.get_cloned(pubkey))
-        match self.slot_cache(slot)
-            .and_then(|slot_cache| slot_cache.get_cloned(pubkey)) {
-            Some(account) => {
-                Some(account)
-            },
+        match self
+            .slot_cache(slot)
+            .and_then(|slot_cache| slot_cache.get_cloned(pubkey))
+        {
+            Some(account) => Some(account),
             None => {
                 //Sonic: load from remote
                 let account = self.remote_loader.get_account(pubkey);
-                match account {
-                    Some(acc) => {
-                        //Sonic: store into cache
-                        Some(self.store(slot, pubkey, acc))
-                    },
-                    None => None,
-                }
+                account.map(|acc| self.store(slot, pubkey, acc))
                 // None
-            },
+            }
         }
     }
 
@@ -250,14 +253,32 @@ impl AccountsCache {
     pub fn set_genesis_hash(&self, genesis_hash: String) {
         info!("Sonic AccountsCache::set_genesis_hash, {:?}", genesis_hash);
         // println!("AccountsCache::set_genesis_hash, {}", genesis_hash);
-        self.genesis_hash.write().unwrap().write_str(genesis_hash.as_str()).unwrap();
+        self.genesis_hash
+            .write()
+            .unwrap()
+            .write_str(genesis_hash.as_str())
+            .unwrap();
     }
 
     //Sonic: load accounts from remote
-    pub fn load_accounts_from_remote(&self, slot: Slot, pubkeys: Vec<Pubkey>, source: Option<Pubkey>) {
+    pub fn load_accounts_from_remote(
+        &self,
+        slot: Slot,
+        pubkeys: Vec<Pubkey>,
+        source: Option<Pubkey>,
+    ) {
         let hash = self.genesis_hash.read().unwrap();
-        info!("Sonic AccountsCache::load_accounts_from_remote, {:?}, {:}, {:?}", pubkeys, hash, slot);
-        RemoteAccountLoader::load_accounts(&self.remote_loader, hash.as_str(), slot, pubkeys, source);
+        info!(
+            "Sonic AccountsCache::load_accounts_from_remote, {:?}, {:}, {:?}",
+            pubkeys, hash, slot
+        );
+        RemoteAccountLoader::load_accounts(
+            &self.remote_loader,
+            hash.as_str(),
+            slot,
+            pubkeys,
+            source,
+        );
 
         // let remote_loader = self.remote_loader.clone();
         // thread::Builder::new()
@@ -273,7 +294,10 @@ impl AccountsCache {
 
     //Sonic: load accounts from remote
     pub fn deactivate_remote_accounts(&self, slot: Slot, pubkeys: Vec<Pubkey>) {
-        info!("Sonic AccountsCache::deactivate_remote_accounts, {:?}", pubkeys);
+        info!(
+            "Sonic AccountsCache::deactivate_remote_accounts, {:?}",
+            pubkeys
+        );
         RemoteAccountLoader::deactivate_accounts(&self.remote_loader, slot, pubkeys);
 
         // let remote_loader = self.remote_loader.clone();

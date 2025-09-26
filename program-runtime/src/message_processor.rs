@@ -7,6 +7,8 @@ use {
         sysvar_cache::SysvarCache,
         timings::{ExecuteDetailsTimings, ExecuteTimings},
     },
+    ahash::AHashSet, // Sonic: Add AHashSet
+    log::*,          // Sonic: Add log
     serde::{Deserialize, Serialize},
     solana_measure::measure::Measure,
     solana_sdk::{
@@ -15,15 +17,13 @@ use {
         hash::Hash,
         message::SanitizedMessage,
         precompiles::is_precompile,
+        pubkey::Pubkey, // Sonic: Add Pubkey
         saturating_add_assign,
         sysvar::instructions,
         transaction::TransactionError,
         transaction_context::{IndexOfAccount, InstructionAccount, TransactionContext},
-        pubkey::Pubkey, // Sonic: Add Pubkey
     },
     std::{cell::RefCell, rc::Rc, sync::Arc},
-    log::*, // Sonic: Add log
-    ahash::AHashSet, // Sonic: Add AHashSet
 };
 
 #[derive(Debug, Default, Clone, Deserialize, Serialize)]
@@ -124,14 +124,14 @@ impl MessageProcessor {
                             is_writable = false;
                         }
                     }
-                } 
+                }
 
                 instruction_accounts.push(InstructionAccount {
                     index_in_transaction: index_in_transaction as IndexOfAccount,
                     index_in_caller: index_in_transaction as IndexOfAccount,
                     index_in_callee,
                     is_signer: message.is_signer(index_in_transaction),
-                    is_writable: is_writable, //Sonic: replace message.is_writable(index_in_transaction),
+                    is_writable, //Sonic: replace message.is_writable(index_in_transaction),
                 });
             }
 
