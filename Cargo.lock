@@ -5364,6 +5364,7 @@ dependencies = [
  "tempfile",
  "test-case",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]
