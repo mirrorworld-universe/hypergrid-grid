@@ -4,6 +4,7 @@ use {
     std::{result::Result, sync::Arc, time::Duration},
 };
 
+#[derive(Debug)]
 pub struct HttpClient {
     rpc_client: Arc<reqwest::Client>,
     runtime: Option<tokio::runtime::Runtime>,
