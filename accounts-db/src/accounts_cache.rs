@@ -267,29 +267,16 @@ impl AccountsCache {
         pubkeys: Vec<Pubkey>,
         source: Option<Pubkey>,
     ) {
-        let hash = self.genesis_hash.read().unwrap();
+        let hash = self.genesis_hash.read().unwrap().to_string();
         info!(
             "Sonic AccountsCache::load_accounts_from_remote, {:?}, {:}, {:?}",
             pubkeys, hash, slot
         );
-        RemoteAccountLoader::load_accounts(
-            &self.remote_loader,
-            hash.as_str(),
-            slot,
-            pubkeys,
-            source,
-        );
 
-        // let remote_loader = self.remote_loader.clone();
-        // thread::Builder::new()
-        //     .name("solRemoteLoader1".to_string())
-        //     .spawn(move || {
-        //         // println!("AccountsCache::load_accounts_from_remote, {:?}", pubkeys);
-        //         pubkeys.iter().for_each(|pubkey| {
-        //             //Sonic: load from remote
-        //             remote_loader.load_account(slot, pubkey, source);
-        //         });
-        //     }).unwrap();
+        let remote_loader = Arc::clone(&self.remote_loader);
+        tokio::runtime::Handle::current().spawn_blocking(move || {
+            remote_loader.load_accounts(hash.as_str(), slot, pubkeys, source)
+        });
     }
 
     //Sonic: load accounts from remote
@@ -298,18 +285,9 @@ impl AccountsCache {
             "Sonic AccountsCache::deactivate_remote_accounts, {:?}",
             pubkeys
         );
-        RemoteAccountLoader::deactivate_accounts(&self.remote_loader, slot, pubkeys);
-
-        // let remote_loader = self.remote_loader.clone();
-        // thread::Builder::new()
-        //     .name("solRemoteLoader2".to_string())
-        //     .spawn(move || {
-        //         // println!("AccountsCache::deactivate_remote_accounts, {:?}", pubkeys);
-        //         pubkeys.iter().for_each(|pubkey| {
-        //             //Sonic: deactivate account in cache
-        //             remote_loader.deactivate_account(slot, &pubkey);
-        //         });
-        //     }).unwrap();
+        let remote_loader = Arc::clone(&self.remote_loader);
+        tokio::runtime::Handle::current()
+            .spawn_blocking(move || remote_loader.deactivate_accounts(slot, pubkeys));
     }
 
     pub fn remove_slot(&self, slot: Slot) -> Option<SlotCache> {

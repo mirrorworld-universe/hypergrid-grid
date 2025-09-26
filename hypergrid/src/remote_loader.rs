@@ -17,9 +17,8 @@ use {
         genesis_config::ClusterType,
         pubkey::Pubkey,
     },
-    std::{env, fs::File, str::FromStr, sync::Arc, thread, time::Duration},
+    std::{env, fs::File, thread, time::Duration},
     thiserror::Error,
-    tokio,
 };
 
 type AccountCacheKeyMap = DashMap<Pubkey, (AccountSharedData, Slot)>;
@@ -85,15 +84,13 @@ pub struct RemoteAccountLoader {
     /// Cache of accounts loaded from the remote.
     account_cache: AccountCacheKeyMap,
     config: Config,
-    runtime: tokio::runtime::Runtime,
 }
 
 impl Default for RemoteAccountLoader {
     fn default() -> Self {
         let cluster_type =
             env::var("SOLANA_RUN_SH_CLUSTER_TYPE").unwrap_or(ClusterType::STRINGS[0].to_string());
-        let cluster_type =
-            ClusterType::from_str(cluster_type.as_str()).unwrap_or(ClusterType::Development);
+        let cluster_type = cluster_type.parse().unwrap_or(ClusterType::Development);
         let default_config_path = {
             //get current directory
             let mut default_config_path = std::env::current_dir().expect("current directory");
@@ -133,10 +130,6 @@ impl RemoteAccountLoader {
                 .unwrap(),
             account_cache: AccountCacheKeyMap::default(),
             config,
-            runtime: tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(4)
-                .build()
-                .unwrap(),
         }
     }
 
@@ -198,39 +191,29 @@ impl RemoteAccountLoader {
     }
 
     pub fn load_accounts(
-        remote_loader: &Arc<Self>,
+        &self,
         genesis_hash: &str,
         slot: Slot,
         pubkeys: Vec<Pubkey>,
         source: Option<Pubkey>,
     ) {
-        remote_loader.runtime.spawn_blocking({
-            let loader = remote_loader.clone();
-            let hash = genesis_hash.to_string();
-            move || {
-                info!(
-                    "Sonic AccountsCache::load_accounts_from_remote, {:?}",
-                    pubkeys
-                );
-                pubkeys.iter().for_each(|pubkey| {
-                    //Sonic: load from remote
-                    loader.load_account(&hash, slot, pubkey, source);
-                });
-            }
+        info!(
+            "Sonic AccountsCache::load_accounts_from_remote, {:?}",
+            pubkeys
+        );
+        pubkeys.iter().for_each(|pubkey| {
+            //Sonic: load from remote
+            self.load_account(genesis_hash, slot, pubkey, source);
         });
     }
 
-    pub fn deactivate_accounts(remote_loader: &Arc<Self>, slot: Slot, pubkeys: Vec<Pubkey>) {
-        let loader = remote_loader.clone();
-        remote_loader.runtime.spawn_blocking(move || {
-            info!(
-                "Sonic AccountsCache::deactivate_remote_accounts, {:?}",
-                pubkeys
-            );
-            pubkeys.iter().for_each(|pubkey| {
-                //Sonic: deactivate account in cache
-                loader.deactivate_account(slot, pubkey);
-            });
+    pub fn deactivate_accounts(&self, slot: Slot, pubkeys: Vec<Pubkey>) {
+        info!(
+            "Sonic AccountsCache::deactivate_remote_accounts, {:?}",
+            pubkeys
+        );
+        pubkeys.iter().for_each(|pubkey| {
+            self.deactivate_account(slot, pubkey);
         });
     }
 
