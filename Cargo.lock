@@ -5355,6 +5355,7 @@ dependencies = [
  "tempfile",
  "test-case",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -7872,13 +7873,13 @@ dependencies = [
  "reqwest",
  "rustc_version 0.4.0",
  "serde",
- "serde_derive",
  "serde_json",
  "serde_yaml 0.9.30",
  "sha2 0.10.8",
  "solana-client",
  "solana-measure",
  "solana-sdk",
+ "thiserror",
  "tokio",
  "zstd",
 ]
