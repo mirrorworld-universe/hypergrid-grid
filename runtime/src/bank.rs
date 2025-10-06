@@ -4995,72 +4995,52 @@ impl Bank {
 
     ///Sonic: check if there is local account in account parameters in sonic_account_migrater_program instruction
     fn check_remote_accounts(&self, tx: &SanitizedTransaction) -> bool {
+        use sonic_account_migrater_program::instruction::ProgramInstruction;
+
         let msg = tx.message();
-        let account_keys = msg.account_keys();
-        // msg.instructions().iter().for_each(|ix: &solana_sdk::instruction::CompiledInstruction| {
-        for (ix_index, ix) in msg.instructions().iter().enumerate() {
-            if let Some(program_id) = account_keys.get(ix.program_id_index.into()) {
-                if !sonic_account_migrater_program::check_id(program_id) {
-                    return false;
-                }
 
-                info!(
-                    "Bank.check_remote_accounts():{:?}, {:?}",
-                    program_id, ix.data
-                );
-                match limited_deserialize(&ix.data) {
-                    Err(_) => {
-                        warn!("Bank.check_remote_accounts():limited_deserialize error");
-                        return false;
-                    }
-                    Ok(instruction) => {
-                        match &instruction {
-                            sonic_account_migrater_program::instruction::ProgramInstruction::MigrateRemoteAccounts{addresses} => {
-                                info!("Bank.check_remote_accounts():MigrateRemoteAccounts {:?}", addresses);
-                                for address in addresses {
-                                    if self.rc.accounts.accounts_db.account_in_indexes(address) {
-                                        return true;
-                                    }
-                                }
-                            },
-                            sonic_account_migrater_program::instruction::ProgramInstruction::DeactivateRemoteAccounts{addresses} => {
-                                info!("Bank.check_remote_accounts():DeactivateRemoteAccounts {:?}", addresses);
-                                return false;
-                            },
-                            sonic_account_migrater_program::instruction::ProgramInstruction::MigrateSourceAccounts { node_id, addresses} => {
-                                info!("Bank.check_remote_accounts():MigrateSourceAccounts node_id: {:?}, addresses: {:?}", node_id, addresses);
-                                for address in addresses {
-                                    if self.rc.accounts.accounts_db.account_in_indexes(address) {
-                                        return true;
-                                    }
-                                }
-                            },
-                            sonic_account_migrater_program::instruction::ProgramInstruction::InitializeDataAccount => {
-                                let genesis_accounts_pubkeys = self.genesis_accounts_pubkeys.clone();
+        let Some(ix) = msg.instructions().first() else {
+            return false;
+        };
+        let program_id = msg.account_keys()[ix.program_id_index as _];
 
-                                let signers = msg.get_ix_signers(ix_index).collect::<HashSet<&Pubkey>>();
-                                info!("Bank.check_remote_accounts():InitializeDataAccount, signers: {signers:?}  genesis_accounts_pubkeys: {genesis_accounts_pubkeys:?}");
+        if !sonic_account_migrater_program::check_id(&program_id) {
+            return false;
+        }
 
-                                // Sonic: go through ix.accounts to check if the signer account is a genesis account.
-                                for signer in signers {
-                                    info!("Bank.check_remote_accounts():InitializeDataAccount, signer: {signer:?}");
-                                    //Sonic: check if the signer account is a genesis account.
-                                    if genesis_accounts_pubkeys.contains(signer) {
-                                        // Sonic: if the signer account is a genesis account, the instruction will pass to runtime,
-                                        // otherwise an error will be thrown.
-                                        info!("Bank.check_remote_accounts():InitializeDataAccount, signer: {signer:?} is a genesis account");
-                                        return false;
-                                    }
-                                }
-                                info!("Bank.check_remote_accounts():InitializeDataAccount, signers are not genesis account");
-                                return true;
-                            },
-                        }
-                    }
-                }
+        info!(
+            "Bank.check_remote_accounts():{:?}, {:?}",
+            program_id, ix.data
+        );
+        let instruction = match limited_deserialize(&ix.data) {
+            Err(_) => {
+                warn!("Bank.check_remote_accounts():limited_deserialize error");
+                return false;
+            }
+            Ok(ins) => ins,
+        };
+
+        info!("Bank.check_remote_accounts(): {instruction:?}");
+
+        match &instruction {
+            ProgramInstruction::MigrateRemoteAccounts { addresses }
+            | ProgramInstruction::MigrateSourceAccounts {
+                node_id: _,
+                addresses,
+            } => addresses
+                .iter()
+                .any(|addr| self.rc.accounts.accounts_db.account_in_indexes(addr)),
+            ProgramInstruction::DeactivateRemoteAccounts { .. } => false,
+            ProgramInstruction::InitializeDataAccount => {
+                let signers = msg.get_ix_signers(0).collect::<Vec<_>>();
+                info!("Bank.check_remote_accounts():InitializeDataAccount, signers: {signers:?}  genesis_accounts_pubkeys: {:?}", self.genesis_accounts_pubkeys);
+
+                // Sonic: go through ix.accounts to check if the signer account is a genesis account.
+                signers
+                    .iter()
+                    .any(|s| self.genesis_accounts_pubkeys.contains(s))
             }
         }
-        false
     }
 
     ///Sonic: check transaction log messages and migrate/deactivate remote accounts.
