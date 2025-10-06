@@ -71,7 +71,6 @@ use {
         slice::ParallelSlice,
         ThreadPool, ThreadPoolBuilder,
     },
-    regex::Regex,
     solana_accounts_db::{
         account_overrides::AccountOverrides,
         accounts::{
@@ -199,7 +198,6 @@ use {
         path::PathBuf,
         rc::Rc,
         slice,
-        str::FromStr,
         sync::{
             atomic::{
                 AtomicBool, AtomicI64, AtomicU64, AtomicUsize,
@@ -5015,7 +5013,7 @@ impl Bank {
         //Sonic: tx is not be a vote or simulate transaction and its execution status is ok.
         if !tx.is_simple_vote_transaction() && account_overrides.is_none() && status.is_ok() {
             //Socnic: migrate remote accounts.
-            self.migrate_remote_accounts(tx, log_messages.as_deref().unwrap_or(&[]));
+            self.migrate_remote_accounts(tx);
         }
 
         TransactionExecutionResult::Executed {
@@ -5083,79 +5081,48 @@ impl Bank {
     }
 
     ///Sonic: check transaction log messages and migrate/deactivate remote accounts.
-    fn migrate_remote_accounts(&self, tx: &SanitizedTransaction, log_messages: &[String]) {
+    fn migrate_remote_accounts(&self, tx: &SanitizedTransaction) {
+        use sonic_account_migrater_program::instruction::ProgramInstruction;
+
         let msg = tx.message();
         let account_keys = msg.account_keys();
         // info!("Bank.migrate_remote_accounts():{:?}", msg.instructions());
         let accounts_cache = &self.rc.accounts.accounts_db.accounts_cache;
-        msg.instructions().iter().for_each(|ix| {
-            if let Some(program_id) = account_keys.get(ix.program_id_index.into()) {
 
-                if !sonic_account_migrater_program::check_id(program_id) {
-                    return;
+        msg.instructions()
+            .iter()
+            .filter(|ix| {
+                !account_keys
+                    .get(ix.program_id_index.into())
+                    .map(sonic_account_migrater_program::check_id)
+                    .unwrap_or(true)
+            })
+            .filter_map(|ix| match limited_deserialize(&ix.data) {
+                Ok(ok) => Some(ok),
+                Err(err) => {
+                    info!("Bank.check_remote_accounts():limited_deserialize error: {err:?}");
+                    None
                 }
-
-                let re = Regex::new(r"Account (\w+) is migrated at slot (\d+) from (\w+)\.").unwrap();
-                let re2 = Regex::new(r"Account (\w+) is deactivated in cache\.").unwrap();
-                for log_message in log_messages {
-                    info!("log_message: {:?}", log_message);
-
-                    let caps = re.captures(log_message);
-                    if let Some(caps) = caps {
-                        let address = caps.get(1).map_or("", |m| m.as_str());
-                        let slot = caps.get(2).map_or("", |m| m.as_str());
-                        let node_id = caps.get(3).map_or("", |m| m.as_str());
-
-                        let address = Pubkey::from_str(address).unwrap();
-                        let slot = slot.parse::<u64>().unwrap();
-                        let source: Option<Pubkey> = Pubkey::from_str(node_id).ok();
-
-                        info!("Bank.migrate_remote_accounts():MigrateRemoteAccounts address: {:?} slot: {:?} node_id: {:?}", address, slot, source);
-                        accounts_cache.load_accounts_from_remote(slot, vec![address], source);
-                    } else {
-                        let caps = re2.captures(log_message);
-                        if let Some(caps) = caps {
-                            let address = caps.get(1).map_or("", |m| m.as_str());
-                            let address = Pubkey::from_str(address).unwrap();
-                            info!("Bank.migrate_remote_accounts():DeactivateRemoteAccounts address: {:?}", address);
-                            accounts_cache.deactivate_remote_accounts(self.slot, vec![address]);
-                        }
+            })
+            .for_each(|ix| {
+                info!("Bank.check_remote_accounts(): {ix:?}");
+                match ix {
+                    ProgramInstruction::MigrateSourceAccounts { addresses, node_id } => {
+                        accounts_cache.load_accounts_from_remote(
+                            self.slot,
+                            addresses,
+                            Some(node_id),
+                        );
                     }
+                    ProgramInstruction::MigrateRemoteAccounts { addresses } => {
+                        accounts_cache.load_accounts_from_remote(self.slot, addresses, None);
+                    }
+                    ProgramInstruction::DeactivateRemoteAccounts { addresses } => {
+                        accounts_cache.deactivate_remote_accounts(self.slot, addresses);
+                    }
+                    ProgramInstruction::InitializeDataAccount => {}
                 }
-
-                // let slot = self.slot();
-                // let data = ix.data.clone();
-
-                // //run the following codes in another thread.
-                // match limited_deserialize(&data) {
-                //     Err(_) => {
-                //         info!("Bank.check_remote_accounts():limited_deserialize error");
-                //         return;
-                //     },
-                //     Ok(instruction) => {
-                //         info!("Bank.check_remote_accounts():limited_deserialize ok, {:?}", instruction);
-                //         match &instruction {
-                //             sonic_account_migrater_program::instruction::ProgramInstruction::MigrateRemoteAccounts{addresses} => {
-                //                 //load remote account...
-                //                 info!("Bank.check_remote_accounts():MigrateRemoteAccounts");
-
-                //                 accounts_cache.load_accounts_from_remote(slot, addresses.to_vec(), None);
-                //             },
-                //             sonic_account_migrater_program::instruction::ProgramInstruction::DeactivateRemoteAccounts{addresses} => {
-                //                 //deactivate remote account...
-                //                 info!("Bank.check_remote_accounts():DeactivateRemoteAccounts");
-                //                 accounts_cache.deactivate_remote_accounts(slot, addresses.to_vec());
-                //             },
-                //             sonic_account_migrater_program::instruction::ProgramInstruction::MigrateSourceAccounts { addresses, node_id} => {
-                //                 //load remote account from source...
-                //                 info!("Bank.check_remote_accounts():MigrateSourceAccounts node_id: {:?} refresh: {:?}", node_id);
-                //                 accounts_cache.load_accounts_from_remote(slot, addresses.to_vec(), Some(*node_id));
-                //             },
-                //         }
-                //     },
-                // }
-            }
-        });
+            });
     }
 
     fn replenish_program_cache(
