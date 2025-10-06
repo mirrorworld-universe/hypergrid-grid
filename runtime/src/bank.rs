@@ -4931,7 +4931,7 @@ impl Bank {
             blockhash,
             lamports_per_signature,
             &mut executed_units,
-            Some(remote_accounts), //Sonic: pass remote accounts to process_message.
+            remote_accounts, //Sonic: pass remote accounts to process_message.
         );
         process_message_time.stop();
 
@@ -5015,7 +5015,7 @@ impl Bank {
         //Sonic: tx is not be a vote or simulate transaction and its execution status is ok.
         if !tx.is_simple_vote_transaction() && account_overrides.is_none() && status.is_ok() {
             //Socnic: migrate remote accounts.
-            self.migrate_remote_accounts(tx, log_messages.clone());
+            self.migrate_remote_accounts(tx, log_messages.as_deref().unwrap_or(&[]));
         }
 
         TransactionExecutionResult::Executed {
@@ -5103,11 +5103,7 @@ impl Bank {
     }
 
     ///Sonic: check transaction log messages and migrate/deactivate remote accounts.
-    fn migrate_remote_accounts(
-        &self,
-        tx: &SanitizedTransaction,
-        log_messages: Option<Vec<String>>,
-    ) {
+    fn migrate_remote_accounts(&self, tx: &SanitizedTransaction, log_messages: &[String]) {
         let msg = tx.message();
         let account_keys = msg.account_keys();
         // info!("Bank.migrate_remote_accounts():{:?}", msg.instructions());
@@ -5119,35 +5115,33 @@ impl Bank {
                     return;
                 }
 
-                if let Some(log_messages) = &log_messages {
-                    let re = Regex::new(r"Account (\w+) is migrated at slot (\d+) from (\w+)\.").unwrap();
-                    let re2 = Regex::new(r"Account (\w+) is deactivated in cache\.").unwrap();
-                    for log_message in log_messages {
-                        info!("log_message: {:?}", log_message);
+                let re = Regex::new(r"Account (\w+) is migrated at slot (\d+) from (\w+)\.").unwrap();
+                let re2 = Regex::new(r"Account (\w+) is deactivated in cache\.").unwrap();
+                for log_message in log_messages {
+                    info!("log_message: {:?}", log_message);
 
-                        let caps = re.captures(log_message);
+                    let caps = re.captures(log_message);
+                    if let Some(caps) = caps {
+                        let address = caps.get(1).map_or("", |m| m.as_str());
+                        let slot = caps.get(2).map_or("", |m| m.as_str());
+                        let node_id = caps.get(3).map_or("", |m| m.as_str());
+
+                        let address = Pubkey::from_str(address).unwrap();
+                        let slot = slot.parse::<u64>().unwrap();
+                        let source: Option<Pubkey> = Pubkey::from_str(node_id).ok();
+
+                        info!("Bank.migrate_remote_accounts():MigrateRemoteAccounts address: {:?} slot: {:?} node_id: {:?}", address, slot, source);
+                        accounts_cache.load_accounts_from_remote(slot, vec![address], source);
+                    } else {
+                        let caps = re2.captures(log_message);
                         if let Some(caps) = caps {
                             let address = caps.get(1).map_or("", |m| m.as_str());
-                            let slot = caps.get(2).map_or("", |m| m.as_str());
-                            let node_id = caps.get(3).map_or("", |m| m.as_str());
-
                             let address = Pubkey::from_str(address).unwrap();
-                            let slot = slot.parse::<u64>().unwrap();
-                            let source: Option<Pubkey> = Pubkey::from_str(node_id).map(Option::Some).unwrap_or(Option::None);
-
-                            info!("Bank.migrate_remote_accounts():MigrateRemoteAccounts address: {:?} slot: {:?} node_id: {:?}", address, slot, source);
-                            accounts_cache.load_accounts_from_remote(slot, vec![address], source);
-                        } else {
-                            let caps = re2.captures(log_message);
-                            if let Some(caps) = caps {
-                                let address = caps.get(1).map_or("", |m| m.as_str());
-                                let address = Pubkey::from_str(address).unwrap();
-                                info!("Bank.migrate_remote_accounts():DeactivateRemoteAccounts address: {:?}", address);
-                                accounts_cache.deactivate_remote_accounts(self.slot, vec![address]);
-                            }
+                            info!("Bank.migrate_remote_accounts():DeactivateRemoteAccounts address: {:?}", address);
+                            accounts_cache.deactivate_remote_accounts(self.slot, vec![address]);
                         }
                     }
-                };
+                }
 
                 // let slot = self.slot();
                 // let data = ix.data.clone();

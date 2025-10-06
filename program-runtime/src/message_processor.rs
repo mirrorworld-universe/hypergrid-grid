@@ -7,8 +7,7 @@ use {
         sysvar_cache::SysvarCache,
         timings::{ExecuteDetailsTimings, ExecuteTimings},
     },
-    ahash::AHashSet, // Sonic: Add AHashSet
-    log::*,          // Sonic: Add log
+    log::*, // Sonic: Add log
     serde::{Deserialize, Serialize},
     solana_measure::measure::Measure,
     solana_sdk::{
@@ -23,7 +22,7 @@ use {
         transaction::TransactionError,
         transaction_context::{IndexOfAccount, InstructionAccount, TransactionContext},
     },
-    std::{cell::RefCell, rc::Rc, sync::Arc},
+    std::{cell::RefCell, collections::HashSet, rc::Rc, sync::Arc},
 };
 
 #[derive(Debug, Default, Clone, Deserialize, Serialize)]
@@ -59,7 +58,7 @@ impl MessageProcessor {
         blockhash: Hash,
         lamports_per_signature: u64,
         accumulated_consumed_units: &mut u64,
-        remote_accounts: Option<AHashSet<Pubkey>>, // Sonic: Add remote_accounts
+        remote_accounts: HashSet<Pubkey>, // Sonic: Add remote_accounts
     ) -> Result<(), TransactionError> {
         let mut invoke_context = InvokeContext::new(
             transaction_context,
@@ -115,15 +114,12 @@ impl MessageProcessor {
 
                 // Sonic: Check if the account is a remote account
                 let mut is_writable = message.is_writable(index_in_transaction);
-                if let Some(remotes) = &remote_accounts {
-                    if !remotes.is_empty() {
-                        let pubkey = message.account_keys().get(index_in_transaction).unwrap();
-                        if remotes.contains(pubkey) {
-                            // Sonic: If the account is a remote account, it is always not writable.
-                            info!("Sonic Remote account: {}", pubkey);
-                            is_writable = false;
-                        }
-                    }
+
+                let pubkey = message.account_keys().get(index_in_transaction).unwrap();
+                if remote_accounts.contains(pubkey) {
+                    // Sonic: If the account is a remote account, it is always not writable.
+                    info!("Sonic Remote account: {}", pubkey);
+                    is_writable = false;
                 }
 
                 instruction_accounts.push(InstructionAccount {
