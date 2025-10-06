@@ -1,8 +1,6 @@
 use {
     crate::{config::Config, cosmos},
-    ahash::AHashSet,
     base64::{self, Engine},
-    dashmap::DashMap,
     log::*,
     serde::{Deserialize, Serialize},
     serde_json::json,
@@ -17,11 +15,11 @@ use {
         genesis_config::ClusterType,
         pubkey::Pubkey,
     },
-    std::{env, fs::File, thread, time::Duration},
+    std::{collections::HashSet, env, fs::File, thread, time::Duration},
     thiserror::Error,
 };
 
-type AccountCacheKeyMap = DashMap<Pubkey, (AccountSharedData, Slot)>;
+type AccountCacheKeyMap = dashmap::DashMap<Pubkey, (AccountSharedData, Slot)>;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -161,13 +159,11 @@ impl RemoteAccountLoader {
         !Self::ignored_account(pubkey) && self.account_cache.contains_key(pubkey)
     }
 
-    pub fn get_account_list(&self) -> AHashSet<Pubkey> {
+    pub fn get_account_list(&self) -> HashSet<Pubkey> {
         self.account_cache.iter().map(|ent| *ent.key()).collect()
     }
 
-    pub fn get_historical_accounts(&self) -> AHashSet<(Pubkey, Slot)> {
-        // let path = format!("{}/{:?}_{:?}_{}_{:?}.json", self.config.accounts_path, pubkey, source.unwrap_or_default(), genesis_hash, slot);
-
+    pub fn get_historical_accounts(&self) -> HashSet<(Pubkey, Slot)> {
         std::fs::read_dir(&self.config.accounts_path)
             .unwrap()
             .map(|ent| ent.unwrap().path())
@@ -236,6 +232,7 @@ impl RemoteAccountLoader {
             source.unwrap_or_default(),
             slot
         );
+
         // println!("Thread {:?}: load_account: {:?} from {:?}, solt: {:?}",  thread::current().id(), pubkey, source.unwrap_or_default(), slot);
 
         //load the account from the local file first
@@ -252,11 +249,11 @@ impl RemoteAccountLoader {
             return Some(account);
         }
 
-        if let Some(account_cache) = self.account_cache.get(pubkey) {
-            let (account1, slot1) = account_cache.clone();
-            if slot == slot1 {
-                info!("Sonic cache: {}\n", pubkey.to_string());
-                return Some(account1);
+        if let Some(entry) = self.account_cache.get(pubkey) {
+            let (cached_account, cached_slot) = &*entry;
+            if slot == *cached_slot {
+                info!("Sonic cache: {pubkey}\n");
+                return Some(cached_account.clone());
             }
         }
 
@@ -635,8 +632,9 @@ impl RemoteAccountLoader {
             Ok(resp) => {
                 info!("Sonic respone: {resp:?}");
                 //convert the response body to json
-                if let Ok(value) = resp.json() {
+                if let Ok(mut value) = resp.json::<AccountSharedData>() {
                     info!("Sonic load_account_via_hssn: success: {:?}\n", value);
+                    value.remote = true;
                     return Some(value);
                 }
             }
@@ -694,10 +692,9 @@ impl RemoteAccountLoader {
         };
         self.account_cache.remove(pubkey);
         //remove the related programdata account
-        let Some(programdata_address) = Self::has_programdata_account(&account) else {
-            return;
-        };
-        self.account_cache.remove(&programdata_address);
+        if let Some(programdata_address) = Self::has_programdata_account(&account) {
+            self.account_cache.remove(&programdata_address);
+        }
     }
 }
 
