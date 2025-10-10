@@ -527,6 +527,8 @@ pub mod serialize_utils;
 pub mod short_vec;
 pub mod slot_hashes;
 pub mod slot_history;
+pub mod sonic_account_migrater;
+pub mod sonic_fee_settlement;
 pub mod stable_layout;
 pub mod stake;
 pub mod stake_history;
@@ -536,8 +538,6 @@ pub mod system_program;
 pub mod sysvar;
 pub mod vote;
 pub mod wasm;
-pub mod sonic_account_migrater;
-pub mod sonic_fee_settlement;
 
 #[deprecated(
     since = "1.17.0",
@@ -570,8 +570,8 @@ pub mod sdk_ids {
         crate::{
             address_lookup_table, bpf_loader, bpf_loader_deprecated, bpf_loader_upgradeable,
             config, ed25519_program, feature, incinerator, loader_v4, secp256k1_program,
-            solana_program::pubkey::Pubkey, stake, system_program, sysvar, vote,
-            sonic_account_migrater, sonic_fee_settlement,
+            solana_program::pubkey::Pubkey, sonic_account_migrater, sonic_fee_settlement, stake,
+            system_program, sysvar, vote,
         },
         lazy_static::lazy_static,
     };

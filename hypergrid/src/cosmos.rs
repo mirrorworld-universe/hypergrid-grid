@@ -1,16 +1,13 @@
-use {
-    std::process::Command,
-    log::*,
-};
+use {log::*, std::process::Command};
 
 const COSMOS_CHAIN_ID: &str = "hypergridssn";
 const COSMOS_HOME: &str = ".hypergrid-ssn";
 const COSMOS_APP: &str = "bin/hypergrid-ssnd";
 const COSMOS_SIGNER: &str = "my_key";
 
-pub fn run_load_solana_account(pub_key: &str, version:  &str, source: &str, update: bool) {
+pub fn run_load_solana_account(pub_key: &str, version: &str, source: &str, update: bool) {
     let home_path = dirs_next::home_dir().expect("home directory");
-    
+
     let cosmos_home_path = {
         let mut _path = home_path.clone();
         _path.extend([COSMOS_HOME]);
@@ -29,7 +26,7 @@ pub fn run_load_solana_account(pub_key: &str, version:  &str, source: &str, upda
         // println!("{} does not exist.", cosmos_app_path);
         return;
     }
-    
+
     //format the command string
     let cmd_str: String;
     if update {
@@ -42,14 +39,14 @@ pub fn run_load_solana_account(pub_key: &str, version:  &str, source: &str, upda
 
     // println!("cmd_str: {}", cmd_str);
     info!("cmd_str: {}", cmd_str);
-    
+
     let output = Command::new("sh").arg("-c").arg(cmd_str).output();
     match output {
         Ok(output) => {
             let output_str = String::from_utf8_lossy(&output.stdout);
             info!("output: {:?}", output_str);
             // println!("{:?}", String::from_utf8_lossy(&output.stdout));
-        },
+        }
         Err(e) => {
             error!("Error: {:?}", e);
         }

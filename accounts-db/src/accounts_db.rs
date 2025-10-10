@@ -71,6 +71,7 @@ use {
         u64_align, utils,
         verify_accounts_hash_in_background::VerifyAccountsHashInBackground,
     },
+    ahash::AHashSet,
     blake3::traits::digest::Digest,
     crossbeam_channel::{unbounded, Receiver, Sender},
     dashmap::{DashMap, DashSet},
@@ -91,9 +92,9 @@ use {
         hash::Hash,
         pubkey::Pubkey,
         saturating_add_assign,
+        sonic_account_migrater::{self, state::MigratedAccountsState},
         timing::AtomicInterval,
         transaction::SanitizedTransaction,
-        sonic_account_migrater::{self, state::MigratedAccountsState},
     },
     std::{
         borrow::{Borrow, Cow},
@@ -111,7 +112,6 @@ use {
         thread::{self, sleep, Builder},
         time::{Duration, Instant},
     },
-    ahash::AHashSet,
     tempfile::TempDir,
 };
 
@@ -2840,9 +2840,13 @@ impl AccountsDb {
 
     ///Sonic: restore remote accounts from the migrated accounts
     fn restore_remote_accounts(&self, genesis_config: &GenesisConfig) {
-        info!("Sonic restore_remote_accounts: {:?}", thread::current().id());
+        info!(
+            "Sonic restore_remote_accounts: {:?}",
+            thread::current().id()
+        );
         let genesis_hash = genesis_config.hash();
-        self.accounts_cache.set_genesis_hash(genesis_hash.to_string());
+        self.accounts_cache
+            .set_genesis_hash(genesis_hash.to_string());
         let pubkey = sonic_account_migrater::migrated_accounts::id();
         let ancestors = Ancestors::default();
         let result = self.load(&ancestors, &pubkey, LoadHint::Unspecified);
@@ -2860,7 +2864,10 @@ impl AccountsDb {
                 });
             }
         } else {
-            warn!("Sonic restore_remote_accounts: failed to load migrated accounts at {:?}", pubkey);
+            warn!(
+                "Sonic restore_remote_accounts: failed to load migrated accounts at {:?}",
+                pubkey
+            );
         }
     }
 
@@ -5101,7 +5108,11 @@ impl AccountsDb {
             AccountIndexGetResult::NotFound => {
                 // Sonic: check if the pubkey is from remote in cache.
                 if ancestors.len() > 1 && self.accounts_cache.has_account_from_remote(pubkey) {
-                    info!("Sonic chenck has_account_from_remote: {:?} {}", std::thread::current().id(), pubkey.to_string());
+                    info!(
+                        "Sonic chenck has_account_from_remote: {:?} {}",
+                        std::thread::current().id(),
+                        pubkey.to_string()
+                    );
                     return Some((0, StorageLocation::Cached, None)); //Sonic: return a dummy slot number
                 }
                 return None;
@@ -7675,8 +7686,8 @@ impl AccountsDb {
 
             //Sonic: get remote accounts to excude their lamports from the hash calculation
             let historical_accounts = self.accounts_cache.remote_loader.get_historical_accounts();
-            info!("calculate_accounts_hash_from_storages: slot:{slot}, kind: {kind:?}, historical_accounts: {historical_accounts:?}"); 
-            let mut remote_accounts:AHashSet<Pubkey> = AHashSet::new();
+            info!("calculate_accounts_hash_from_storages: slot:{slot}, kind: {kind:?}, historical_accounts: {historical_accounts:?}");
+            let mut remote_accounts: AHashSet<Pubkey> = AHashSet::new();
             historical_accounts.iter().for_each(|(pubkey, slot)| {
                 remote_accounts.insert(*pubkey);
             });
@@ -7717,7 +7728,7 @@ impl AccountsDb {
                 .iter()
                 .map(|d| d.as_ref().unwrap().get_cache_hash_data())
                 .collect::<Vec<_>>();
-            
+
             // turn raw data into merkle tree hashes and sum of lamports
             let (accounts_hash, capitalization) =
                 accounts_hasher.rest_of_hash_calculation(&cache_hash_intermediates, &mut stats);

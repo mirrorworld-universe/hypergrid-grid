@@ -158,7 +158,7 @@ impl From<Account> for AccountSharedData {
             owner: other.owner,
             executable: other.executable,
             rent_epoch: other.rent_epoch,
-            remote: false, // Sonic: set remote to false by default 
+            remote: false, // Sonic: set remote to false by default
         }
     }
 }
@@ -304,7 +304,7 @@ impl WritableAccount for AccountSharedData {
             owner,
             executable,
             rent_epoch,
-            remote: false, // Sonic: set remote to false by default 
+            remote: false, // Sonic: set remote to false by default
         }
     }
 }
@@ -355,7 +355,7 @@ impl ReadableAccount for Ref<'_, AccountSharedData> {
             owner: *self.owner(),
             executable: self.executable(),
             rent_epoch: self.rent_epoch(),
-            remote: false, // Sonic: set remote to false by default 
+            remote: false, // Sonic: set remote to false by default
         }
     }
 }

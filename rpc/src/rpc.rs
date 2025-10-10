@@ -526,7 +526,7 @@ impl JsonRpcRequestProcessor {
         config: Option<RpcAccountInfoConfig>,
         mut filters: Vec<RpcFilterType>,
         with_context: bool,
-    ) ->  Result<u64> {
+    ) -> Result<u64> {
         let RpcAccountInfoConfig {
             encoding,
             data_slice: data_slice_config,
@@ -3176,7 +3176,7 @@ pub mod rpc_accounts_scan {
             meta: Self::Metadata,
             pubkey_str: String,
             config: Option<RpcWalletCountConfig>,
-        ) ->  Result<u64>;
+        ) -> Result<u64>;
 
         #[rpc(meta, name = "getLargestAccounts")]
         fn get_largest_accounts(
@@ -3289,7 +3289,7 @@ pub mod rpc_accounts_scan {
             }
             meta.get_wallet_count(&program_id, config, filters, with_context)
         }
-        
+
         fn get_largest_accounts(
             &self,
             meta: Self::Metadata,
