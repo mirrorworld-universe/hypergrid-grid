@@ -7589,6 +7589,7 @@ impl AccountsDb {
         config: &CalcAccountsHashConfig<'_>,
         kind: CalcAccountsHashKind,
         slot: Slot,
+        storages_start_slot: Slot,
     ) -> CacheHashData {
         let accounts_hash_cache_path = if !config.store_detailed_debug_info_on_failure {
             accounts_hash_cache_path
@@ -7600,7 +7601,10 @@ impl AccountsDb {
             _ = std::fs::remove_dir_all(&failed_dir);
             failed_dir
         };
-        CacheHashData::new(accounts_hash_cache_path, kind == CalcAccountsHashKind::Full)
+        CacheHashData::new(
+            accounts_hash_cache_path,
+            (kind == CalcAccountsHashKind::Incremental).then_some(storages_start_slot),
+        )
     }
 
     // modeled after calculate_accounts_delta_hash
@@ -7659,7 +7663,8 @@ impl AccountsDb {
     ) -> Result<(AccountsHashKind, u64), AccountsHashVerificationError> {
         let total_time = Measure::start("");
         let _guard = self.active_stats.activate(ActiveStatItem::Hash);
-        stats.oldest_root = storages.range().start;
+        let storages_start_slot = storages.range().start;
+        stats.oldest_root = storages_start_slot;
 
         self.mark_old_slots_as_dirty(storages, config.epoch_schedule.slots_per_epoch, &mut stats);
 
@@ -7675,7 +7680,8 @@ impl AccountsDb {
                 accounts_hash_cache_path,
                 config,
                 kind,
-                slot
+                slot,
+                storages_start_slot,
             ));
             stats.cache_hash_data_us += cache_hash_data_us;
 
@@ -9836,7 +9842,7 @@ pub mod tests {
             let temp_dir = TempDir::new().unwrap();
             let accounts_hash_cache_path = temp_dir.path().to_path_buf();
             self.scan_snapshot_stores_with_cache(
-                &CacheHashData::new(accounts_hash_cache_path, true),
+                &CacheHashData::new(accounts_hash_cache_path, None),
                 storage,
                 stats,
                 bins,
@@ -10904,7 +10910,7 @@ pub mod tests {
         };
 
         let result = accounts_db.scan_account_storage_no_bank(
-            &CacheHashData::new(accounts_hash_cache_path, true),
+            &CacheHashData::new(accounts_hash_cache_path, None),
             &CalcAccountsHashConfig::default(),
             &get_storage_refs(&[storage]),
             test_scan,

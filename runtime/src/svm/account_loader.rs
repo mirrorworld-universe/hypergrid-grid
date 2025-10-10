@@ -1,10 +1,5 @@
-pub mod account_rent_state;
-
 use {
-    crate::{
-        accounts::account_rent_state::{check_rent_state_with_account, RentState},
-        bank::RewardInterval,
-    },
+    crate::{bank::RewardInterval, svm::account_rent_state::RentState},
     itertools::Itertools,
     log::warn,
     solana_accounts_db::{
@@ -45,11 +40,11 @@ use {
 };
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn load_accounts(
+pub(crate) fn load_accounts(
     accounts_db: &AccountsDb,
     ancestors: &Ancestors,
     txs: &[SanitizedTransaction],
-    lock_results: Vec<TransactionCheckResult>,
+    lock_results: &[TransactionCheckResult],
     hash_queue: &BlockhashQueue,
     error_counters: &mut TransactionErrorMetrics,
     rent_collector: &RentCollector,
@@ -123,7 +118,7 @@ pub(super) fn load_accounts(
 
                 (Ok(loaded_transaction), nonce)
             }
-            (_, (Err(e), _nonce)) => (Err(e), None),
+            (_, (Err(e), _nonce)) => (Err(e.clone()), None),
         })
         .collect()
 }
@@ -476,7 +471,7 @@ pub fn validate_fee_payer(
         .map_err(|_| TransactionError::InsufficientFundsForFee)?;
 
     let payer_post_rent_state = RentState::from_account(payer_account, &rent_collector.rent);
-    check_rent_state_with_account(
+    RentState::check_rent_state_with_account(
         &payer_pre_rent_state,
         &payer_post_rent_state,
         payer_address,
@@ -544,7 +539,7 @@ mod tests {
             &accounts.accounts_db,
             &ancestors,
             &[sanitized_tx],
-            vec![(Ok(()), None)],
+            &[(Ok(()), None)],
             &hash_queue,
             error_counters,
             rent_collector,
@@ -1022,7 +1017,7 @@ mod tests {
             &accounts.accounts_db,
             &ancestors,
             &[tx],
-            vec![(Ok(()), None)],
+            &[(Ok(()), None)],
             &hash_queue,
             &mut error_counters,
             &rent_collector,
