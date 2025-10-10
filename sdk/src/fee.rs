@@ -29,7 +29,7 @@ pub struct FeeStructure {
     /// Compute unit fee bins
     pub compute_fee_bins: Vec<FeeBin>,
     ///Sonic: congestion multiplier
-    fee_multiplier: u32,
+    pub fee_multiplier: u32,
 }
 
 pub const ACCOUNT_DATA_COST_PAGE_SIZE: u64 = 32_u64.saturating_mul(1024);
