@@ -3,7 +3,7 @@
 pub use solana_perf::report_target_features;
 use {
     crate::{
-        accounts_hash_verifier::{AccountsHashFaultInjector, AccountsHashVerifier},
+        accounts_hash_verifier::AccountsHashVerifier,
         admin_rpc_post_init::AdminRpcRequestMetadataPostInit,
         banking_trace::{self, BankingTracer},
         cache_block_meta_service::{CacheBlockMetaSender, CacheBlockMetaService},
@@ -35,6 +35,7 @@ use {
         accounts_index::AccountSecondaryIndexes,
         accounts_update_notifier_interface::AccountsUpdateNotifier,
         hardened_unpack::{open_genesis_config, MAX_GENESIS_ARCHIVE_UNPACKED_SIZE},
+        utils::{move_and_async_delete_path, move_and_async_delete_path_contents},
     },
     solana_client::connection_cache::{ConnectionCache, Protocol},
     solana_entry::poh::compute_hash_time_ns,
@@ -100,9 +101,7 @@ use {
         snapshot_bank_utils::{self, DISABLED_SNAPSHOT_ARCHIVE_INTERVAL},
         snapshot_config::SnapshotConfig,
         snapshot_hash::StartingSnapshotHashes,
-        snapshot_utils::{
-            self, clean_orphaned_account_snapshot_dirs, move_and_async_delete_path_contents,
-        },
+        snapshot_utils::{self, clean_orphaned_account_snapshot_dirs},
     },
     solana_sdk::{
         clock::Slot,
@@ -205,7 +204,6 @@ pub struct ValidatorConfig {
     pub voting_disabled: bool,
     pub account_paths: Vec<PathBuf>,
     pub account_snapshot_paths: Vec<PathBuf>,
-    pub account_shrink_paths: Option<Vec<PathBuf>>,
     pub rpc_config: JsonRpcConfig,
     /// Specifies which plugins to start up with
     pub on_start_geyser_plugin_config_files: Option<Vec<PathBuf>>,
@@ -223,7 +221,6 @@ pub struct ValidatorConfig {
     pub repair_validators: Option<HashSet<Pubkey>>, // None = repair from all
     pub repair_whitelist: Arc<RwLock<HashSet<Pubkey>>>, // Empty = repair with all
     pub gossip_validators: Option<HashSet<Pubkey>>, // None = gossip with all
-    pub accounts_hash_fault_injector: Option<AccountsHashFaultInjector>,
     pub accounts_hash_interval_slots: u64,
     pub max_genesis_archive_unpacked_size: u64,
     pub wal_recovery_mode: Option<BlockstoreRecoveryMode>,
@@ -278,7 +275,6 @@ impl Default for ValidatorConfig {
             max_ledger_shreds: None,
             account_paths: Vec::new(),
             account_snapshot_paths: Vec::new(),
-            account_shrink_paths: None,
             rpc_config: JsonRpcConfig::default(),
             on_start_geyser_plugin_config_files: None,
             rpc_addrs: None,
@@ -294,7 +290,6 @@ impl Default for ValidatorConfig {
             repair_validators: None,
             repair_whitelist: Arc::new(RwLock::new(HashSet::default())),
             gossip_validators: None,
-            accounts_hash_fault_injector: None,
             accounts_hash_interval_slots: std::u64::MAX,
             max_genesis_archive_unpacked_size: MAX_GENESIS_ARCHIVE_UNPACKED_SIZE,
             wal_recovery_mode: None,
@@ -627,7 +622,7 @@ impl Validator {
         ];
         for old_accounts_hash_cache_dir in old_accounts_hash_cache_dirs {
             if old_accounts_hash_cache_dir.exists() {
-                snapshot_utils::move_and_async_delete_path(old_accounts_hash_cache_dir);
+                move_and_async_delete_path(old_accounts_hash_cache_dir);
             }
         }
 
@@ -778,8 +773,6 @@ impl Validator {
             accounts_package_receiver,
             snapshot_package_sender,
             exit.clone(),
-            cluster_info.clone(),
-            config.accounts_hash_fault_injector,
             config.snapshot_config.clone(),
         );
 
@@ -1197,10 +1190,6 @@ impl Validator {
                     .unwrap_or_else(|| current_runtime_handle.as_ref().unwrap()),
                 &identity_keypair,
                 node.sockets.tvu_quic,
-                node.info
-                    .tvu(Protocol::QUIC)
-                    .map_err(|err| format!("Invalid QUIC TVU address: {err:?}"))?
-                    .ip(),
                 turbine_quic_endpoint_sender,
                 bank_forks.clone(),
             )
@@ -1230,10 +1219,6 @@ impl Validator {
                         .unwrap_or_else(|| current_runtime_handle.as_ref().unwrap()),
                     &identity_keypair,
                     node.sockets.serve_repair_quic,
-                    node.info
-                        .serve_repair(Protocol::QUIC)
-                        .map_err(|err| format!("Invalid QUIC serve-repair address: {err:?}"))?
-                        .ip(),
                     repair_quic_endpoint_sender,
                     bank_forks.clone(),
                 )
@@ -1850,7 +1835,6 @@ fn load_blockstore(
             &genesis_config,
             &blockstore,
             config.account_paths.clone(),
-            config.account_shrink_paths.clone(),
             Some(&config.snapshot_config),
             &process_options,
             transaction_history_services
@@ -1877,11 +1861,6 @@ fn load_blockstore(
         let mut bank_forks = bank_forks.write().unwrap();
         bank_forks.set_snapshot_config(Some(config.snapshot_config.clone()));
         bank_forks.set_accounts_hash_interval_slots(config.accounts_hash_interval_slots);
-        if let Some(ref shrink_paths) = config.account_shrink_paths {
-            bank_forks
-                .working_bank()
-                .set_shrink_paths(shrink_paths.clone());
-        }
     }
 
     Ok((
@@ -2460,12 +2439,16 @@ fn get_stake_percent_in_gossip(bank: &Bank, cluster_info: &ClusterInfo, log: boo
 }
 
 fn cleanup_accounts_paths(config: &ValidatorConfig) {
-    for accounts_path in &config.account_paths {
-        move_and_async_delete_path_contents(accounts_path);
+    for account_path in &config.account_paths {
+        move_and_async_delete_path_contents(account_path);
     }
-    if let Some(ref shrink_paths) = config.account_shrink_paths {
-        for accounts_path in shrink_paths {
-            move_and_async_delete_path_contents(accounts_path);
+    if let Some(shrink_paths) = config
+        .accounts_db_config
+        .as_ref()
+        .and_then(|config| config.shrink_paths.as_ref())
+    {
+        for shrink_path in shrink_paths {
+            move_and_async_delete_path_contents(shrink_path);
         }
     }
 }

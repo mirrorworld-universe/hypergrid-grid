@@ -7,8 +7,7 @@ use {
         accounts::{LoadedTransaction, TransactionLoadResult, TransactionRent},
         accounts_db::AccountsDb,
         ancestors::Ancestors,
-        blockhash_queue::BlockhashQueue,
-        nonce_info::{NonceFull, NonceInfo},
+        nonce_info::NonceFull,
         rent_collector::{RentCollector, RENT_EXEMPT_RENT_EPOCH},
         rent_debits::RentDebits,
         transaction_error_metrics::TransactionErrorMetrics,
@@ -23,7 +22,7 @@ use {
             create_executable_meta, is_builtin, is_executable, Account, AccountSharedData,
             ReadableAccount, WritableAccount,
         },
-        feature_set::{include_loaded_accounts_data_size_in_fee_calculation, FeatureSet},
+        feature_set::{self, include_loaded_accounts_data_size_in_fee_calculation, FeatureSet},
         fee::FeeStructure,
         message::SanitizedMessage,
         native_loader,
@@ -45,7 +44,6 @@ pub(crate) fn load_accounts(
     ancestors: &Ancestors,
     txs: &[SanitizedTransaction],
     lock_results: &[TransactionCheckResult],
-    hash_queue: &BlockhashQueue,
     error_counters: &mut TransactionErrorMetrics,
     rent_collector: &RentCollector,
     feature_set: &FeatureSet,
@@ -54,22 +52,15 @@ pub(crate) fn load_accounts(
     in_reward_interval: RewardInterval,
     program_accounts: &HashMap<Pubkey, (&Pubkey, u64)>,
     loaded_programs: &LoadedProgramsForTxBatch,
-    should_collect_rent: bool,
 ) -> Vec<TransactionLoadResult> {
     txs.iter()
         .zip(lock_results)
         .map(|etx| match etx {
-            (tx, (Ok(()), nonce)) => {
-                let lamports_per_signature = nonce
-                    .as_ref()
-                    .map(|nonce| nonce.lamports_per_signature())
-                    .unwrap_or_else(|| {
-                        hash_queue.get_lamports_per_signature(tx.message().recent_blockhash())
-                    });
+            (tx, (Ok(()), nonce, lamports_per_signature)) => {
                 let fee = if let Some(lamports_per_signature) = lamports_per_signature {
                     fee_structure.calculate_fee(
                         tx.message(),
-                        lamports_per_signature,
+                        *lamports_per_signature,
                         &process_compute_budget_instructions(
                             tx.message().program_instructions_iter(),
                         )
@@ -95,7 +86,6 @@ pub(crate) fn load_accounts(
                     in_reward_interval,
                     program_accounts,
                     loaded_programs,
-                    should_collect_rent,
                 ) {
                     Ok(loaded_transaction) => loaded_transaction,
                     Err(e) => return (Err(e), None),
@@ -118,7 +108,7 @@ pub(crate) fn load_accounts(
 
                 (Ok(loaded_transaction), nonce)
             }
-            (_, (Err(e), _nonce)) => (Err(e.clone()), None),
+            (_, (Err(e), _nonce, _lamports_per_signature)) => (Err(e.clone()), None),
         })
         .collect()
 }
@@ -136,7 +126,6 @@ fn load_transaction_accounts(
     reward_interval: RewardInterval,
     program_accounts: &HashMap<Pubkey, (&Pubkey, u64)>,
     loaded_programs: &LoadedProgramsForTxBatch,
-    should_collect_rent: bool,
 ) -> Result<LoadedTransaction> {
     let in_reward_interval = reward_interval == RewardInterval::InsideInterval;
 
@@ -198,7 +187,9 @@ fn load_transaction_accounts(
                         .load_with_fixed_root(ancestors, key)
                         .map(|(mut account, _)| {
                             if message.is_writable(i) {
-                                if should_collect_rent {
+                                if !feature_set
+                                    .is_active(&feature_set::disable_rent_fees_collection::id())
+                                {
                                     let rent_due = rent_collector
                                         .collect_from_existing_account(
                                             key,
@@ -522,11 +513,9 @@ mod tests {
         lamports_per_signature: u64,
         rent_collector: &RentCollector,
         error_counters: &mut TransactionErrorMetrics,
-        feature_set: &FeatureSet,
+        feature_set: &mut FeatureSet,
         fee_structure: &FeeStructure,
     ) -> Vec<TransactionLoadResult> {
-        let mut hash_queue = BlockhashQueue::new(100);
-        hash_queue.register_hash(&tx.message().recent_blockhash, lamports_per_signature);
         let accounts_db = AccountsDb::new_single_for_tests();
         let accounts = Accounts::new(Arc::new(accounts_db));
         for ka in ka.iter() {
@@ -534,13 +523,13 @@ mod tests {
         }
 
         let ancestors = vec![(0, 0)].into_iter().collect();
+        feature_set.deactivate(&feature_set::disable_rent_fees_collection::id());
         let sanitized_tx = SanitizedTransaction::from_transaction_for_tests(tx);
         load_accounts(
             &accounts.accounts_db,
             &ancestors,
             &[sanitized_tx],
-            &[(Ok(()), None)],
-            &hash_queue,
+            &[(Ok(()), None, Some(lamports_per_signature))],
             error_counters,
             rent_collector,
             feature_set,
@@ -549,7 +538,6 @@ mod tests {
             RewardInterval::OutsideInterval,
             &HashMap::new(),
             &LoadedProgramsForTxBatch::default(),
-            true,
         )
     }
 
@@ -576,7 +564,7 @@ mod tests {
             lamports_per_signature,
             &RentCollector::default(),
             error_counters,
-            &all_features_except(exclude_features),
+            &mut all_features_except(exclude_features),
             &FeeStructure {
                 lamports_per_signature,
                 ..FeeStructure::default()
@@ -779,7 +767,7 @@ mod tests {
             lamports_per_signature,
             &rent_collector,
             &mut error_counters,
-            &all_features_except(None),
+            &mut all_features_except(None),
             &FeeStructure::default(),
         );
         assert_eq!(loaded_accounts.len(), 1);
@@ -795,7 +783,7 @@ mod tests {
             lamports_per_signature,
             &rent_collector,
             &mut error_counters,
-            &FeatureSet::all_enabled(),
+            &mut FeatureSet::all_enabled(),
             &FeeStructure::default(),
         );
         assert_eq!(loaded_accounts.len(), 1);
@@ -812,7 +800,7 @@ mod tests {
             lamports_per_signature,
             &rent_collector,
             &mut error_counters,
-            &FeatureSet::all_enabled(),
+            &mut FeatureSet::all_enabled(),
             &FeeStructure::default(),
         );
         assert_eq!(loaded_accounts.len(), 1);
@@ -1008,8 +996,6 @@ mod tests {
     ) -> Vec<TransactionLoadResult> {
         let tx = SanitizedTransaction::from_transaction_for_tests(tx);
         let rent_collector = RentCollector::default();
-        let mut hash_queue = BlockhashQueue::new(100);
-        hash_queue.register_hash(tx.message().recent_blockhash(), 10);
 
         let ancestors = vec![(0, 0)].into_iter().collect();
         let mut error_counters = TransactionErrorMetrics::default();
@@ -1017,8 +1003,7 @@ mod tests {
             &accounts.accounts_db,
             &ancestors,
             &[tx],
-            &[(Ok(()), None)],
-            &hash_queue,
+            &[(Ok(()), None, Some(10))],
             &mut error_counters,
             &rent_collector,
             &FeatureSet::all_enabled(),
@@ -1027,7 +1012,6 @@ mod tests {
             RewardInterval::OutsideInterval,
             &HashMap::new(),
             &LoadedProgramsForTxBatch::default(),
-            true,
         )
     }
 

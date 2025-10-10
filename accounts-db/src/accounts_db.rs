@@ -58,7 +58,9 @@ use {
         append_vec::{
             aligned_stored_size, AppendVec, APPEND_VEC_MMAPPED_FILES_OPEN, STORE_META_OVERHEAD,
         },
-        cache_hash_data::{CacheHashData, CacheHashDataFileReference},
+        cache_hash_data::{
+            CacheHashData, CacheHashDataFileReference, DeletionPolicy as CacheHashDeletionPolicy,
+        },
         contains::Contains,
         epoch_accounts_hash::EpochAccountsHashManager,
         in_mem_accounts_index::StartupStats,
@@ -494,6 +496,7 @@ pub const ACCOUNTS_DB_CONFIG_FOR_TESTING: AccountsDbConfig = AccountsDbConfig {
     index: Some(ACCOUNTS_INDEX_CONFIG_FOR_TESTING),
     base_working_path: None,
     accounts_hash_cache_path: None,
+    shrink_paths: None,
     write_cache_limit_bytes: None,
     ancient_append_vec_offset: None,
     skip_initial_hash_calc: false,
@@ -506,6 +509,7 @@ pub const ACCOUNTS_DB_CONFIG_FOR_BENCHMARKS: AccountsDbConfig = AccountsDbConfig
     index: Some(ACCOUNTS_INDEX_CONFIG_FOR_BENCHMARKS),
     base_working_path: None,
     accounts_hash_cache_path: None,
+    shrink_paths: None,
     write_cache_limit_bytes: None,
     ancient_append_vec_offset: None,
     skip_initial_hash_calc: false,
@@ -547,6 +551,7 @@ pub struct AccountsDbConfig {
     /// Base directory for various necessary files
     pub base_working_path: Option<PathBuf>,
     pub accounts_hash_cache_path: Option<PathBuf>,
+    pub shrink_paths: Option<Vec<PathBuf>>,
     pub write_cache_limit_bytes: Option<u64>,
     /// if None, ancient append vecs are set to ANCIENT_APPEND_VEC_DEFAULT_OFFSET
     /// Some(offset) means include slots up to (max_slot - (slots_per_epoch - 'offset'))
@@ -1396,7 +1401,7 @@ pub struct AccountsDb {
 
     accounts_hash_cache_path: PathBuf,
 
-    pub shrink_paths: RwLock<Option<Vec<PathBuf>>>,
+    shrink_paths: Vec<PathBuf>,
 
     /// Directory of paths this accounts_db needs to hold/remove
     #[allow(dead_code)]
@@ -2433,7 +2438,7 @@ impl AccountsDb {
             base_working_path,
             base_working_temp_dir,
             accounts_hash_cache_path,
-            shrink_paths: RwLock::new(None),
+            shrink_paths: Vec::default(),
             temp_paths: None,
             file_size: DEFAULT_FILE_SIZE,
             thread_pool: rayon::ThreadPoolBuilder::new()
@@ -2570,6 +2575,10 @@ impl AccountsDb {
             new.paths = paths;
             new.temp_paths = Some(temp_dirs);
         };
+        new.shrink_paths = accounts_db_config
+            .as_ref()
+            .and_then(|config| config.shrink_paths.clone())
+            .unwrap_or_else(|| new.paths.clone());
 
         new.start_background_hasher();
         {
@@ -2578,15 +2587,6 @@ impl AccountsDb {
             }
         }
         new
-    }
-
-    pub fn set_shrink_paths(&self, paths: Vec<PathBuf>) {
-        assert!(!paths.is_empty());
-        let mut shrink_paths = self.shrink_paths.write().unwrap();
-        for path in &paths {
-            std::fs::create_dir_all(path).expect("Create directory failed.");
-        }
-        *shrink_paths = Some(paths);
     }
 
     pub fn file_size(&self) -> u64 {
@@ -4194,12 +4194,7 @@ impl AccountsDb {
         let shrunken_store = self
             .try_recycle_store(slot, aligned_total, aligned_total + 1024)
             .unwrap_or_else(|| {
-                let maybe_shrink_paths = self.shrink_paths.read().unwrap();
-                let (shrink_paths, from) = maybe_shrink_paths
-                    .as_ref()
-                    .map(|paths| (paths, "shrink-w-path"))
-                    .unwrap_or_else(|| (&self.paths, "shrink"));
-                self.create_store(slot, aligned_total, from, shrink_paths)
+                self.create_store(slot, aligned_total, "shrink", self.shrink_paths.as_slice())
             });
         self.storage.shrinking_in_progress(slot, shrunken_store)
     }
@@ -7201,6 +7196,29 @@ impl AccountsDb {
             })
             .collect::<Vec<_>>();
 
+        // Calculate the hits and misses of the hash data files cache.
+        // This is outside of the parallel loop above so that we only need to
+        // update each atomic stat value once.
+        // There are approximately 173 items in the cache files list,
+        // so should be very fast to iterate and compute.
+        // (173 cache files == 432,000 slots / 2,500 slots-per-cache-file)
+        let mut hits = 0;
+        let mut misses = 0;
+        for cache_file in &cache_files {
+            match cache_file {
+                ScanAccountStorageResult::CacheFileAlreadyExists(_) => hits += 1,
+                ScanAccountStorageResult::CacheFileNeedsToBeCreated(_) => misses += 1,
+            };
+        }
+        cache_hash_data
+            .stats
+            .hits
+            .fetch_add(hits, Ordering::Relaxed);
+        cache_hash_data
+            .stats
+            .misses
+            .fetch_add(misses, Ordering::Relaxed);
+
         // deletes the old files that will not be used before creating new ones
         cache_hash_data.delete_old_cache_files();
 
@@ -7601,10 +7619,13 @@ impl AccountsDb {
             _ = std::fs::remove_dir_all(&failed_dir);
             failed_dir
         };
-        CacheHashData::new(
-            accounts_hash_cache_path,
-            (kind == CalcAccountsHashKind::Incremental).then_some(storages_start_slot),
-        )
+        let deletion_policy = match kind {
+            CalcAccountsHashKind::Full => CacheHashDeletionPolicy::AllUnused,
+            CalcAccountsHashKind::Incremental => {
+                CacheHashDeletionPolicy::UnusedAtLeast(storages_start_slot)
+            }
+        };
+        CacheHashData::new(accounts_hash_cache_path, deletion_policy)
     }
 
     // modeled after calculate_accounts_delta_hash
@@ -9825,12 +9846,6 @@ pub mod tests {
     }
 
     impl AccountsDb {
-        pub fn get_append_vec_id(&self, pubkey: &Pubkey, slot: Slot) -> Option<AppendVecId> {
-            let ancestors = vec![(slot, 1)].into_iter().collect();
-            let result = self.accounts_index.get(pubkey, Some(&ancestors), None);
-            result.map(|(list, index)| list.slot_list()[index].1.store_id())
-        }
-
         fn scan_snapshot_stores(
             &self,
             storage: &SortedStorages,
@@ -9842,7 +9857,7 @@ pub mod tests {
             let temp_dir = TempDir::new().unwrap();
             let accounts_hash_cache_path = temp_dir.path().to_path_buf();
             self.scan_snapshot_stores_with_cache(
-                &CacheHashData::new(accounts_hash_cache_path, None),
+                &CacheHashData::new(accounts_hash_cache_path, CacheHashDeletionPolicy::AllUnused),
                 storage,
                 stats,
                 bins,
@@ -10910,7 +10925,7 @@ pub mod tests {
         };
 
         let result = accounts_db.scan_account_storage_no_bank(
-            &CacheHashData::new(accounts_hash_cache_path, None),
+            &CacheHashData::new(accounts_hash_cache_path, CacheHashDeletionPolicy::AllUnused),
             &CalcAccountsHashConfig::default(),
             &get_storage_refs(&[storage]),
             test_scan,

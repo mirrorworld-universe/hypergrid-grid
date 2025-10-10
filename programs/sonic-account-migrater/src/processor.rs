@@ -76,7 +76,7 @@ impl Processor {
             let serialized_data =
                 bincode::serialize(&MigratedAccountsState::MigratedAccounts(vec![]))
                     .map_err(|_| InstructionError::GenericError)?;
-            data_account.set_data_from_slice(&serialized_data)?;
+            data_account.set_data_from_slice(&serialized_data, &invoke_context.feature_set)?;
         }
 
         let clock = invoke_context.get_sysvar_cache().get_clock()?;
