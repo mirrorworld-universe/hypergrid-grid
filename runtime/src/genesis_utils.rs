@@ -10,10 +10,9 @@ use {
         pubkey::Pubkey,
         rent::Rent,
         signature::{Keypair, Signer},
+        sonic_account_migrater, sonic_fee_settlement,
         stake::state::StakeStateV2,
         system_program,
-        sonic_account_migrater, 
-        sonic_fee_settlement,
     },
     solana_stake_program::stake_state,
     solana_vote_program::vote_state,
@@ -274,35 +273,46 @@ pub fn create_genesis_config_with_leader_ex(
         executable: false,
         rent_epoch: 1,
     });
-    initial_accounts.push((inline_spl_token_2022::native_mint::id(), native_mint_account));
+    initial_accounts.push((
+        inline_spl_token_2022::native_mint::id(),
+        native_mint_account,
+    ));
 
     // Sonic: Add Sonic account migrater
     let migrater_data_account = solana_sdk::account::AccountSharedData::from(Account {
         owner: sonic_account_migrater::program::id(),
-        data: vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
-                   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
-                   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 
+        data: vec![
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ],
         lamports: sol_to_lamports(100.),
         executable: false,
         rent_epoch: 1,
     });
-    initial_accounts.push((sonic_account_migrater::migrated_accounts::id(), migrater_data_account));
+    initial_accounts.push((
+        sonic_account_migrater::migrated_accounts::id(),
+        migrater_data_account,
+    ));
 
-     // Sonic: Add Sonic fee settlement data account
-     let migrater_data_account = solana_sdk::account::AccountSharedData::from(Account {
+    // Sonic: Add Sonic fee settlement data account
+    let migrater_data_account = solana_sdk::account::AccountSharedData::from(Account {
         owner: sonic_fee_settlement::program::id(),
-        data: vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
-                   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
-                   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 
+        data: vec![
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ],
         lamports: sol_to_lamports(100.),
         executable: false,
         rent_epoch: 1,
     });
-    initial_accounts.push((sonic_fee_settlement::data_account::id(), migrater_data_account));
+    initial_accounts.push((
+        sonic_fee_settlement::data_account::id(),
+        migrater_data_account,
+    ));
 
     let mut genesis_config = GenesisConfig {
         accounts: initial_accounts

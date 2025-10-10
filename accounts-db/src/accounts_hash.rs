@@ -6,6 +6,7 @@ use {
         pubkey_bins::PubkeyBinCalculator24,
         rent_collector::RentCollector,
     },
+    ahash::AHashSet,
     bytemuck::{Pod, Zeroable},
     log::*,
     memmap2::MmapMut,
@@ -28,7 +29,6 @@ use {
         },
         thread, time,
     },
-    ahash::AHashSet,
     tempfile::tempfile_in,
 };
 pub const MERKLE_FANOUT: usize = 16;
@@ -474,7 +474,7 @@ pub struct AccountsHasher<'a> {
     /// The directory where temporary cache files are put
     pub dir_for_temp_cache_files: PathBuf,
     pub(crate) active_stats: &'a ActiveStats,
-    pub remote_accounts: Arc<AHashSet<Pubkey>>,// Sonic: accounts to exclude from hash calculation
+    pub remote_accounts: Arc<AHashSet<Pubkey>>, // Sonic: accounts to exclude from hash calculation
 }
 
 /// Pointer to a specific item in chunked accounts hash slices.
@@ -1175,9 +1175,12 @@ impl<'a> AccountsHasher<'a> {
                         item.lamports as u128 + overall_sum as u128,
                     );
                 } else {
-                    info!("de_dup_accounts_in_parallel: Skipping remote account: {:?}, pointer:{:?}", item.pubkey, pointer);
+                    info!(
+                        "de_dup_accounts_in_parallel: Skipping remote account: {:?}, pointer:{:?}",
+                        item.pubkey, pointer
+                    );
                 }
-                
+
                 hashes.write(&item.hash.0);
             } else {
                 // if lamports == 0, check if they should be included
