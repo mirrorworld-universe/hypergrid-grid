@@ -67,7 +67,6 @@ use {
         partitioned_rewards::{PartitionedEpochRewardsConfig, TestPartitionedEpochRewards},
         pubkey_bins::PubkeyBinCalculator24,
         read_only_accounts_cache::ReadOnlyAccountsCache,
-        rent_collector::RentCollector,
         sorted_storages::SortedStorages,
         storable_accounts::StorableAccounts,
         u64_align, utils,
@@ -93,6 +92,7 @@ use {
         genesis_config::{ClusterType, GenesisConfig},
         hash::Hash,
         pubkey::Pubkey,
+        rent_collector::RentCollector,
         saturating_add_assign,
         sonic_account_migrater::{self, state::MigratedAccountsState},
         timing::AtomicInterval,
@@ -4026,16 +4026,39 @@ impl AccountsDb {
             shrink_collect.alive_total_bytes as u64,
             shrink_collect.capacity,
         ) {
+            warn!(
+                "Unexpected shrink for slot {} alive {} capacity {}, \
+                likely caused by a bug for calculating alive bytes.",
+                slot, shrink_collect.alive_total_bytes, shrink_collect.capacity
+            );
+
             self.shrink_stats
                 .skipped_shrink
                 .fetch_add(1, Ordering::Relaxed);
-            for pubkey in shrink_collect.unrefed_pubkeys {
-                if let Some(locked_entry) = self.accounts_index.get_account_read_entry(pubkey) {
+
+            self.accounts_index.scan(
+                shrink_collect.unrefed_pubkeys.into_iter(),
+                |pubkey, _slot_refs, entry| {
                     // pubkeys in `unrefed_pubkeys` were unref'd in `shrink_collect` above under the assumption that we would shrink everything.
                     // Since shrink is not occurring, we need to addref the pubkeys to get the system back to the prior state since the account still exists at this slot.
-                    locked_entry.addref();
-                }
-            }
+                    if let Some(entry) = entry {
+                        entry.addref();
+                    } else {
+                        // We also expect that the accounts index must contain an
+                        // entry for `pubkey`. Log a warning for now. In future,
+                        // we will panic when this happens.
+                        warn!("pubkey {pubkey} in slot {slot} was NOT found in accounts index during shrink");
+                        datapoint_warn!(
+                            "accounts_db-shink_pubkey_missing_from_index",
+                            ("store_slot", slot, i64),
+                            ("pubkey", pubkey.to_string(), String),
+                        )
+                    }
+                    AccountsIndexScanResult::OnlyKeepInMemoryIfDirty
+                },
+                None,
+                true,
+            );
             return;
         }
 

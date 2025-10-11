@@ -102,6 +102,7 @@ members = [
     "storage-bigtable/build-proto",
     "storage-proto",
     "streamer",
+    "svm",
     "test-validator",
     "thin-client",
     "tokens",
@@ -165,14 +166,14 @@ bs58 = "0.4.0"
 bv = "0.11.1"
 byte-unit = "4.0.19"
 bytecount = "0.6.7"
-bytemuck = "1.14.1"
+bytemuck = "1.14.3"
 byteorder = "1.5.0"
 bytes = "1.5"
 bzip2 = "0.4.4"
 caps = "0.5.5"
 cargo_metadata = "0.15.4"
 cc = "1.0.83"
-chrono = { version = "0.4.33", default-features = false }
+chrono = { version = "0.4.34", default-features = false }
 chrono-humanize = "0.2.3"
 clap = "2.33.1"
 console = "0.15.8"
@@ -214,7 +215,7 @@ gethostname = "0.2.3"
 getrandom = "0.2.10"
 goauth = "0.13.1"
 hex = "0.4.3"
-hidapi = { version = "2.5.1", default-features = false }
+hidapi = { version = "2.6.0", default-features = false }
 histogram = "0.6.9"
 hmac = "0.12.1"
 http = "0.2.11"
@@ -223,13 +224,13 @@ hyper = "0.14.28"
 hyper-proxy = "0.9.1"
 im = "15.1.0"
 index_list = "0.2.11"
-indexmap = "2.1.0"
+indexmap = "2.2.2"
 indicatif = "0.17.7"
 itertools = "0.10.5"
 jemallocator = { package = "tikv-jemallocator", version = "0.4.1", features = [
     "unprefixed_malloc_on_supported_platforms",
 ] }
-js-sys = "0.3.67"
+js-sys = "0.3.68"
 json5 = "0.4.1"
 jsonrpc-core = "18.0.0"
 jsonrpc-core-client = "18.0.0"
@@ -299,7 +300,7 @@ serde_bytes = "0.11.14"
 serde_derive = "1.0.103"
 serde_json = "1.0.113"
 serde_with = { version = "2.3.3", default-features = false }
-serde_yaml = "0.9.30"
+serde_yaml = "0.9.31"
 serial_test = "2.0.0"
 sha2 = "0.10.8"
 sha3 = "0.10.4"
@@ -375,6 +376,7 @@ solana-stake-program = { path = "programs/stake", version = "=1.18.0" }
 solana-storage-bigtable = { path = "storage-bigtable", version = "=1.18.0" }
 solana-storage-proto = { path = "storage-proto", version = "=1.18.0" }
 solana-streamer = { path = "streamer", version = "=1.18.0" }
+solana-svm = { path = "svm", version = "=1.18.0" }
 solana-system-program = { path = "programs/system", version = "=1.18.0" }
 solana-test-validator = { path = "test-validator", version = "=1.18.0" }
 solana-thin-client = { path = "thin-client", version = "=1.18.0" }
@@ -393,14 +395,14 @@ solana_rbpf = "=0.8.0"
 sonic-hypergrid = { path = "hypergrid", version = "=1.18.0" }
 sonic-account-migrater-program = { path = "programs/sonic-account-migrater", version = "=1.18.0" }
 sonic-fee-settlement-program = { path = "programs/sonic-fee-settlement", version = "=1.18.0" }
-spl-associated-token-account = "=2.3.0"
+spl-associated-token-account = "=2.3.1"
 spl-instruction-padding = "0.1"
-spl-memo = "=4.0.0"
-spl-pod = "=0.1.0"
-spl-token = "=4.0.0"
-spl-token-2022 = "=1.0.0"
-spl-token-group-interface = "=0.1.0"
-spl-token-metadata-interface = "=0.2.0"
+spl-memo = "=4.0.1"
+spl-pod = "=0.1.1"
+spl-token = "=4.0.1"
+spl-token-2022 = "=2.0.1"
+spl-token-group-interface = "=0.1.1"
+spl-token-metadata-interface = "=0.2.1"
 static_assertions = "1.1.0"
 stream-cancel = "0.8.2"
 strum = "0.24"
@@ -413,7 +415,7 @@ sysctl = "0.4.6"
 systemstat = "0.2.3"
 tar = "0.4.40"
 tarpc = "0.29.0"
-tempfile = "3.9.0"
+tempfile = "3.10.0"
 test-case = "3.3.1"
 thiserror = "1.0.56"
 tiny-bip39 = "0.8.2"
@@ -423,7 +425,7 @@ tokio-serde = "0.8"
 tokio-stream = "0.1.14"
 tokio-tungstenite = "0.20.1"
 tokio-util = "0.6"
-toml = "0.8.8"
+toml = "0.8.10"
 tonic = "0.9.2"
 tonic-build = "0.9.2"
 trees = "0.4.2"

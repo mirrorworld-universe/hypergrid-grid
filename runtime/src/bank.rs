@@ -48,7 +48,6 @@ use {
         epoch_rewards_hasher::hash_rewards_into_partitions,
         epoch_stakes::{EpochStakes, NodeVoteAccounts},
         installed_scheduler_pool::{BankWithScheduler, InstalledSchedulerRwLock},
-        runtime_config::RuntimeConfig,
         serde_snapshot::BankIncrementalSnapshotPersistence,
         snapshot_hash::SnapshotHash,
         stake_account::StakeAccount,
@@ -59,9 +58,6 @@ use {
         },
         stakes::{InvalidCacheEntryReason, Stakes, StakesCache, StakesEnum},
         status_cache::{SlotDelta, StatusCache},
-        svm::transaction_processor::{
-            TransactionBatchProcessor, TransactionLogMessages, TransactionProcessingCallback,
-        },
         transaction_batch::TransactionBatch,
     },
     byteorder::{ByteOrder, LittleEndian},
@@ -75,13 +71,11 @@ use {
     },
     serde::Serialize,
     solana_accounts_db::{
-        account_overrides::AccountOverrides,
         accounts::{AccountAddressFilter, Accounts, PubkeyAccountSlot, TransactionLoadResult},
         accounts_db::{
             AccountShrinkThreshold, AccountStorageEntry, AccountsDb, AccountsDbConfig,
             CalcAccountsHashDataSource, VerifyAccountsHashAndLamportsConfig,
         },
-        accounts_file::MatchAccountOwnerError,
         accounts_hash::{
             AccountHash, AccountsHash, CalcAccountsHashConfig, HashStats, IncrementalAccountsHash,
         },
@@ -91,17 +85,12 @@ use {
         ancestors::{Ancestors, AncestorsForSerialization},
         blockhash_queue::BlockhashQueue,
         epoch_accounts_hash::EpochAccountsHash,
-        nonce_info::{NonceInfo, NoncePartial},
         partitioned_rewards::PartitionedEpochRewardsConfig,
-        rent_collector::{CollectedInfo, RentCollector, RENT_EXEMPT_RENT_EPOCH},
-        rent_debits::RentDebits,
         sorted_storages::SortedStorages,
-        stake_rewards::{RewardInfo, StakeReward},
+        stake_rewards::StakeReward,
         storable_accounts::StorableAccounts,
-        transaction_error_metrics::TransactionErrorMetrics,
         transaction_results::{
-            TransactionCheckResult, TransactionExecutionDetails, TransactionExecutionResult,
-            TransactionResults,
+            TransactionExecutionDetails, TransactionExecutionResult, TransactionResults,
         },
     },
     solana_bpf_loader_program::syscalls::create_program_runtime_environment_v1,
@@ -129,10 +118,6 @@ use {
             UPDATED_HASHES_PER_TICK4, UPDATED_HASHES_PER_TICK5, UPDATED_HASHES_PER_TICK6,
         },
         epoch_info::EpochInfo,
-        epoch_rewards_partition_data::{
-            get_epoch_rewards_partition_data_address, EpochRewardsPartitionDataVersion,
-            PartitionData,
-        },
         epoch_schedule::EpochSchedule,
         feature,
         feature_set::{self, include_loaded_accounts_data_size_in_fee_calculation, FeatureSet},
@@ -149,10 +134,14 @@ use {
         native_token::LAMPORTS_PER_SOL,
         nonce::{self, state::DurableNonce, NONCED_TX_MARKER_IX_INDEX},
         nonce_account,
+        nonce_info::{NonceInfo, NoncePartial},
         packet::PACKET_DATA_SIZE,
         precompiles::get_precompiles,
         pubkey::Pubkey,
         rent::RentDue,
+        rent_collector::{CollectedInfo, RentCollector, RENT_EXEMPT_RENT_EPOCH},
+        rent_debits::RentDebits,
+        reward_info::RewardInfo,
         saturating_add_assign,
         signature::{Keypair, Signature},
         slot_hashes::SlotHashes,
@@ -169,6 +158,15 @@ use {
     },
     solana_stake_program::stake_state::{
         self, InflationPointCalculationEvent, PointValue, StakeStateV2,
+    },
+    solana_svm::{
+        account_loader::TransactionCheckResult,
+        account_overrides::AccountOverrides,
+        runtime_config::RuntimeConfig,
+        transaction_error_metrics::TransactionErrorMetrics,
+        transaction_processor::{
+            TransactionBatchProcessor, TransactionLogMessages, TransactionProcessingCallback,
+        },
     },
     solana_system_program::{get_system_account_kind, SystemAccountKind},
     solana_vote::vote_account::{VoteAccount, VoteAccounts, VoteAccountsHashMap},
@@ -808,7 +806,7 @@ pub struct Bank {
 
     epoch_reward_status: EpochRewardStatus,
 
-    transaction_processor: TransactionBatchProcessor,
+    transaction_processor: TransactionBatchProcessor<BankForks>,
 }
 
 struct VoteWithStakeDelegations {
@@ -866,7 +864,6 @@ struct PartitionedRewardsCalculation {
     foundation_rate: f64,
     prev_epoch_duration_in_years: f64,
     capitalization: u64,
-    parent_blockhash: Hash,
 }
 
 /// result of calculating the stake rewards at beginning of new epoch
@@ -884,8 +881,6 @@ struct CalculateRewardsAndDistributeVoteRewardsResult {
     distributed_rewards: u64,
     /// stake rewards that still need to be distributed, grouped by partition
     stake_rewards_by_partition: Vec<StakeRewards>,
-    /// blockhash of parent, used to create EpochRewardsHasher
-    parent_blockhash: Hash,
 }
 
 pub(crate) type StakeRewards = Vec<StakeReward>;
@@ -1001,7 +996,17 @@ impl Bank {
             transaction_processor: TransactionBatchProcessor::default(),
         };
 
-        bank.transaction_processor = TransactionBatchProcessor::new(&bank);
+        bank.transaction_processor = TransactionBatchProcessor::new(
+            bank.slot,
+            bank.epoch,
+            bank.epoch_schedule.clone(),
+            bank.fee_structure.clone(),
+            bank.runtime_config.clone(),
+            bank.loaded_programs_cache.clone(),
+            // Sonic:
+            Arc::clone(&bank.accounts().accounts_db),
+            Arc::clone(&bank.genesis_accounts_pubkeys),
+        );
 
         let accounts_data_size_initial = bank.get_total_accounts_stats().unwrap().data_len as u64;
         bank.accounts_data_size_initial = accounts_data_size_initial;
@@ -1317,7 +1322,17 @@ impl Bank {
             transaction_processor: TransactionBatchProcessor::default(),
         };
 
-        new.transaction_processor = TransactionBatchProcessor::new(&new);
+        new.transaction_processor = TransactionBatchProcessor::new(
+            new.slot,
+            new.epoch,
+            new.epoch_schedule.clone(),
+            new.fee_structure.clone(),
+            new.runtime_config.clone(),
+            new.loaded_programs_cache.clone(),
+            // Sonic:
+            Arc::clone(&new.accounts().accounts_db),
+            Arc::clone(&new.genesis_accounts_pubkeys),
+        );
 
         let (_, ancestors_time_us) = measure_us!({
             let mut ancestors = Vec::with_capacity(1 + new.parents().len());
@@ -1585,7 +1600,6 @@ impl Bank {
             total_rewards,
             distributed_rewards,
             stake_rewards_by_partition,
-            parent_blockhash,
         } = self.calculate_rewards_and_distribute_vote_rewards(
             parent_epoch,
             reward_calc_tracer,
@@ -1593,19 +1607,15 @@ impl Bank {
             rewards_metrics,
         );
 
-        let num_partitions = stake_rewards_by_partition.len();
-
         let slot = self.slot();
         let credit_start = self.block_height() + self.get_reward_calculation_num_blocks();
-        let credit_end_exclusive = credit_start + num_partitions as u64;
+        let credit_end_exclusive = credit_start + stake_rewards_by_partition.len() as u64;
 
         self.set_epoch_reward_status_active(stake_rewards_by_partition);
 
         // create EpochRewards sysvar that holds the balance of undistributed rewards with
         // (total_rewards, distributed_rewards, credit_end_exclusive), total capital will increase by (total_rewards - distributed_rewards)
         self.create_epoch_rewards_sysvar(total_rewards, distributed_rewards, credit_end_exclusive);
-
-        self.create_epoch_rewards_partition_data_account(num_partitions, parent_blockhash);
 
         datapoint_info!(
             "epoch-rewards-status-update",
@@ -1826,7 +1836,17 @@ impl Bank {
             transaction_processor: TransactionBatchProcessor::default(),
         };
 
-        bank.transaction_processor = TransactionBatchProcessor::new(&bank);
+        bank.transaction_processor = TransactionBatchProcessor::new(
+            bank.slot,
+            bank.epoch,
+            bank.epoch_schedule.clone(),
+            bank.fee_structure.clone(),
+            bank.runtime_config.clone(),
+            bank.loaded_programs_cache.clone(),
+            // Sonic:
+            Arc::clone(&bank.accounts().accounts_db),
+            Arc::clone(&bank.genesis_accounts_pubkeys),
+        );
 
         bank.finish_init(
             genesis_config,
@@ -2375,7 +2395,6 @@ impl Bank {
             foundation_rate,
             prev_epoch_duration_in_years,
             capitalization,
-            parent_blockhash,
         }
     }
 
@@ -2396,7 +2415,6 @@ impl Bank {
             foundation_rate,
             prev_epoch_duration_in_years,
             capitalization,
-            parent_blockhash,
         } = self.calculate_rewards_for_partitioning(
             prev_epoch,
             reward_calc_tracer,
@@ -2466,7 +2484,6 @@ impl Bank {
             total_rewards: validator_rewards_paid + total_stake_rewards_lamports,
             distributed_rewards: validator_rewards_paid,
             stake_rewards_by_partition,
-            parent_blockhash,
         }
     }
 
@@ -3578,40 +3595,6 @@ impl Bank {
         });
 
         self.log_epoch_rewards_sysvar("update");
-    }
-
-    /// Create the persistent PDA containing the epoch-rewards data
-    fn create_epoch_rewards_partition_data_account(
-        &self,
-        num_partitions: usize,
-        parent_blockhash: Hash,
-    ) {
-        let epoch_rewards_partition_data = EpochRewardsPartitionDataVersion::V0(PartitionData {
-            num_partitions,
-            parent_blockhash,
-        });
-        let address = get_epoch_rewards_partition_data_address(self.epoch());
-
-        let data_len = bincode::serialized_size(&epoch_rewards_partition_data).unwrap() as usize;
-        let account_balance = self.get_minimum_balance_for_rent_exemption(data_len);
-        let new_account = AccountSharedData::new_data(
-            account_balance,
-            &epoch_rewards_partition_data,
-            &solana_sdk::sysvar::id(),
-        )
-        .unwrap();
-
-        info!(
-            "create epoch rewards partition data account {} {address} \
-            {epoch_rewards_partition_data:?}",
-            self.slot
-        );
-
-        // Skip storing data account when we are testing partitioned
-        // rewards but feature is not yet active
-        if !self.force_partition_rewards_in_first_block_of_epoch() {
-            self.store_account_and_update_capitalization(&address, &new_account);
-        }
     }
 
     fn update_recent_blockhashes_locked(&self, locked_blockhash_queue: &BlockhashQueue) {
@@ -4956,7 +4939,6 @@ impl Bank {
             sanitized_txs,
             &execution_results,
             loaded_txs,
-            &self.rent_collector,
             &durable_nonce,
             lamports_per_signature,
         );
@@ -5285,15 +5267,12 @@ impl Bank {
                 .accounts
                 .accounts_db
                 .test_skip_rewrites_but_include_in_bank_hash;
-        let set_exempt_rent_epoch_max: bool = self
-            .feature_set
-            .is_active(&solana_sdk::feature_set::set_exempt_rent_epoch_max::id());
         let mut skipped_rewrites = Vec::default();
         for (pubkey, account, _loaded_slot) in accounts.iter_mut() {
             let rent_collected_info = if self.should_collect_rent() {
                 let (rent_collected_info, measure) = measure!(self
                     .rent_collector
-                    .collect_from_existing_account(pubkey, account, set_exempt_rent_epoch_max,));
+                    .collect_from_existing_account(pubkey, account));
                 time_collecting_rent_us += measure.as_us();
                 rent_collected_info
             } else {
@@ -5301,9 +5280,8 @@ impl Bank {
                 // are any rent paying accounts, their `rent_epoch` won't change either. However, if the
                 // account itself is rent-exempted but its `rent_epoch` is not u64::MAX, we will set its
                 // `rent_epoch` to u64::MAX. In such case, the behavior stays the same as before.
-                if set_exempt_rent_epoch_max
-                    && (account.rent_epoch() != RENT_EXEMPT_RENT_EPOCH
-                        && self.rent_collector.get_rent_due(account) == RentDue::Exempt)
+                if account.rent_epoch() != RENT_EXEMPT_RENT_EPOCH
+                    && self.rent_collector.get_rent_due(account) == RentDue::Exempt
                 {
                     account.set_rent_epoch(RENT_EXEMPT_RENT_EPOCH);
                 }
@@ -6105,8 +6083,16 @@ impl Bank {
     // pro: safer assertion can be enabled inside AccountsDb
     // con: panics!() if called from off-chain processing
     pub fn get_account_with_fixed_root(&self, pubkey: &Pubkey) -> Option<AccountSharedData> {
-        self.load_slow_with_fixed_root(&self.ancestors, pubkey)
+        self.get_account_modified_slot_with_fixed_root(pubkey)
             .map(|(acc, _slot)| acc)
+    }
+
+    // See note above get_account_with_fixed_root() about when to prefer this function
+    pub fn get_account_modified_slot_with_fixed_root(
+        &self,
+        pubkey: &Pubkey,
+    ) -> Option<(AccountSharedData, Slot)> {
+        self.load_slow_with_fixed_root(&self.ancestors, pubkey)
     }
 
     pub fn get_account_modified_slot(&self, pubkey: &Pubkey) -> Option<(AccountSharedData, Slot)> {
@@ -7553,15 +7539,12 @@ impl Bank {
 }
 
 impl TransactionProcessingCallback for Bank {
-    fn account_matches_owners(
-        &self,
-        account: &Pubkey,
-        owners: &[Pubkey],
-    ) -> std::result::Result<usize, MatchAccountOwnerError> {
+    fn account_matches_owners(&self, account: &Pubkey, owners: &[Pubkey]) -> Option<usize> {
         self.rc
             .accounts
             .accounts_db
             .account_matches_owners(&self.ancestors, account, owners)
+            .ok()
     }
 
     fn get_account_shared_data(&self, pubkey: &Pubkey) -> Option<AccountSharedData> {

@@ -4,7 +4,6 @@ use {
         active_stats::{ActiveStatItem, ActiveStats},
         ancestors::Ancestors,
         pubkey_bins::PubkeyBinCalculator24,
-        rent_collector::RentCollector,
     },
     ahash::AHashSet,
     bytemuck::{Pod, Zeroable},
@@ -15,6 +14,7 @@ use {
     solana_sdk::{
         hash::{Hash, Hasher},
         pubkey::Pubkey,
+        rent_collector::RentCollector,
         slot_history::Slot,
         sysvar::epoch_schedule::EpochSchedule,
     },

@@ -9,10 +9,6 @@ use {
         BankingStageStats,
     },
     itertools::Itertools,
-    solana_accounts_db::{
-        transaction_error_metrics::TransactionErrorMetrics,
-        transaction_results::TransactionCheckResult,
-    },
     solana_ledger::token_balances::collect_token_balances,
     solana_measure::{measure::Measure, measure_us},
     solana_poh::poh_recorder::{
@@ -24,9 +20,8 @@ use {
     },
     solana_runtime::{
         bank::{Bank, LoadAndExecuteTransactionsOutput},
-        svm::account_loader::validate_fee_payer,
+        compute_budget_details::GetComputeBudgetDetails,
         transaction_batch::TransactionBatch,
-        transaction_priority_details::GetTransactionPriorityDetails,
     },
     solana_sdk::{
         clock::{Slot, FORWARD_TRANSACTIONS_TO_LEADER_AT_SLOT_OFFSET, MAX_PROCESSING_AGE},
@@ -35,6 +30,10 @@ use {
         saturating_add_assign,
         timing::timestamp,
         transaction::{self, AddressLoader, SanitizedTransaction, TransactionError},
+    },
+    solana_svm::{
+        account_loader::{validate_fee_payer, TransactionCheckResult},
+        transaction_error_metrics::TransactionErrorMetrics,
     },
     std::{
         sync::{atomic::Ordering, Arc},
@@ -586,8 +585,8 @@ impl Consumer {
             .filter_map(|transaction| {
                 let round_compute_unit_price_enabled = false; // TODO get from working_bank.feature_set
                 transaction
-                    .get_transaction_priority_details(round_compute_unit_price_enabled)
-                    .map(|details| details.priority)
+                    .get_compute_budget_details(round_compute_unit_price_enabled)
+                    .map(|details| details.compute_unit_price)
             })
             .minmax();
         let (min_prioritization_fees, max_prioritization_fees) =

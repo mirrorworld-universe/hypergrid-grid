@@ -45,7 +45,6 @@ use {
     solana_rpc_client::rpc_client::RpcClient,
     solana_rpc_client_api::config::RpcLeaderScheduleConfig,
     solana_runtime::{
-        runtime_config::RuntimeConfig,
         snapshot_bank_utils::DISABLED_SNAPSHOT_ARCHIVE_INTERVAL,
         snapshot_config::{SnapshotConfig, SnapshotUsage},
         snapshot_utils::{self, ArchiveFormat, SnapshotVersion},
@@ -59,6 +58,7 @@ use {
     },
     solana_send_transaction_service::send_transaction_service,
     solana_streamer::socket::SocketAddrSpace,
+    solana_svm::runtime_config::RuntimeConfig,
     solana_tpu_client::tpu_client::DEFAULT_TPU_ENABLE_UDP,
     solana_validator::{
         admin_rpc_service,
@@ -1412,6 +1412,11 @@ pub fn main() {
             ),
             batch_send_rate_ms: rpc_send_batch_send_rate_ms,
             batch_size: rpc_send_batch_size,
+            retry_pool_max_size: value_t_or_exit!(
+                matches,
+                "rpc_send_transaction_retry_pool_max_size",
+                usize
+            ),
         },
         no_poh_speed_test: matches.is_present("no_poh_speed_test"),
         no_os_memory_stats_reporting: matches.is_present("no_os_memory_stats_reporting"),
