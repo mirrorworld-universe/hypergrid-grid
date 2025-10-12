@@ -1,12 +1,16 @@
+#[cfg(feature = "dev-context-only-utils")]
+use qualifier_attr::qualifiers;
 use {
     crate::{
         account_loader::{
-            load_accounts, LoadedTransaction, TransactionCheckResult, TransactionLoadResult,
+            collect_rent_from_account, load_accounts, validate_fee_payer,
+            CheckedTransactionDetails, LoadedTransaction, TransactionCheckResult,
+            TransactionLoadResult, TransactionValidationResult, ValidatedTransactionDetails,
         },
         account_overrides::AccountOverrides,
         message_processor::MessageProcessor,
+        nonce_info::NonceFull,
         program_loader::load_program_with_pubkey,
-        runtime_config::RuntimeConfig,
         transaction_account_state_info::TransactionAccountStateInfo,
         transaction_error_metrics::TransactionErrorMetrics,
         transaction_processing_callback::TransactionProcessingCallback,
@@ -15,9 +19,12 @@ use {
     log::debug,
     percentage::Percentage,
     solana_bpf_loader_program::syscalls::create_program_runtime_environment_v1,
-    solana_compute_budget::compute_budget::ComputeBudget,
+    solana_compute_budget::{
+        compute_budget::ComputeBudget,
+        compute_budget_processor::process_compute_budget_instructions,
+    },
     solana_loader_v4_program::create_program_runtime_environment_v2,
-    solana_measure::measure::Measure,
+    solana_measure::{measure, measure::Measure},
     solana_program_runtime::{
         invoke_context::{EnvironmentConfig, InvokeContext},
         loaded_programs::{
@@ -32,14 +39,17 @@ use {
         account::{AccountSharedData, ReadableAccount, PROGRAM_OWNERS},
         clock::{Epoch, Slot},
         epoch_schedule::EpochSchedule,
-        feature_set::FeatureSet,
-        fee::FeeStructure,
+        feature_set::{
+            include_loaded_accounts_data_size_in_fee_calculation,
+            remove_rounding_in_fee_calculation, FeatureSet,
+        },
+        fee::{FeeDetails, FeeStructure},
         inner_instruction::{InnerInstruction, InnerInstructionsList},
         instruction::{CompiledInstruction, TRANSACTION_LEVEL_STACK_HEIGHT},
         message::SanitizedMessage,
         pubkey::Pubkey,
         saturating_add_assign,
-        transaction::{SanitizedTransaction, TransactionError},
+        transaction::{self, SanitizedTransaction, TransactionError},
         transaction_context::{ExecutionRecord, TransactionContext},
     },
     std::{
@@ -64,6 +74,8 @@ pub type TransactionLogMessages = Vec<String>;
 pub struct LoadAndExecuteSanitizedTransactionsOutput {
     /// Error metrics for transactions that were processed.
     pub error_metrics: TransactionErrorMetrics,
+    /// Timings for transaction batch execution.
+    pub execute_timings: ExecuteTimings,
     // Vector of results indicating whether a transaction was executed or could not
     // be executed. Note executed transactions can still have failed!
     pub execution_results: Vec<TransactionExecutionResult>,
@@ -102,6 +114,8 @@ pub struct TransactionProcessingConfig<'a> {
     /// Encapsulates overridden accounts, typically used for transaction
     /// simulation.
     pub account_overrides: Option<&'a AccountOverrides>,
+    /// The compute budget to use for transaction execution.
+    pub compute_budget: Option<ComputeBudget>,
     /// The maximum number of bytes that log messages can consume.
     pub log_messages_bytes_limit: Option<usize>,
     /// Whether to limit the number of programs loaded for the transaction
@@ -109,6 +123,8 @@ pub struct TransactionProcessingConfig<'a> {
     pub limit_to_load_programs: bool,
     /// Recording capabilities for transaction execution.
     pub recording_config: ExecutionRecordingConfig,
+    /// The max number of accounts that a transaction may lock.
+    pub transaction_account_lock_limit: Option<usize>,
 }
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
@@ -124,9 +140,6 @@ pub struct TransactionBatchProcessor<FG: ForkGraph, A> {
 
     /// Transaction fee structure
     pub fee_structure: FeeStructure,
-
-    /// Optional config parameters that can override runtime behavior
-    pub runtime_config: Arc<RuntimeConfig>,
 
     /// SysvarCache is a collection of system variables that are
     /// accessible from on chain programs. It is passed to SVM from
@@ -151,7 +164,6 @@ impl<FG: ForkGraph, A> Debug for TransactionBatchProcessor<FG, A> {
             .field("epoch", &self.epoch)
             .field("epoch_schedule", &self.epoch_schedule)
             .field("fee_structure", &self.fee_structure)
-            .field("runtime_config", &self.runtime_config)
             .field("sysvar_cache", &self.sysvar_cache)
             .field("program_cache", &self.program_cache)
             .finish()
@@ -165,7 +177,6 @@ impl<FG: ForkGraph, A: AccountsDb> Default for TransactionBatchProcessor<FG, A> 
             epoch: Epoch::default(),
             epoch_schedule: EpochSchedule::default(),
             fee_structure: FeeStructure::default(),
-            runtime_config: Arc::<RuntimeConfig>::default(),
             sysvar_cache: RwLock::<SysvarCache>::default(),
             program_cache: Arc::new(RwLock::new(ProgramCache::new(
                 Slot::default(),
@@ -184,7 +195,6 @@ impl<FG: ForkGraph, A: AccountsDb> TransactionBatchProcessor<FG, A> {
         slot: Slot,
         epoch: Epoch,
         epoch_schedule: EpochSchedule,
-        runtime_config: Arc<RuntimeConfig>,
         builtin_program_ids: HashSet<Pubkey>,
         // Sonic:
         accounts_db: Arc<A>,
@@ -195,7 +205,6 @@ impl<FG: ForkGraph, A: AccountsDb> TransactionBatchProcessor<FG, A> {
             epoch,
             epoch_schedule,
             fee_structure: FeeStructure::default(),
-            runtime_config,
             sysvar_cache: RwLock::<SysvarCache>::default(),
             program_cache: Arc::new(RwLock::new(ProgramCache::new(slot, epoch))),
             builtin_program_ids: RwLock::new(builtin_program_ids),
@@ -218,7 +227,6 @@ impl<FG: ForkGraph, A: AccountsDb> TransactionBatchProcessor<FG, A> {
             epoch,
             epoch_schedule: self.epoch_schedule.clone(),
             fee_structure: self.fee_structure.clone(),
-            runtime_config: self.runtime_config.clone(),
             sysvar_cache: RwLock::<SysvarCache>::default(),
             program_cache: self.program_cache.clone(),
             builtin_program_ids: RwLock::new(self.builtin_program_ids.read().unwrap().clone()),
@@ -229,11 +237,13 @@ impl<FG: ForkGraph, A: AccountsDb> TransactionBatchProcessor<FG, A> {
     }
 
     /// Returns the current environments depending on the given epoch
-    pub fn get_environments_for_epoch(&self, epoch: Epoch) -> ProgramRuntimeEnvironments {
+    /// Returns None if the call could result in a deadlock
+    #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
+    pub fn get_environments_for_epoch(&self, epoch: Epoch) -> Option<ProgramRuntimeEnvironments> {
         self.program_cache
-            .read()
-            .unwrap()
-            .get_environments_for_epoch(epoch)
+            .try_read()
+            .ok()
+            .map(|cache| cache.get_environments_for_epoch(epoch))
     }
 
     /// Main entrypoint to the SVM.
@@ -241,18 +251,25 @@ impl<FG: ForkGraph, A: AccountsDb> TransactionBatchProcessor<FG, A> {
         &self,
         callbacks: &CB,
         sanitized_txs: &[SanitizedTransaction],
-        check_results: &mut [TransactionCheckResult],
-        timings: &mut ExecuteTimings,
+        check_results: Vec<TransactionCheckResult>,
         config: &TransactionProcessingConfig,
     ) -> LoadAndExecuteSanitizedTransactionsOutput {
         // Initialize metrics.
         let mut error_metrics = TransactionErrorMetrics::default();
+        let mut execute_timings = ExecuteTimings::default();
+
+        let (validation_results, validate_fees_time) = measure!(self.validate_fees(
+            callbacks,
+            sanitized_txs,
+            check_results,
+            &mut error_metrics
+        ));
 
         let mut program_cache_time = Measure::start("program_cache");
         let mut program_accounts_map = Self::filter_executable_program_accounts(
             callbacks,
             sanitized_txs,
-            check_results,
+            &validation_results,
             PROGRAM_OWNERS,
         );
         for builtin_program in self.builtin_program_ids.read().unwrap().iter() {
@@ -272,6 +289,7 @@ impl<FG: ForkGraph, A: AccountsDb> TransactionBatchProcessor<FG, A> {
                 vec![TransactionExecutionResult::NotExecuted(ERROR); sanitized_txs.len()];
             return LoadAndExecuteSanitizedTransactionsOutput {
                 error_metrics,
+                execute_timings,
                 execution_results,
                 loaded_transactions,
             };
@@ -282,9 +300,8 @@ impl<FG: ForkGraph, A: AccountsDb> TransactionBatchProcessor<FG, A> {
         let mut loaded_transactions = load_accounts(
             callbacks,
             sanitized_txs,
-            check_results,
+            validation_results,
             &mut error_metrics,
-            &self.fee_structure,
             config.account_overrides,
             &program_cache_for_tx_batch.borrow(),
         );
@@ -298,34 +315,33 @@ impl<FG: ForkGraph, A: AccountsDb> TransactionBatchProcessor<FG, A> {
             .map(|(load_result, tx)| match load_result {
                 Err(e) => TransactionExecutionResult::NotExecuted(e.clone()),
                 Ok(loaded_transaction) => {
-                    let compute_budget =
-                        if let Some(compute_budget) = self.runtime_config.compute_budget {
-                            compute_budget
-                        } else {
-                            let mut compute_budget_process_transaction_time =
-                                Measure::start("compute_budget_process_transaction_time");
-                            let maybe_compute_budget = ComputeBudget::try_from_instructions(
-                                tx.message().program_instructions_iter(),
-                            );
-                            compute_budget_process_transaction_time.stop();
-                            saturating_add_assign!(
-                                timings
-                                    .execute_accessories
-                                    .compute_budget_process_transaction_us,
-                                compute_budget_process_transaction_time.as_us()
-                            );
-                            if let Err(err) = maybe_compute_budget {
-                                return TransactionExecutionResult::NotExecuted(err);
-                            }
-                            maybe_compute_budget.unwrap()
-                        };
+                    let compute_budget = if let Some(compute_budget) = config.compute_budget {
+                        compute_budget
+                    } else {
+                        let mut compute_budget_process_transaction_time =
+                            Measure::start("compute_budget_process_transaction_time");
+                        let maybe_compute_budget = ComputeBudget::try_from_instructions(
+                            tx.message().program_instructions_iter(),
+                        );
+                        compute_budget_process_transaction_time.stop();
+                        saturating_add_assign!(
+                            execute_timings
+                                .execute_accessories
+                                .compute_budget_process_transaction_us,
+                            compute_budget_process_transaction_time.as_us()
+                        );
+                        if let Err(err) = maybe_compute_budget {
+                            return TransactionExecutionResult::NotExecuted(err);
+                        }
+                        maybe_compute_budget.unwrap()
+                    };
 
                     let result = self.execute_loaded_transaction(
                         callbacks,
                         tx,
                         loaded_transaction,
                         compute_budget,
-                        timings,
+                        &mut execute_timings,
                         &mut error_metrics,
                         &program_cache_for_tx_batch.borrow(),
                         config,
@@ -376,18 +392,123 @@ impl<FG: ForkGraph, A: AccountsDb> TransactionBatchProcessor<FG, A> {
             sanitized_txs.len(),
         );
 
-        timings.saturating_add_in_place(
+        execute_timings.saturating_add_in_place(
+            ExecuteTimingType::ValidateFeesUs,
+            validate_fees_time.as_us(),
+        );
+        execute_timings.saturating_add_in_place(
             ExecuteTimingType::ProgramCacheUs,
             program_cache_time.as_us(),
         );
-        timings.saturating_add_in_place(ExecuteTimingType::LoadUs, load_time.as_us());
-        timings.saturating_add_in_place(ExecuteTimingType::ExecuteUs, execution_time.as_us());
+        execute_timings.saturating_add_in_place(ExecuteTimingType::LoadUs, load_time.as_us());
+        execute_timings
+            .saturating_add_in_place(ExecuteTimingType::ExecuteUs, execution_time.as_us());
 
         LoadAndExecuteSanitizedTransactionsOutput {
             error_metrics,
+            execute_timings,
             execution_results,
             loaded_transactions,
         }
+    }
+
+    fn validate_fees<CB: TransactionProcessingCallback>(
+        &self,
+        callbacks: &CB,
+        sanitized_txs: &[impl core::borrow::Borrow<SanitizedTransaction>],
+        check_results: Vec<TransactionCheckResult>,
+        error_counters: &mut TransactionErrorMetrics,
+    ) -> Vec<TransactionValidationResult> {
+        sanitized_txs
+            .iter()
+            .zip(check_results)
+            .map(|(sanitized_tx, check_result)| {
+                check_result.and_then(
+                    |CheckedTransactionDetails {
+                         nonce,
+                         lamports_per_signature,
+                     }| {
+                        let message = sanitized_tx.borrow().message();
+                        let (fee_details, fee_payer_account, fee_payer_rent_debit) = self
+                            .validate_transaction_fee_payer(
+                                callbacks,
+                                message,
+                                lamports_per_signature,
+                                error_counters,
+                            )?;
+
+                        // Update nonce with fee-subtracted accounts
+                        let fee_payer_address = message.fee_payer();
+                        let nonce = nonce.map(|nonce| {
+                            NonceFull::from_partial(
+                                nonce,
+                                fee_payer_address,
+                                fee_payer_account.clone(),
+                                fee_payer_rent_debit,
+                            )
+                        });
+
+                        Ok(ValidatedTransactionDetails {
+                            nonce,
+                            fee_details,
+                            fee_payer_account,
+                            fee_payer_rent_debit,
+                        })
+                    },
+                )
+            })
+            .collect()
+    }
+
+    // Loads transaction fee payer, collects rent if necessary, then calculates
+    // transaction fees, and deducts them from the fee payer balance. If the
+    // account is not found or has insufficient funds, an error is returned.
+    fn validate_transaction_fee_payer<CB: TransactionProcessingCallback>(
+        &self,
+        callbacks: &CB,
+        message: &SanitizedMessage,
+        lamports_per_signature: u64,
+        error_counters: &mut TransactionErrorMetrics,
+    ) -> transaction::Result<(FeeDetails, AccountSharedData, u64)> {
+        let feature_set = callbacks.get_feature_set();
+        let rent_collector = callbacks.get_rent_collector();
+
+        let fee_payer_address = message.fee_payer();
+        let Some(mut fee_payer_account) = callbacks.get_account_shared_data(fee_payer_address)
+        else {
+            error_counters.account_not_found += 1;
+            return Err(TransactionError::AccountNotFound);
+        };
+
+        let fee_payer_rent_debit = collect_rent_from_account(
+            &feature_set,
+            rent_collector,
+            fee_payer_address,
+            &mut fee_payer_account,
+        )
+        .rent_amount;
+
+        let fee_details = self.fee_structure.calculate_fee_details(
+            message,
+            lamports_per_signature,
+            &process_compute_budget_instructions(message.program_instructions_iter())
+                .unwrap_or_default()
+                .into(),
+            feature_set.is_active(&include_loaded_accounts_data_size_in_fee_calculation::id()),
+            feature_set.is_active(&remove_rounding_in_fee_calculation::id()),
+        );
+
+        let fee_payer_index = 0;
+        validate_fee_payer(
+            fee_payer_address,
+            &mut fee_payer_account,
+            fee_payer_index,
+            error_counters,
+            rent_collector,
+            fee_details.total_fee(),
+        )?;
+
+        Ok((fee_details, fee_payer_account, fee_payer_rent_debit))
     }
 
     /// Returns a map from executable program accounts (all accounts owned by any loader)
@@ -395,11 +516,11 @@ impl<FG: ForkGraph, A: AccountsDb> TransactionBatchProcessor<FG, A> {
     fn filter_executable_program_accounts<CB: TransactionProcessingCallback>(
         callbacks: &CB,
         txs: &[SanitizedTransaction],
-        check_results: &mut [TransactionCheckResult],
+        validation_results: &[TransactionValidationResult],
         program_owners: &[Pubkey],
     ) -> HashMap<Pubkey, u64> {
         let mut result: HashMap<Pubkey, u64> = HashMap::new();
-        check_results.iter_mut().zip(txs).for_each(|etx| {
+        validation_results.iter().zip(txs).for_each(|etx| {
             if let (Ok(_), tx) = etx {
                 tx.message()
                     .account_keys()
@@ -618,6 +739,7 @@ impl<FG: ForkGraph, A: AccountsDb> TransactionBatchProcessor<FG, A> {
         &self,
         callbacks: &CB,
         upcoming_feature_set: &FeatureSet,
+        compute_budget: &ComputeBudget,
     ) {
         // Recompile loaded programs one at a time before the next epoch hits
         let (_epoch, slot_index) = self.epoch_schedule.get_epoch_and_slot_index(self.slot);
@@ -632,14 +754,16 @@ impl<FG: ForkGraph, A: AccountsDb> TransactionBatchProcessor<FG, A> {
             if let Some((key, program_to_recompile)) = program_cache.programs_to_recompile.pop() {
                 let effective_epoch = program_cache.latest_root_epoch.saturating_add(1);
                 drop(program_cache);
+                let program_cache_read = self.program_cache.read().unwrap();
                 if let Some(recompiled) = load_program_with_pubkey(
                     callbacks,
-                    &self.get_environments_for_epoch(effective_epoch),
+                    &program_cache_read.get_environments_for_epoch(effective_epoch),
                     &key,
                     self.slot,
                     &self.epoch_schedule,
                     false,
                 ) {
+                    drop(program_cache_read);
                     recompiled
                         .tx_usage_counter
                         .fetch_add(program_to_recompile.tx_usage_counter.load(Relaxed), Relaxed);
@@ -659,13 +783,13 @@ impl<FG: ForkGraph, A: AccountsDb> TransactionBatchProcessor<FG, A> {
             let mut program_cache = self.program_cache.write().unwrap();
             let program_runtime_environment_v1 = create_program_runtime_environment_v1(
                 upcoming_feature_set,
-                &self.runtime_config.compute_budget.unwrap_or_default(),
+                compute_budget,
                 false, /* deployment */
                 false, /* debugging_features */
             )
             .unwrap();
             let program_runtime_environment_v2 = create_program_runtime_environment_v2(
-                &self.runtime_config.compute_budget.unwrap_or_default(),
+                compute_budget,
                 false, /* debugging_features */
             );
             let mut upcoming_environments = program_cache.environments.clone();
@@ -696,7 +820,7 @@ impl<FG: ForkGraph, A: AccountsDb> TransactionBatchProcessor<FG, A> {
         tx: &SanitizedTransaction,
         loaded_transaction: &mut LoadedTransaction,
         compute_budget: ComputeBudget,
-        timings: &mut ExecuteTimings,
+        execute_timings: &mut ExecuteTimings,
         error_metrics: &mut TransactionErrorMetrics,
         program_cache_for_tx_batch: &ProgramCacheForTxBatch,
         config: &TransactionProcessingConfig,
@@ -779,6 +903,8 @@ impl<FG: ForkGraph, A: AccountsDb> TransactionBatchProcessor<FG, A> {
             program_cache_for_tx_batch,
             EnvironmentConfig::new(
                 blockhash,
+                callback.get_epoch_total_stake(),
+                callback.get_epoch_vote_accounts(),
                 callback.get_feature_set(),
                 lamports_per_signature,
                 sysvar_cache,
@@ -793,7 +919,7 @@ impl<FG: ForkGraph, A: AccountsDb> TransactionBatchProcessor<FG, A> {
             tx.message(),
             &loaded_transaction.program_indices,
             &mut invoke_context,
-            timings,
+            execute_timings,
             &mut executed_units,
             remote_accounts, //Sonic: pass remote accounts to process_message.
         );
@@ -802,7 +928,7 @@ impl<FG: ForkGraph, A: AccountsDb> TransactionBatchProcessor<FG, A> {
         drop(invoke_context);
 
         saturating_add_assign!(
-            timings.execute_accessories.process_message_us,
+            execute_timings.execute_accessories.process_message_us,
             process_message_time.as_us()
         );
 
@@ -869,10 +995,13 @@ impl<FG: ForkGraph, A: AccountsDb> TransactionBatchProcessor<FG, A> {
 
         loaded_transaction.accounts = accounts;
         saturating_add_assign!(
-            timings.details.total_account_count,
+            execute_timings.details.total_account_count,
             loaded_transaction.accounts.len() as u64
         );
-        saturating_add_assign!(timings.details.changed_account_count, touched_account_count);
+        saturating_add_assign!(
+            execute_timings.details.changed_account_count,
+            touched_account_count
+        );
 
         let return_data = if config.recording_config.enable_return_data_recording
             && !return_data.data.is_empty()
@@ -901,7 +1030,7 @@ impl<FG: ForkGraph, A: AccountsDb> TransactionBatchProcessor<FG, A> {
                 executed_units,
                 accounts_data_len_delta,
             },
-            programs_modified_by_tx: Box::new(programs_modified_by_tx),
+            programs_modified_by_tx: programs_modified_by_tx.take_entries(),
         }
     }
 
@@ -1001,25 +1130,29 @@ impl<FG: ForkGraph, A: AccountsDb> TransactionBatchProcessor<FG, A> {
 mod tests {
     use {
         super::*,
-        crate::account_loader::CheckedTransactionDetails,
+        crate::account_loader::ValidatedTransactionDetails,
         solana_program_runtime::loaded_programs::{BlockRelation, ProgramCacheEntryType},
         solana_sdk::{
             account::{create_account_shared_data_for_test, WritableAccount},
             bpf_loader,
             bpf_loader_upgradeable::{self, UpgradeableLoaderState},
+            compute_budget::ComputeBudgetInstruction,
             feature_set::FeatureSet,
             fee::FeeDetails,
             fee_calculator::FeeCalculator,
             hash::Hash,
             message::{LegacyMessage, Message, MessageHeader},
-            rent_collector::RentCollector,
+            nonce,
+            rent_collector::{RentCollector, RENT_EXEMPT_RENT_EPOCH},
             rent_debits::RentDebits,
             reserved_account_keys::ReservedAccountKeys,
             signature::{Keypair, Signature},
+            system_program,
             sysvar::{self, rent::Rent},
             transaction::{SanitizedTransaction, Transaction, TransactionError},
             transaction_context::TransactionContext,
         },
+        solana_vote::vote_account::VoteAccountsHashMap,
         std::{
             env,
             fs::{self, File},
@@ -1081,6 +1214,14 @@ mod tests {
 
         fn get_feature_set(&self) -> Arc<FeatureSet> {
             self.feature_set.clone()
+        }
+
+        fn get_epoch_total_stake(&self) -> Option<u64> {
+            None
+        }
+
+        fn get_epoch_vote_accounts(&self) -> Option<&VoteAccountsHashMap> {
+            None
         }
 
         fn add_builtin_account(&self, name: &str, program_id: &Pubkey) {
@@ -1443,15 +1584,9 @@ mod tests {
             sanitized_transaction_2.clone(),
             sanitized_transaction_1,
         ];
-        let mut lock_results = vec![
-            Ok(CheckedTransactionDetails {
-                nonce: None,
-                lamports_per_signature: 25,
-            }),
-            Ok(CheckedTransactionDetails {
-                nonce: None,
-                lamports_per_signature: 25,
-            }),
+        let validation_results = vec![
+            Ok(ValidatedTransactionDetails::default()),
+            Ok(ValidatedTransactionDetails::default()),
             Err(TransactionError::ProgramAccountNotFound),
         ];
         let owners = vec![owner1, owner2];
@@ -1459,7 +1594,7 @@ mod tests {
         let result = TransactionBatchProcessor::<TestForkGraph>::filter_executable_program_accounts(
             &mock_bank,
             &transactions,
-            lock_results.as_mut_slice(),
+            &validation_results,
             &owners,
         );
 
@@ -1541,15 +1676,9 @@ mod tests {
             TransactionBatchProcessor::<TestForkGraph>::filter_executable_program_accounts(
                 &bank,
                 &[sanitized_tx1, sanitized_tx2],
-                &mut [
-                    Ok(CheckedTransactionDetails {
-                        nonce: None,
-                        lamports_per_signature: 0,
-                    }),
-                    Ok(CheckedTransactionDetails {
-                        nonce: None,
-                        lamports_per_signature: 0,
-                    }),
+                &[
+                    Ok(ValidatedTransactionDetails::default()),
+                    Ok(ValidatedTransactionDetails::default()),
                 ],
                 owners,
             );
@@ -1640,18 +1769,15 @@ mod tests {
         let sanitized_tx2 = SanitizedTransaction::from_transaction_for_tests(tx2);
 
         let owners = &[program1_pubkey, program2_pubkey];
-        let mut lock_results = vec![
-            Ok(CheckedTransactionDetails {
-                nonce: None,
-                lamports_per_signature: 0,
-            }),
+        let validation_results = vec![
+            Ok(ValidatedTransactionDetails::default()),
             Err(TransactionError::BlockhashNotFound),
         ];
         let programs =
             TransactionBatchProcessor::<TestForkGraph>::filter_executable_program_accounts(
                 &bank,
                 &[sanitized_tx1, sanitized_tx2],
-                &mut lock_results,
+                &validation_results,
                 owners,
             );
 
@@ -1884,7 +2010,6 @@ mod tests {
             5,
             5,
             EpochSchedule::default(),
-            Arc::new(RuntimeConfig::default()),
             HashSet::new(),
         );
         batch_processor.program_cache.write().unwrap().fork_graph =
@@ -1985,5 +2110,322 @@ mod tests {
             .insert(program_data_account, account_data);
 
         program_account
+    }
+
+    #[test]
+    fn test_validate_transaction_fee_payer_exact_balance() {
+        let lamports_per_signature = 5000;
+        let message = new_unchecked_sanitized_message(Message::new_with_blockhash(
+            &[
+                ComputeBudgetInstruction::set_compute_unit_limit(2000u32),
+                ComputeBudgetInstruction::set_compute_unit_price(1_000_000_000),
+            ],
+            Some(&Pubkey::new_unique()),
+            &Hash::new_unique(),
+        ));
+        let fee_payer_address = message.fee_payer();
+        let rent_collector = RentCollector::default();
+        let min_balance = rent_collector.rent.minimum_balance(nonce::State::size());
+        let transaction_fee = lamports_per_signature;
+        let priority_fee = 2_000_000u64;
+        let starting_balance = transaction_fee + priority_fee;
+        assert!(
+            starting_balance > min_balance,
+            "we're testing that a rent exempt fee payer can be fully drained, \
+        so ensure that the starting balance is more than the min balance"
+        );
+
+        let fee_payer_account = AccountSharedData::new(starting_balance, 0, &Pubkey::default());
+        let mut mock_accounts = HashMap::new();
+        mock_accounts.insert(*fee_payer_address, fee_payer_account.clone());
+        let mock_bank = MockBankCallback {
+            account_shared_data: Arc::new(RwLock::new(mock_accounts)),
+            rent_collector,
+            ..MockBankCallback::default()
+        };
+
+        let mut error_counters = TransactionErrorMetrics::default();
+        let batch_processor = TransactionBatchProcessor::<TestForkGraph>::default();
+        let result = batch_processor.validate_transaction_fee_payer(
+            &mock_bank,
+            &message,
+            lamports_per_signature,
+            &mut error_counters,
+        );
+
+        let post_validation_fee_payer_account = {
+            let mut account = fee_payer_account.clone();
+            account.set_rent_epoch(RENT_EXEMPT_RENT_EPOCH);
+            account.set_lamports(0);
+            account
+        };
+
+        assert_eq!(
+            result,
+            Ok((
+                FeeDetails::new_for_tests(transaction_fee, priority_fee, false),
+                post_validation_fee_payer_account,
+                0 // rent due
+            ))
+        );
+    }
+
+    #[test]
+    fn test_validate_transaction_fee_payer_rent_paying() {
+        let lamports_per_signature = 5000;
+        let message = new_unchecked_sanitized_message(Message::new_with_blockhash(
+            &[],
+            Some(&Pubkey::new_unique()),
+            &Hash::new_unique(),
+        ));
+        let fee_payer_address = message.fee_payer();
+        let mut rent_collector = RentCollector::default();
+        rent_collector.rent.lamports_per_byte_year = 1_000_000;
+        let min_balance = rent_collector.rent.minimum_balance(0);
+        let transaction_fee = lamports_per_signature;
+        let starting_balance = min_balance - 1;
+        let fee_payer_account = AccountSharedData::new(starting_balance, 0, &Pubkey::default());
+        let rent_due = rent_collector
+            .get_rent_due(
+                fee_payer_account.lamports(),
+                fee_payer_account.data().len(),
+                fee_payer_account.rent_epoch(),
+            )
+            .lamports();
+        assert!(rent_due > 0);
+
+        let mut mock_accounts = HashMap::new();
+        mock_accounts.insert(*fee_payer_address, fee_payer_account.clone());
+        let mock_bank = MockBankCallback {
+            account_shared_data: Arc::new(RwLock::new(mock_accounts)),
+            rent_collector,
+            ..MockBankCallback::default()
+        };
+
+        let mut error_counters = TransactionErrorMetrics::default();
+        let batch_processor = TransactionBatchProcessor::<TestForkGraph>::default();
+        let result = batch_processor.validate_transaction_fee_payer(
+            &mock_bank,
+            &message,
+            lamports_per_signature,
+            &mut error_counters,
+        );
+
+        let post_validation_fee_payer_account = {
+            let mut account = fee_payer_account.clone();
+            account.set_rent_epoch(1);
+            account.set_lamports(starting_balance - transaction_fee - rent_due);
+            account
+        };
+
+        assert_eq!(
+            result,
+            Ok((
+                FeeDetails::new_for_tests(transaction_fee, 0, false),
+                post_validation_fee_payer_account,
+                rent_due,
+            ))
+        );
+    }
+
+    #[test]
+    fn test_validate_transaction_fee_payer_not_found() {
+        let lamports_per_signature = 5000;
+        let message =
+            new_unchecked_sanitized_message(Message::new(&[], Some(&Pubkey::new_unique())));
+
+        let mock_bank = MockBankCallback::default();
+        let mut error_counters = TransactionErrorMetrics::default();
+        let batch_processor = TransactionBatchProcessor::<TestForkGraph>::default();
+        let result = batch_processor.validate_transaction_fee_payer(
+            &mock_bank,
+            &message,
+            lamports_per_signature,
+            &mut error_counters,
+        );
+
+        assert_eq!(error_counters.account_not_found, 1);
+        assert_eq!(result, Err(TransactionError::AccountNotFound));
+    }
+
+    #[test]
+    fn test_validate_transaction_fee_payer_insufficient_funds() {
+        let lamports_per_signature = 5000;
+        let message =
+            new_unchecked_sanitized_message(Message::new(&[], Some(&Pubkey::new_unique())));
+        let fee_payer_address = message.fee_payer();
+        let fee_payer_account = AccountSharedData::new(1, 0, &Pubkey::default());
+        let mut mock_accounts = HashMap::new();
+        mock_accounts.insert(*fee_payer_address, fee_payer_account.clone());
+        let mock_bank = MockBankCallback {
+            account_shared_data: Arc::new(RwLock::new(mock_accounts)),
+            ..MockBankCallback::default()
+        };
+
+        let mut error_counters = TransactionErrorMetrics::default();
+        let batch_processor = TransactionBatchProcessor::<TestForkGraph>::default();
+        let result = batch_processor.validate_transaction_fee_payer(
+            &mock_bank,
+            &message,
+            lamports_per_signature,
+            &mut error_counters,
+        );
+
+        assert_eq!(error_counters.insufficient_funds, 1);
+        assert_eq!(result, Err(TransactionError::InsufficientFundsForFee));
+    }
+
+    #[test]
+    fn test_validate_transaction_fee_payer_insufficient_rent() {
+        let lamports_per_signature = 5000;
+        let message =
+            new_unchecked_sanitized_message(Message::new(&[], Some(&Pubkey::new_unique())));
+        let fee_payer_address = message.fee_payer();
+        let transaction_fee = lamports_per_signature;
+        let rent_collector = RentCollector::default();
+        let min_balance = rent_collector.rent.minimum_balance(0);
+        let starting_balance = min_balance + transaction_fee - 1;
+        let fee_payer_account = AccountSharedData::new(starting_balance, 0, &Pubkey::default());
+        let mut mock_accounts = HashMap::new();
+        mock_accounts.insert(*fee_payer_address, fee_payer_account.clone());
+        let mock_bank = MockBankCallback {
+            account_shared_data: Arc::new(RwLock::new(mock_accounts)),
+            rent_collector,
+            ..MockBankCallback::default()
+        };
+
+        let mut error_counters = TransactionErrorMetrics::default();
+        let batch_processor = TransactionBatchProcessor::<TestForkGraph>::default();
+        let result = batch_processor.validate_transaction_fee_payer(
+            &mock_bank,
+            &message,
+            lamports_per_signature,
+            &mut error_counters,
+        );
+
+        assert_eq!(
+            result,
+            Err(TransactionError::InsufficientFundsForRent { account_index: 0 })
+        );
+    }
+
+    #[test]
+    fn test_validate_transaction_fee_payer_invalid() {
+        let lamports_per_signature = 5000;
+        let message =
+            new_unchecked_sanitized_message(Message::new(&[], Some(&Pubkey::new_unique())));
+        let fee_payer_address = message.fee_payer();
+        let fee_payer_account = AccountSharedData::new(1_000_000, 0, &Pubkey::new_unique());
+        let mut mock_accounts = HashMap::new();
+        mock_accounts.insert(*fee_payer_address, fee_payer_account.clone());
+        let mock_bank = MockBankCallback {
+            account_shared_data: Arc::new(RwLock::new(mock_accounts)),
+            ..MockBankCallback::default()
+        };
+
+        let mut error_counters = TransactionErrorMetrics::default();
+        let batch_processor = TransactionBatchProcessor::<TestForkGraph>::default();
+        let result = batch_processor.validate_transaction_fee_payer(
+            &mock_bank,
+            &message,
+            lamports_per_signature,
+            &mut error_counters,
+        );
+
+        assert_eq!(error_counters.invalid_account_for_fee, 1);
+        assert_eq!(result, Err(TransactionError::InvalidAccountForFee));
+    }
+
+    #[test]
+    fn test_validate_transaction_fee_payer_is_nonce() {
+        let lamports_per_signature = 5000;
+        let compute_unit_limit = 2 * solana_compute_budget_program::DEFAULT_COMPUTE_UNITS;
+        let message = new_unchecked_sanitized_message(Message::new_with_blockhash(
+            &[
+                ComputeBudgetInstruction::set_compute_unit_limit(compute_unit_limit as u32),
+                ComputeBudgetInstruction::set_compute_unit_price(1_000_000),
+            ],
+            Some(&Pubkey::new_unique()),
+            &Hash::new_unique(),
+        ));
+        let fee_payer_address = message.fee_payer();
+        let min_balance = Rent::default().minimum_balance(nonce::State::size());
+        let transaction_fee = lamports_per_signature;
+        let priority_fee = compute_unit_limit;
+
+        // Sufficient Fees
+        {
+            let fee_payer_account = AccountSharedData::new_data(
+                min_balance + transaction_fee + priority_fee,
+                &nonce::state::Versions::new(nonce::State::Initialized(
+                    nonce::state::Data::default(),
+                )),
+                &system_program::id(),
+            )
+            .unwrap();
+
+            let mut mock_accounts = HashMap::new();
+            mock_accounts.insert(*fee_payer_address, fee_payer_account.clone());
+            let mock_bank = MockBankCallback {
+                account_shared_data: Arc::new(RwLock::new(mock_accounts)),
+                ..MockBankCallback::default()
+            };
+
+            let mut error_counters = TransactionErrorMetrics::default();
+            let batch_processor = TransactionBatchProcessor::<TestForkGraph>::default();
+            let result = batch_processor.validate_transaction_fee_payer(
+                &mock_bank,
+                &message,
+                lamports_per_signature,
+                &mut error_counters,
+            );
+
+            let post_validation_fee_payer_account = {
+                let mut account = fee_payer_account.clone();
+                account.set_rent_epoch(RENT_EXEMPT_RENT_EPOCH);
+                account.set_lamports(min_balance);
+                account
+            };
+
+            assert_eq!(
+                result,
+                Ok((
+                    FeeDetails::new_for_tests(transaction_fee, priority_fee, false),
+                    post_validation_fee_payer_account,
+                    0 // rent due
+                ))
+            );
+        }
+
+        // Insufficient Fees
+        {
+            let fee_payer_account = AccountSharedData::new_data(
+                transaction_fee + priority_fee, // no min_balance this time
+                &nonce::state::Versions::new(nonce::State::Initialized(
+                    nonce::state::Data::default(),
+                )),
+                &system_program::id(),
+            )
+            .unwrap();
+
+            let mut mock_accounts = HashMap::new();
+            mock_accounts.insert(*fee_payer_address, fee_payer_account.clone());
+            let mock_bank = MockBankCallback {
+                account_shared_data: Arc::new(RwLock::new(mock_accounts)),
+                ..MockBankCallback::default()
+            };
+
+            let mut error_counters = TransactionErrorMetrics::default();
+            let batch_processor = TransactionBatchProcessor::<TestForkGraph>::default();
+            let result = batch_processor.validate_transaction_fee_payer(
+                &mock_bank,
+                &message,
+                lamports_per_signature,
+                &mut error_counters,
+            );
+
+            assert_eq!(error_counters.insufficient_funds, 1);
+            assert_eq!(result, Err(TransactionError::InsufficientFundsForFee));
+        }
     }
 }

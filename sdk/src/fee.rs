@@ -32,7 +32,7 @@ pub struct FeeStructure {
     pub fee_multiplier: u32,
 }
 
-#[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Default, Clone, Copy, Eq, PartialEq, Deserialize, Serialize)]
 pub struct FeeDetails {
     transaction_fee: u64,
     prioritization_fee: u64,
