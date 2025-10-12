@@ -11,15 +11,14 @@ use {
             ShrinkCollectAliveSeparatedByRefs, ShrinkStatsSub,
         },
         accounts_file::AccountsFile,
-        accounts_hash::AccountHash,
-        accounts_index::{AccountsIndexScanResult, ZeroLamport},
+        accounts_index::AccountsIndexScanResult,
         active_stats::ActiveStatItem,
         storable_accounts::{StorableAccounts, StorableAccountsBySlot},
     },
     rand::{thread_rng, Rng},
     rayon::prelude::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator},
     solana_measure::measure_us,
-    solana_sdk::{account::ReadableAccount, clock::Slot},
+    solana_sdk::clock::Slot,
     std::{
         collections::HashMap,
         num::{NonZeroU64, Saturating},
@@ -440,20 +439,18 @@ impl AccountsDb {
     /// create append vec of size 'bytes'
     /// write 'accounts_to_write' into it
     /// return shrink_in_progress and some metrics
-    fn write_ancient_accounts<'a, 'b: 'a, T: ReadableAccount + Sync + ZeroLamport + 'a>(
+    fn write_ancient_accounts<'a, 'b: 'a>(
         &'b self,
         bytes: u64,
-        accounts_to_write: impl StorableAccounts<'a, T>,
+        accounts_to_write: impl StorableAccounts<'a>,
         write_ancient_accounts: &mut WriteAncientAccounts<'b>,
     ) {
         let target_slot = accounts_to_write.target_slot();
         let (shrink_in_progress, create_and_insert_store_elapsed_us) =
             measure_us!(self.get_store_for_shrink(target_slot, bytes));
-        let (store_accounts_timing, rewrite_elapsed_us) = measure_us!(self.store_accounts_frozen(
-            accounts_to_write,
-            None::<Vec<AccountHash>>,
-            shrink_in_progress.new_storage(),
-        ));
+        let (store_accounts_timing, rewrite_elapsed_us) = measure_us!(
+            self.store_accounts_frozen(accounts_to_write, shrink_in_progress.new_storage(),)
+        );
 
         write_ancient_accounts.metrics.accumulate(&ShrinkStatsSub {
             store_accounts_timing,
@@ -999,6 +996,7 @@ pub mod tests {
                 },
                 ShrinkCollectRefs,
             },
+            accounts_hash::AccountHash,
             accounts_index::UpsertReclaim,
             append_vec::{aligned_stored_size, AppendVec, AppendVecStoredAccountMeta},
             storable_accounts::StorableAccountsBySlot,
