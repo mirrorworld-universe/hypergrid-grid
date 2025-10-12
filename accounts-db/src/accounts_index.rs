@@ -1,3 +1,4 @@
+pub(crate) mod in_mem_accounts_index;
 use {
     crate::{
         accounts_index_storage::{AccountsIndexStorage, Startup},
@@ -5,15 +6,14 @@ use {
         ancestors::Ancestors,
         bucket_map_holder::{Age, AtomicAge, BucketMapHolder},
         contains::Contains,
-        in_mem_accounts_index::{InMemAccountsIndex, InsertNewEntryResults, StartupStats},
         inline_spl_token::{self, GenericTokenAccount},
         inline_spl_token_2022,
         pubkey_bins::PubkeyBinCalculator24,
         rolling_bit_field::RollingBitField,
         secondary_index::*,
     },
+    in_mem_accounts_index::{InMemAccountsIndex, InsertNewEntryResults, StartupStats},
     log::*,
-    ouroboros::self_referencing,
     rand::{thread_rng, Rng},
     rayon::{
         iter::{IntoParallelIterator, ParallelIterator},
@@ -37,7 +37,7 @@ use {
         path::PathBuf,
         sync::{
             atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
-            Arc, Mutex, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard,
+            Arc, Mutex, OnceLock, RwLock, RwLockWriteGuard,
         },
     },
     thiserror::Error,
@@ -336,48 +336,6 @@ impl<T: IndexValue> AccountMapEntryInner<T> {
             Ordering::AcqRel,
             Ordering::Relaxed,
         );
-    }
-}
-
-pub enum AccountIndexGetResult<T: IndexValue> {
-    /// (index entry, index in slot list)
-    Found(ReadAccountMapEntry<T>, usize),
-    NotFound,
-}
-
-#[self_referencing]
-pub struct ReadAccountMapEntry<T: IndexValue> {
-    owned_entry: AccountMapEntry<T>,
-    #[borrows(owned_entry)]
-    #[covariant]
-    slot_list_guard: RwLockReadGuard<'this, SlotList<T>>,
-}
-
-impl<T: IndexValue> Debug for ReadAccountMapEntry<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{:?}", self.borrow_owned_entry())
-    }
-}
-
-impl<T: IndexValue> ReadAccountMapEntry<T> {
-    pub fn from_account_map_entry(account_map_entry: AccountMapEntry<T>) -> Self {
-        ReadAccountMapEntryBuilder {
-            owned_entry: account_map_entry,
-            slot_list_guard_builder: |lock| lock.slot_list.read().unwrap(),
-        }
-        .build()
-    }
-
-    pub fn slot_list(&self) -> &SlotList<T> {
-        self.borrow_slot_list_guard()
-    }
-
-    pub fn ref_count(&self) -> RefCount {
-        self.borrow_owned_entry().ref_count()
-    }
-
-    pub fn addref(&self) {
-        self.borrow_owned_entry().addref();
     }
 }
 
@@ -1110,17 +1068,17 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
         F: FnMut(&Pubkey, (&T, Slot)),
     {
         for pubkey in index.get(index_key) {
-            // Maybe these reads from the AccountsIndex can be batched every time it
-            // grabs the read lock as well...
-            if let AccountIndexGetResult::Found(list_r, index) =
-                self.get(&pubkey, Some(ancestors), max_root)
-            {
-                let entry = &list_r.slot_list()[index];
-                func(&pubkey, (&entry.1, entry.0));
-            }
             if config.is_aborted() {
                 break;
             }
+            if let Some(entry) = self.get_cloned(&pubkey) {
+                self.get_account_info_with_and_then(
+                    &entry,
+                    Some(ancestors),
+                    max_root,
+                    |(slot, account_info)| func(&pubkey, (&account_info, slot)),
+                );
+            };
         }
     }
 
@@ -1155,7 +1113,7 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
 
     /// Gets the account info (and slot) in `entry`, with `ancestors` and `max_root`,
     /// and applies `callback` to it
-    fn get_account_info_with_and_then<R>(
+    pub(crate) fn get_account_info_with_and_then<R>(
         &self,
         entry: &AccountMapEntryInner<T>,
         ancestors: Option<&Ancestors>,
@@ -1488,28 +1446,6 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
                 (cache, ())
             });
         });
-    }
-
-    /// Get an account
-    /// The latest account that appears in `ancestors` or `roots` is returned.
-    pub fn get(
-        &self,
-        pubkey: &Pubkey,
-        ancestors: Option<&Ancestors>,
-        max_root: Option<Slot>,
-    ) -> AccountIndexGetResult<T> {
-        let read_account_map_entry = self
-            .get_bin(pubkey)
-            .get(pubkey)
-            .map(ReadAccountMapEntry::from_account_map_entry);
-
-        read_account_map_entry
-            .and_then(|locked_entry| {
-                let slot_list = locked_entry.slot_list();
-                self.latest_slot(ancestors, slot_list, max_root)
-                    .map(|found_index| AccountIndexGetResult::Found(locked_entry, found_index))
-            })
-            .unwrap_or(AccountIndexGetResult::NotFound)
     }
 
     // Get the maximum root <= `max_allowed_root` from the given `slice`
@@ -2073,34 +2009,6 @@ impl<T: IndexValue, U: DiskIndexValue + From<T> + Into<T>> AccountsIndex<T, U> {
             (reclaims, slot_list.is_empty())
         })
         .unwrap()
-    }
-}
-
-// These functions/fields are only usable from a dev context (i.e. tests and benches)
-#[cfg(feature = "dev-context-only-utils")]
-impl<T: IndexValue> AccountIndexGetResult<T> {
-    pub fn unwrap(self) -> (ReadAccountMapEntry<T>, usize) {
-        match self {
-            AccountIndexGetResult::Found(lock, size) => (lock, size),
-            _ => {
-                panic!("trying to unwrap AccountIndexGetResult with non-Success result");
-            }
-        }
-    }
-
-    pub fn is_none(&self) -> bool {
-        !self.is_some()
-    }
-
-    pub fn is_some(&self) -> bool {
-        matches!(self, AccountIndexGetResult::Found(_lock, _size))
-    }
-
-    pub fn map<V, F: FnOnce((ReadAccountMapEntry<T>, usize)) -> V>(self, f: F) -> Option<V> {
-        match self {
-            AccountIndexGetResult::Found(lock, size) => Some(f((lock, size))),
-            _ => None,
-        }
     }
 }
 

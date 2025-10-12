@@ -156,8 +156,9 @@ use {
         },
         transaction_context::{TransactionAccount, TransactionReturnData},
     },
-    solana_stake_program::stake_state::{
-        self, InflationPointCalculationEvent, PointValue, StakeStateV2,
+    solana_stake_program::{
+        points::{InflationPointCalculationEvent, PointValue},
+        stake_state::StakeStateV2,
     },
     solana_svm::{
         account_loader::{TransactionCheckResult, TransactionLoadResult},
@@ -3009,7 +3010,7 @@ impl Bank {
                         return 0;
                     };
 
-                    stake_state::calculate_points(
+                    solana_stake_program::points::calculate_points(
                         stake_account.stake_state(),
                         vote_state,
                         stake_history,
@@ -3046,7 +3047,7 @@ impl Bank {
                     delegations
                         .par_iter()
                         .map(|(_stake_pubkey, stake_account)| {
-                            stake_state::calculate_points(
+                            solana_stake_program::points::calculate_points(
                                 stake_account.stake_state(),
                                 vote_state,
                                 stake_history,
@@ -3126,7 +3127,7 @@ impl Bank {
 
                     let pre_lamport = stake_account.lamports();
 
-                    let redeemed = stake_state::redeem_rewards(
+                    let redeemed = solana_stake_program::rewards::redeem_rewards(
                         rewarded_epoch,
                         stake_state,
                         &mut stake_account,
@@ -3174,7 +3175,7 @@ impl Bank {
                         });
                     } else {
                         debug!(
-                            "stake_state::redeem_rewards() failed for {}: {:?}",
+                            "solana_stake_program::rewards::redeem_rewards() failed for {}: {:?}",
                             stake_pubkey, redeemed
                         );
                     }
@@ -3245,7 +3246,7 @@ impl Bank {
                     });
                     let (mut stake_account, stake_state) =
                         <(AccountSharedData, StakeStateV2)>::from(stake_account);
-                    let redeemed = stake_state::redeem_rewards(
+                    let redeemed = solana_stake_program::rewards::redeem_rewards(
                         rewarded_epoch,
                         stake_state,
                         &mut stake_account,
@@ -3281,7 +3282,7 @@ impl Bank {
                         });
                     } else {
                         debug!(
-                            "stake_state::redeem_rewards() failed for {}: {:?}",
+                            "solana_stake_program::rewards::redeem_rewards() failed for {}: {:?}",
                             stake_pubkey, redeemed
                         );
                     }
@@ -4328,14 +4329,13 @@ impl Bank {
             &mut timings,
             Some(&account_overrides),
             None,
+            true,
         );
 
         let post_simulation_accounts = loaded_transactions
             .into_iter()
             .next()
-            .unwrap()
-            .0
-            .ok()
+            .and_then(|(loaded_transactions_res, _)| loaded_transactions_res.ok())
             .map(|loaded_transaction| {
                 loaded_transaction
                     .accounts
@@ -4357,7 +4357,12 @@ impl Bank {
 
         debug!("simulate_transaction: {:?}", timings);
 
-        let execution_result = execution_results.pop().unwrap();
+        let execution_result =
+            execution_results
+                .pop()
+                .unwrap_or(TransactionExecutionResult::NotExecuted(
+                    TransactionError::InvalidProgramForExecution,
+                ));
         let flattened_result = execution_result.flattened_result();
         let (logs, return_data, inner_instructions) = match execution_result {
             TransactionExecutionResult::Executed { details, .. } => (
@@ -4566,7 +4571,7 @@ impl Bank {
         balances
     }
 
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub fn load_and_execute_transactions(
         &self,
         batch: &TransactionBatch,
@@ -4577,6 +4582,7 @@ impl Bank {
         timings: &mut ExecuteTimings,
         account_overrides: Option<&AccountOverrides>,
         log_messages_bytes_limit: Option<usize>,
+        limit_to_load_programs: bool,
     ) -> LoadAndExecuteTransactionsOutput {
         let sanitized_txs = batch.sanitized_transactions();
         debug!("processing transactions: {}", sanitized_txs.len());
@@ -4643,6 +4649,7 @@ impl Bank {
                 account_overrides,
                 self.builtin_programs.iter(),
                 log_messages_bytes_limit,
+                limit_to_load_programs,
             );
 
         let mut signature_count = 0;
@@ -5692,6 +5699,7 @@ impl Bank {
             timings,
             None,
             log_messages_bytes_limit,
+            false,
         );
 
         let (last_blockhash, lamports_per_signature) =
@@ -7575,13 +7583,13 @@ impl TransactionProcessingCallback for Bank {
 
     fn check_account_access(
         &self,
-        tx: &SanitizedTransaction,
+        message: &SanitizedMessage,
         account_index: usize,
         account: &AccountSharedData,
         error_counters: &mut TransactionErrorMetrics,
     ) -> Result<()> {
         if self.get_reward_interval() == RewardInterval::InsideInterval
-            && tx.message().is_writable(account_index)
+            && message.is_writable(account_index)
             && solana_stake_program::check_id(account.owner())
         {
             error_counters.program_execution_temporarily_restricted += 1;
