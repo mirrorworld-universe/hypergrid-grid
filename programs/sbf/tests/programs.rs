@@ -3692,7 +3692,7 @@ fn test_program_fees() {
     let mut bank = Bank::new_for_tests(&genesis_config);
     let fee_structure =
         FeeStructure::new(0.000005, 0.0, vec![(200, 0.0000005), (1400000, 0.000005)]);
-    bank.fee_structure = fee_structure.clone();
+    bank.set_fee_structure(&fee_structure);
     let (bank, bank_forks) = bank.wrap_with_bank_forks_for_tests();
     let mut bank_client = BankClient::new_shared(bank);
     let authority_keypair = Keypair::new();
@@ -4281,7 +4281,7 @@ fn test_cpi_deprecated_loader_realloc() {
 #[test]
 #[cfg(feature = "sbf_rust")]
 fn test_cpi_change_account_data_memory_allocation() {
-    use solana_program_runtime::{declare_process_instruction, loaded_programs::LoadedProgram};
+    use solana_program_runtime::{declare_process_instruction, loaded_programs::ProgramCacheEntry};
 
     solana_logger::setup();
 
@@ -4331,7 +4331,7 @@ fn test_cpi_change_account_data_memory_allocation() {
         &bank,
         builtin_program_id,
         "test_cpi_change_account_data_memory_allocation_builtin",
-        LoadedProgram::new_builtin(0, 42, MockBuiltin::vm),
+        ProgramCacheEntry::new_builtin(0, 42, MockBuiltin::vm),
     );
 
     let (bank, bank_forks) = bank.wrap_with_bank_forks_for_tests();

@@ -1,7 +1,7 @@
 use {
     crate::{
         nonblocking::stream_throttle::{
-            ConnectionStreamCounter, StakedStreamLoadEMA, STREAM_STOP_CODE_THROTTLING,
+            ConnectionStreamCounter, StakedStreamLoadEMA, STREAM_THROTTLING_INTERVAL,
             STREAM_THROTTLING_INTERVAL_MS,
         },
         quic::{configure_server, QuicServerError, StreamStats},
@@ -55,7 +55,7 @@ use {
         // introduce any other awaits while holding the RwLock.
         sync::{Mutex, MutexGuard},
         task::JoinHandle,
-        time::timeout,
+        time::{sleep, timeout},
     },
 };
 
@@ -116,6 +116,13 @@ impl ConnectionPeerType {
     }
 }
 
+pub struct SpawnNonBlockingServerResult {
+    pub endpoint: Endpoint,
+    pub stats: Arc<StreamStats>,
+    pub thread: JoinHandle<()>,
+    pub max_concurrent_connections: usize,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_server(
     name: &'static str,
@@ -130,9 +137,11 @@ pub fn spawn_server(
     max_streams_per_ms: u64,
     wait_for_chunk_timeout: Duration,
     coalesce: Duration,
-) -> Result<(Endpoint, Arc<StreamStats>, JoinHandle<()>), QuicServerError> {
+) -> Result<SpawnNonBlockingServerResult, QuicServerError> {
     info!("Start {name} quic server on {sock:?}");
-    let (config, _cert) = configure_server(keypair)?;
+    let concurrent_connections = max_staked_connections + max_unstaked_connections;
+    let max_concurrent_connections = concurrent_connections + concurrent_connections / 4;
+    let (config, _cert) = configure_server(keypair, max_concurrent_connections)?;
 
     let endpoint = Endpoint::new(
         EndpointConfig::default(),
@@ -141,6 +150,7 @@ pub fn spawn_server(
         Arc::new(TokioRuntime),
     )
     .map_err(QuicServerError::EndpointFailed)?;
+
     let stats = Arc::<StreamStats>::default();
     let handle = tokio::spawn(run_server(
         name,
@@ -156,7 +166,12 @@ pub fn spawn_server(
         wait_for_chunk_timeout,
         coalesce,
     ));
-    Ok((endpoint, stats, handle))
+    Ok(SpawnNonBlockingServerResult {
+        endpoint,
+        stats,
+        thread: handle,
+        max_concurrent_connections,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -347,15 +362,9 @@ fn handle_and_cache_new_connection(
         params.total_stake,
     ) as u64)
     {
-        connection.set_max_concurrent_uni_streams(max_uni_streams);
+        let remote_addr = connection.remote_address();
         let receive_window =
             compute_recieve_window(params.max_stake, params.min_stake, params.peer_type);
-
-        if let Ok(receive_window) = receive_window {
-            connection.set_receive_window(receive_window);
-        }
-
-        let remote_addr = connection.remote_address();
 
         debug!(
             "Peer type {:?}, total stake {}, max streams {} receive_window {:?} from peer {}",
@@ -377,6 +386,12 @@ fn handle_and_cache_new_connection(
             )
         {
             drop(connection_table_l);
+
+            if let Ok(receive_window) = receive_window {
+                connection.set_receive_window(receive_window);
+            }
+            connection.set_max_concurrent_uni_streams(max_uni_streams);
+
             tokio::spawn(handle_connection(
                 connection,
                 remote_addr,
@@ -810,25 +825,36 @@ async fn handle_connection(
                             params.total_stake,
                         );
 
-                    stream_counter.reset_throttling_params_if_needed();
-                    if stream_counter.stream_count.load(Ordering::Relaxed)
-                        >= max_streams_per_throttling_interval
-                    {
-                        stats.throttled_streams.fetch_add(1, Ordering::Relaxed);
-                        match params.peer_type {
-                            ConnectionPeerType::Unstaked => {
-                                stats
-                                    .throttled_unstaked_streams
-                                    .fetch_add(1, Ordering::Relaxed);
+                    let throttle_interval_start =
+                        stream_counter.reset_throttling_params_if_needed();
+                    let streams_read_in_throttle_interval =
+                        stream_counter.stream_count.load(Ordering::Relaxed);
+                    if streams_read_in_throttle_interval >= max_streams_per_throttling_interval {
+                        // The peer is sending faster than we're willing to read. Sleep for what's
+                        // left of this read interval so the peer backs off.
+                        let throttle_duration = STREAM_THROTTLING_INTERVAL
+                            .saturating_sub(throttle_interval_start.elapsed());
+
+                        if !throttle_duration.is_zero() {
+                            debug!("Throttling stream from {remote_addr:?}, peer type: {:?}, total stake: {}, \
+                                    max_streams_per_interval: {max_streams_per_throttling_interval}, read_interval_streams: {streams_read_in_throttle_interval} \
+                                    throttle_duration: {throttle_duration:?}",
+                                    params.peer_type, params.total_stake);
+                            stats.throttled_streams.fetch_add(1, Ordering::Relaxed);
+                            match params.peer_type {
+                                ConnectionPeerType::Unstaked => {
+                                    stats
+                                        .throttled_unstaked_streams
+                                        .fetch_add(1, Ordering::Relaxed);
+                                }
+                                ConnectionPeerType::Staked(_) => {
+                                    stats
+                                        .throttled_staked_streams
+                                        .fetch_add(1, Ordering::Relaxed);
+                                }
                             }
-                            ConnectionPeerType::Staked(_) => {
-                                stats
-                                    .throttled_staked_streams
-                                    .fetch_add(1, Ordering::Relaxed);
-                            }
+                            sleep(throttle_duration).await;
                         }
-                        let _ = stream.stop(VarInt::from_u32(STREAM_STOP_CODE_THROTTLING));
-                        continue;
                     }
                     stream_load_ema.increment_load(params.peer_type);
                     stream_counter.stream_count.fetch_add(1, Ordering::Relaxed);
@@ -1179,16 +1205,10 @@ impl ConnectionTable {
         if has_connection_capacity {
             let exit = Arc::new(AtomicBool::new(false));
             let last_update = Arc::new(AtomicU64::new(last_update));
-            let stream_counter = if peer_type.is_staked() {
-                connection_entry
-                    .first()
-                    .map(|entry| entry.stream_counter.clone())
-                    .unwrap_or(Arc::new(ConnectionStreamCounter::new()))
-            } else {
-                // Unstaked connections are tracked using peer IP address. It's possible that different clients
-                // use the same IP due to NAT. So counting all the streams from a given IP could be too restrictive.
-                Arc::new(ConnectionStreamCounter::new())
-            };
+            let stream_counter = connection_entry
+                .first()
+                .map(|entry| entry.stream_counter.clone())
+                .unwrap_or(Arc::new(ConnectionStreamCounter::new()));
             connection_entry.push(ConnectionEntry::new(
                 exit.clone(),
                 peer_type,
@@ -1326,7 +1346,12 @@ pub mod test {
         let keypair = Keypair::new();
         let server_address = s.local_addr().unwrap();
         let staked_nodes = Arc::new(RwLock::new(option_staked_nodes.unwrap_or_default()));
-        let (_, stats, t) = spawn_server(
+        let SpawnNonBlockingServerResult {
+            endpoint: _,
+            stats,
+            thread: t,
+            max_concurrent_connections: _,
+        } = spawn_server(
             "quic_streamer_test",
             s,
             &keypair,
@@ -1762,7 +1787,12 @@ pub mod test {
         let keypair = Keypair::new();
         let server_address = s.local_addr().unwrap();
         let staked_nodes = Arc::new(RwLock::new(StakedNodes::default()));
-        let (_, _, t) = spawn_server(
+        let SpawnNonBlockingServerResult {
+            endpoint: _,
+            stats: _,
+            thread: t,
+            max_concurrent_connections: _,
+        } = spawn_server(
             "quic_streamer_test",
             s,
             &keypair,
@@ -1792,7 +1822,12 @@ pub mod test {
         let keypair = Keypair::new();
         let server_address = s.local_addr().unwrap();
         let staked_nodes = Arc::new(RwLock::new(StakedNodes::default()));
-        let (_, stats, t) = spawn_server(
+        let SpawnNonBlockingServerResult {
+            endpoint: _,
+            stats,
+            thread: t,
+            max_concurrent_connections: _,
+        } = spawn_server(
             "quic_streamer_test",
             s,
             &keypair,
