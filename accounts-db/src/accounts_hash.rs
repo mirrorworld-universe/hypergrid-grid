@@ -5,7 +5,6 @@ use {
         ancestors::Ancestors,
         pubkey_bins::PubkeyBinCalculator24,
     },
-    ahash::AHashSet,
     bytemuck::{Pod, Zeroable},
     log::*,
     memmap2::MmapMut,
@@ -20,6 +19,7 @@ use {
     },
     std::{
         borrow::Borrow,
+        collections::HashSet,
         convert::TryInto,
         io::{Seek, SeekFrom, Write},
         path::PathBuf,
@@ -474,7 +474,7 @@ pub struct AccountsHasher<'a> {
     /// The directory where temporary cache files are put
     pub dir_for_temp_cache_files: PathBuf,
     pub(crate) active_stats: &'a ActiveStats,
-    pub remote_accounts: Arc<AHashSet<Pubkey>>, // Sonic: accounts to exclude from hash calculation
+    pub remote_accounts: Arc<HashSet<Pubkey>>, // Sonic: accounts to exclude from hash calculation
 }
 
 /// Pointer to a specific item in chunked accounts hash slices.
@@ -1344,7 +1344,7 @@ mod tests {
                 zero_lamport_accounts: ZeroLamportAccounts::Excluded,
                 dir_for_temp_cache_files,
                 active_stats: &ACTIVE_STATS,
-                remote_accounts: Arc::new(AHashSet::default()), //Sonic: add remote_accounts
+                remote_accounts: Arc::new(HashSet::default()), //Sonic: add remote_accounts
             }
         }
     }
@@ -1625,7 +1625,7 @@ mod tests {
 
     #[test]
     fn test_accountsdb_de_dup_accounts_zero_chunks() {
-        let vec = vec![vec![CalculateHashIntermediate {
+        let vec = [vec![CalculateHashIntermediate {
             lamports: 1,
             hash: AccountHash(Hash::default()),
             pubkey: Pubkey::default(),

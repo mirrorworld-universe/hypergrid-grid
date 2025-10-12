@@ -71,7 +71,6 @@ use {
         u64_align, utils,
         verify_accounts_hash_in_background::VerifyAccountsHashInBackground,
     },
-    ahash::AHashSet,
     blake3::traits::digest::Digest,
     crossbeam_channel::{unbounded, Receiver, Sender},
     dashmap::{DashMap, DashSet},
@@ -639,7 +638,7 @@ struct StorageSizeAndCount {
     /// number of accounts in the storage including both alive and dead accounts
     pub count: usize,
 }
-type StorageSizeAndCountMap = DashMap<AppendVecId, StorageSizeAndCount>;
+type StorageSizeAndCountMap = DashMap<AccountsFileId, StorageSizeAndCount>;
 
 impl GenerateIndexTimings {
     pub fn report(&self, startup_stats: &StartupStats) {
@@ -766,8 +765,8 @@ impl<'a> MultiThreadProgress<'a> {
 }
 
 /// An offset into the AccountsDb::storage vector
-pub type AtomicAppendVecId = AtomicU32;
-pub type AppendVecId = u32;
+pub type AtomicAccountsFileId = AtomicU32;
+pub type AccountsFileId = u32;
 
 type AccountSlots = HashMap<Pubkey, HashSet<Slot>>;
 type SlotOffsets = HashMap<Slot, HashSet<usize>>;
@@ -1007,7 +1006,7 @@ struct CleanKeyTimings {
 /// Persistent storage structure holding the accounts
 #[derive(Debug)]
 pub struct AccountStorageEntry {
-    pub(crate) id: AppendVecId,
+    pub(crate) id: AccountsFileId,
 
     pub(crate) slot: Slot,
 
@@ -1033,10 +1032,10 @@ pub struct AccountStorageEntry {
 }
 
 impl AccountStorageEntry {
-    pub fn new(path: &Path, slot: Slot, id: AppendVecId, file_size: u64) -> Self {
+    pub fn new(path: &Path, slot: Slot, id: AccountsFileId, file_size: u64) -> Self {
         let tail = AccountsFile::file_name(slot, id);
         let path = Path::new(path).join(tail);
-        let accounts = AccountsFile::AppendVec(AppendVec::new(&path, true, file_size as usize));
+        let accounts = AccountsFile::AppendVec(AppendVec::new(path, true, file_size as usize));
 
         Self {
             id,
@@ -1050,7 +1049,7 @@ impl AccountStorageEntry {
 
     pub fn new_existing(
         slot: Slot,
-        id: AppendVecId,
+        id: AccountsFileId,
         accounts: AccountsFile,
         num_accounts: usize,
     ) -> Self {
@@ -1117,7 +1116,7 @@ impl AccountStorageEntry {
         self.slot
     }
 
-    pub fn append_vec_id(&self) -> AppendVecId {
+    pub fn append_vec_id(&self) -> AccountsFileId {
         self.id
     }
 
@@ -1299,7 +1298,7 @@ pub struct AccountsDb {
     read_only_accounts_cache: ReadOnlyAccountsCache,
 
     /// distribute the accounts across storage lists
-    pub next_id: AtomicAppendVecId,
+    pub next_id: AtomicAccountsFileId,
 
     /// Set of shrinkable stores organized by map of slot to append_vec_id
     pub shrink_candidate_slots: Mutex<ShrinkCandidates>,
@@ -2351,7 +2350,7 @@ impl AccountsDb {
                 READ_ONLY_CACHE_MS_TO_SKIP_LRU_UPDATE,
             ),
             uncleaned_pubkeys: DashMap::new(),
-            next_id: AtomicAppendVecId::new(0),
+            next_id: AtomicAccountsFileId::new(0),
             shrink_candidate_slots: Mutex::new(ShrinkCandidates::default()),
             write_cache_limit_bytes: None,
             write_version: AtomicU64::new(0),
@@ -2519,9 +2518,12 @@ impl AccountsDb {
         self.base_working_path.clone()
     }
 
-    fn next_id(&self) -> AppendVecId {
+    fn next_id(&self) -> AccountsFileId {
         let next_id = self.next_id.fetch_add(1, Ordering::AcqRel);
-        assert!(next_id != AppendVecId::MAX, "We've run out of storage ids!");
+        assert!(
+            next_id != AccountsFileId::MAX,
+            "We've run out of storage ids!"
+        );
         next_id
     }
 
@@ -6391,9 +6393,9 @@ impl AccountsDb {
     /// This runs prior to the storages being put in AccountsDb.storage
     pub fn combine_multiple_slots_into_one_at_startup(
         path: &Path,
-        id: AppendVecId,
+        id: AccountsFileId,
         slot: Slot,
-        slot_stores: &HashMap<AppendVecId, Arc<AccountStorageEntry>>,
+        slot_stores: &HashMap<AccountsFileId, Arc<AccountStorageEntry>>,
     ) -> Arc<AccountStorageEntry> {
         let size = slot_stores.values().map(|storage| storage.capacity()).sum();
         let storage = AccountStorageEntry::new(path, slot, id, size);
@@ -7525,10 +7527,10 @@ impl AccountsDb {
             //Sonic: get remote accounts to excude their lamports from the hash calculation
             let historical_accounts = self.accounts_cache.remote_loader.get_historical_accounts();
             info!("calculate_accounts_hash_from_storages: slot:{slot}, kind: {kind:?}, historical_accounts: {historical_accounts:?}");
-            let mut remote_accounts: AHashSet<Pubkey> = AHashSet::new();
-            historical_accounts.iter().for_each(|(pubkey, _slot)| {
-                remote_accounts.insert(*pubkey);
-            });
+            let remote_accounts = historical_accounts
+                .iter()
+                .map(|(pubkey, _slot)| *pubkey)
+                .collect::<HashSet<_>>();
             info!("calculate_accounts_hash_from_storages: slot:{slot}, kind: {kind:?}, remote_accounts: {remote_accounts:?}");
 
             let accounts_hasher = AccountsHasher {
@@ -8722,7 +8724,7 @@ impl AccountsDb {
         &self,
         storage: &Arc<AccountStorageEntry>,
         slot: Slot,
-        store_id: AppendVecId,
+        store_id: AccountsFileId,
         rent_collector: &RentCollector,
         storage_info: &StorageSizeAndCountMap,
     ) -> SlotIndexGenerationInfo {
@@ -9693,7 +9695,7 @@ pub mod tests {
 
     impl CurrentAncientAppendVec {
         /// note this requires that 'slot_and_append_vec' is Some
-        fn append_vec_id(&self) -> AppendVecId {
+        fn append_vec_id(&self) -> AccountsFileId {
             self.append_vec().append_vec_id()
         }
     }
@@ -10866,7 +10868,7 @@ pub mod tests {
         write_version: StoredMetaWriteVersion,
         slot: Slot,
         pubkey: &Pubkey,
-        id: AppendVecId,
+        id: AccountsFileId,
         mark_alive: bool,
         account_data_size: Option<u64>,
         fill_percentage: u64,
@@ -10892,7 +10894,7 @@ pub mod tests {
         write_version: StoredMetaWriteVersion,
         slot: Slot,
         pubkey: &Pubkey,
-        id: AppendVecId,
+        id: AccountsFileId,
         mark_alive: bool,
         account_data_size: Option<u64>,
     ) -> Arc<AccountStorageEntry> {
@@ -12186,7 +12188,7 @@ pub mod tests {
         db.print_accounts_stats("pre");
 
         let slots: HashSet<Slot> = vec![1].into_iter().collect();
-        let purge_keys = vec![(key1, slots)];
+        let purge_keys = [(key1, slots)];
         let _ = db.purge_keys_exact(purge_keys.iter());
 
         let account2 = AccountSharedData::new(3, 0, &key);
@@ -13397,7 +13399,7 @@ pub mod tests {
             AccountSharedData::new(0, 0, AccountSharedData::default().owner());
 
         // set 'next' id to the max possible value
-        db.next_id.store(AppendVecId::MAX, Ordering::Release);
+        db.next_id.store(AccountsFileId::MAX, Ordering::Release);
         let slots = 3;
         let keys = (0..slots).map(|_| Pubkey::new_unique()).collect::<Vec<_>>();
         // write unique keys to successive slots
@@ -13424,7 +13426,7 @@ pub mod tests {
             AccountSharedData::new(0, 0, AccountSharedData::default().owner());
 
         // set 'next' id to the max possible value
-        db.next_id.store(AppendVecId::MAX, Ordering::Release);
+        db.next_id.store(AccountsFileId::MAX, Ordering::Release);
         let slots = 3;
         let keys = (0..slots).map(|_| Pubkey::new_unique()).collect::<Vec<_>>();
         // write unique keys to successive slots
@@ -13434,7 +13436,7 @@ pub mod tests {
             db.calculate_accounts_delta_hash(slot);
             db.add_root_and_flush_write_cache(slot);
             // reset next_id to what it was previously to cause us to re-use the same id
-            db.next_id.store(AppendVecId::MAX, Ordering::Release);
+            db.next_id.store(AccountsFileId::MAX, Ordering::Release);
         });
         let ancestors = Ancestors::default();
         keys.iter().for_each(|key| {
@@ -17320,7 +17322,7 @@ pub mod tests {
             .max()
             .unwrap_or(999);
         for (i, account_data_size) in account_data_sizes.iter().enumerate().take(num_slots) {
-            let id = starting_id + (i as AppendVecId);
+            let id = starting_id + (i as AccountsFileId);
             let pubkey1 = solana_sdk::pubkey::new_rand();
             let storage = sample_storage_with_entries_id_fill_percentage(
                 tf,
@@ -17369,7 +17371,7 @@ pub mod tests {
             .max()
             .unwrap_or(999);
         for i in 0..num_slots {
-            let id = starting_id + (i as AppendVecId);
+            let id = starting_id + (i as AccountsFileId);
             let pubkey1 = solana_sdk::pubkey::new_rand();
             let storage = sample_storage_with_entries_id(
                 tf,
