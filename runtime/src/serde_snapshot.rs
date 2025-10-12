@@ -23,6 +23,7 @@ use {
             AccountsFileId, AtomicAccountsFileId, BankHashStats, IndexGenerationInfo,
         },
         accounts_file::{AccountsFile, StorageAccess},
+        accounts_hash::{AccountsDeltaHash, AccountsHash},
         accounts_index::AccountSecondaryIndexes,
         accounts_update_notifier_interface::AccountsUpdateNotifier,
         ancestors::AncestorsForSerialization,
@@ -580,10 +581,13 @@ where
 pub fn serialize_bank_snapshot_into<W>(
     stream: &mut BufWriter<W>,
     bank_fields: BankFieldsToSerialize,
-    accounts_db: &AccountsDb,
+    bank_hash_stats: BankHashStats,
+    accounts_delta_hash: AccountsDeltaHash,
+    accounts_hash: AccountsHash,
     account_storage_entries: &[Vec<Arc<AccountStorageEntry>>],
     incremental_snapshot_persistence: Option<&BankIncrementalSnapshotPersistence>,
     epoch_accounts_hash: Option<EpochAccountsHash>,
+    write_version: StoredMetaWriteVersion,
 ) -> Result<(), Error>
 where
     W: Write,
@@ -595,10 +599,13 @@ where
     serialize_bank_snapshot_with(
         &mut serializer,
         bank_fields,
-        accounts_db,
+        bank_hash_stats,
+        accounts_delta_hash,
+        accounts_hash,
         account_storage_entries,
         incremental_snapshot_persistence,
         epoch_accounts_hash,
+        write_version,
     )
 }
 
@@ -606,10 +613,13 @@ where
 pub fn serialize_bank_snapshot_with<S>(
     serializer: S,
     bank_fields: BankFieldsToSerialize,
-    accounts_db: &AccountsDb,
+    bank_hash_stats: BankHashStats,
+    accounts_delta_hash: AccountsDeltaHash,
+    accounts_hash: AccountsHash,
     account_storage_entries: &[Vec<Arc<AccountStorageEntry>>],
     incremental_snapshot_persistence: Option<&BankIncrementalSnapshotPersistence>,
     epoch_accounts_hash: Option<EpochAccountsHash>,
+    write_version: StoredMetaWriteVersion,
 ) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
@@ -618,9 +628,12 @@ where
     let lamports_per_signature = bank_fields.fee_rate_governor.lamports_per_signature;
     let serializable_bank = SerializableVersionedBank::from(bank_fields);
     let serializable_accounts_db = SerializableAccountsDb::<'_> {
-        accounts_db,
         slot,
         account_storage_entries,
+        bank_hash_stats,
+        accounts_delta_hash,
+        accounts_hash,
+        write_version,
     };
 
     (
@@ -647,17 +660,22 @@ impl<'a> Serialize for SerializableBankAndStorage<'a> {
     {
         let slot = self.bank.slot();
         let fields = self.bank.get_fields_to_serialize();
+        let accounts_db = &self.bank.rc.accounts.accounts_db;
+        let bank_hash_stats = accounts_db.get_bank_hash_stats(slot).unwrap();
+        let accounts_delta_hash = accounts_db.get_accounts_delta_hash(slot).unwrap();
+        let accounts_hash = accounts_db.get_accounts_hash(slot).unwrap().0;
+        let write_version = accounts_db.write_version.load(Ordering::Acquire);
         let lamports_per_signature = fields.fee_rate_governor.lamports_per_signature;
         let bank_fields_to_serialize = (
             SerializableVersionedBank::from(fields),
             SerializableAccountsDb::<'_> {
-                accounts_db: &self.bank.rc.accounts.accounts_db,
                 slot,
                 account_storage_entries: self.snapshot_storages,
+                bank_hash_stats,
+                accounts_delta_hash,
+                accounts_hash,
+                write_version,
             },
-            // Additional fields, we manually store the lamps per signature here so that
-            // we can grab it on restart.
-            // TODO: if we do a snapshot version bump, consider moving this out.
             lamports_per_signature,
             None::<BankIncrementalSnapshotPersistence>,
             self.bank
@@ -682,12 +700,20 @@ impl<'a> Serialize for SerializableBankAndStorageNoExtra<'a> {
     {
         let slot = self.bank.slot();
         let fields = self.bank.get_fields_to_serialize();
+        let accounts_db = &self.bank.rc.accounts.accounts_db;
+        let bank_hash_stats = accounts_db.get_bank_hash_stats(slot).unwrap();
+        let accounts_delta_hash = accounts_db.get_accounts_delta_hash(slot).unwrap();
+        let accounts_hash = accounts_db.get_accounts_hash(slot).unwrap().0;
+        let write_version = accounts_db.write_version.load(Ordering::Acquire);
         (
             SerializableVersionedBank::from(fields),
             SerializableAccountsDb::<'_> {
-                accounts_db: &self.bank.rc.accounts.accounts_db,
                 slot,
                 account_storage_entries: self.snapshot_storages,
+                bank_hash_stats,
+                accounts_delta_hash,
+                accounts_hash,
+                write_version,
             },
         )
             .serialize(serializer)
@@ -709,9 +735,12 @@ impl<'a> From<SerializableBankAndStorageNoExtra<'a>> for SerializableBankAndStor
 }
 
 struct SerializableAccountsDb<'a> {
-    accounts_db: &'a AccountsDb,
     slot: Slot,
     account_storage_entries: &'a [Vec<Arc<AccountStorageEntry>>],
+    bank_hash_stats: BankHashStats,
+    accounts_delta_hash: AccountsDeltaHash,
+    accounts_hash: AccountsHash,
+    write_version: StoredMetaWriteVersion,
 }
 
 impl<'a> Serialize for SerializableAccountsDb<'a> {
@@ -719,9 +748,6 @@ impl<'a> Serialize for SerializableAccountsDb<'a> {
     where
         S: serde::ser::Serializer,
     {
-        // sample write version before serializing storage entries
-        let version = self.accounts_db.write_version.load(Ordering::Acquire);
-
         // (1st of 3 elements) write the list of account storage entry lists out as a map
         let entry_count = RefCell::<usize>::new(0);
         let entries = utils::serialize_iter_as_map(self.account_storage_entries.iter().map(|x| {
@@ -734,28 +760,10 @@ impl<'a> Serialize for SerializableAccountsDb<'a> {
                 ),
             )
         }));
-        let slot = self.slot;
-        let accounts_delta_hash = self
-            .accounts_db
-            .get_accounts_delta_hash(slot)
-            .map(Into::into)
-            .unwrap_or_else(|| panic!("Missing accounts delta hash entry for slot {slot}"));
-        // NOTE: This accounts hash is only needed when serializing a full snapshot.
-        // When serializing an incremental snapshot, there will not be a full accounts hash
-        // at `slot`.  In that case, use the default, because it doesn't actually get used.
-        let accounts_hash = self
-            .accounts_db
-            .get_accounts_hash(slot)
-            .map(|(accounts_hash, _)| accounts_hash.into())
-            .unwrap_or_default();
-        let stats = self
-            .accounts_db
-            .get_bank_hash_stats(slot)
-            .unwrap_or_else(|| panic!("Missing bank hash stats entry for slot {slot}"));
         let bank_hash_info = BankHashInfo {
-            accounts_delta_hash,
-            accounts_hash,
-            stats,
+            accounts_delta_hash: self.accounts_delta_hash.into(),
+            accounts_hash: self.accounts_hash.into(),
+            stats: self.bank_hash_stats.clone(),
         };
 
         let historical_roots = Vec::<Slot>::default();
@@ -764,8 +772,8 @@ impl<'a> Serialize for SerializableAccountsDb<'a> {
         let mut serialize_account_storage_timer = Measure::start("serialize_account_storage_ms");
         let result = (
             entries,
-            version,
-            slot,
+            self.write_version,
+            self.slot,
             bank_hash_info,
             historical_roots,
             historical_roots_with_hash,

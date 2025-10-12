@@ -6,8 +6,8 @@ use {
         SyscallAbort, SyscallGetClockSysvar, SyscallInvokeSignedRust, SyscallLog, SyscallMemcpy,
         SyscallMemset, SyscallSetReturnData,
     },
+    solana_compute_budget::compute_budget::ComputeBudget,
     solana_program_runtime::{
-        compute_budget::ComputeBudget,
         invoke_context::InvokeContext,
         loaded_programs::{
             BlockRelation, ForkGraph, ProgramCache, ProgramCacheEntry, ProgramRuntimeEnvironments,
@@ -33,7 +33,6 @@ use {
     solana_svm::{
         account_loader::{CheckedTransactionDetails, TransactionCheckResult},
         runtime_config::RuntimeConfig,
-        transaction_error_metrics::TransactionErrorMetrics,
         transaction_processing_callback::TransactionProcessingCallback,
         transaction_processor::{
             ExecutionRecordingConfig, TransactionBatchProcessor, TransactionProcessingConfig,
@@ -132,9 +131,10 @@ fn create_custom_environment<'a>() -> BuiltinProgram<InvokeContext<'a>> {
     BuiltinProgram::new_loader(vm_config, function_registry)
 }
 
-fn create_executable_environment(mock_bank: &mut MockBankCallback) -> ProgramCache<MockForkGraph> {
-    let mut program_cache = ProgramCache::<MockForkGraph>::new(0, 20);
-
+fn create_executable_environment(
+    mock_bank: &mut MockBankCallback,
+    program_cache: &mut ProgramCache<MockForkGraph>,
+) {
     program_cache.environments = ProgramRuntimeEnvironments {
         program_runtime_v1: Arc::new(create_custom_environment()),
         // We are not using program runtime v2
@@ -165,8 +165,6 @@ fn create_executable_environment(mock_bank: &mut MockBankCallback) -> ProgramCac
         .account_shared_data
         .borrow_mut()
         .insert(Clock::id(), account_data);
-
-    program_cache
 }
 
 fn load_program(name: String) -> Vec<u8> {
@@ -445,22 +443,23 @@ fn prepare_transactions(
 fn svm_integration() {
     let mut mock_bank = MockBankCallback::default();
     let (transactions, mut check_results) = prepare_transactions(&mut mock_bank);
-    let program_cache = create_executable_environment(&mut mock_bank);
-    let program_cache = Arc::new(RwLock::new(program_cache));
     let batch_processor = TransactionBatchProcessor::<MockForkGraph>::new(
         EXECUTION_SLOT,
         EXECUTION_EPOCH,
         EpochSchedule::default(),
         Arc::new(RuntimeConfig::default()),
-        program_cache.clone(),
-        HashSet::default(),
+        HashSet::new(),
+    );
+
+    create_executable_environment(
+        &mut mock_bank,
+        &mut batch_processor.program_cache.write().unwrap(),
     );
 
     // The sysvars must be put in the cache
     batch_processor.fill_missing_sysvar_cache_entries(&mock_bank);
     register_builtins(&mock_bank, &batch_processor);
 
-    let mut error_counter = TransactionErrorMetrics::default();
     let processing_config = TransactionProcessingConfig {
         recording_config: ExecutionRecordingConfig {
             enable_log_recording: true,
@@ -475,7 +474,6 @@ fn svm_integration() {
         &mock_bank,
         &transactions,
         check_results.as_mut_slice(),
-        &mut error_counter,
         &mut timings,
         &processing_config,
     );
