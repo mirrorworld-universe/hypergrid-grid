@@ -1,19 +1,18 @@
 use {
     crate::{
-        account_loader::{load_accounts, TransactionCheckResult},
+        account_loader::{
+            load_accounts, LoadedTransaction, TransactionCheckResult, TransactionLoadResult,
+        },
         account_overrides::AccountOverrides,
         runtime_config::RuntimeConfig,
         transaction_account_state_info::TransactionAccountStateInfo,
         transaction_error_metrics::TransactionErrorMetrics,
-    },
-    log::debug,
-    percentage::Percentage,
-    solana_accounts_db::{
-        accounts::{LoadedTransaction, TransactionLoadResult},
         transaction_results::{
             DurableNonceFee, TransactionExecutionDetails, TransactionExecutionResult,
         },
     },
+    log::debug,
+    percentage::Percentage,
     solana_measure::measure::Measure,
     solana_program_runtime::{
         compute_budget::ComputeBudget,
@@ -52,17 +51,11 @@ use {
         collections::{hash_map::Entry, HashMap},
         fmt::{Debug, Formatter},
         rc::Rc,
-        sync::{
-            atomic::{AtomicU64, Ordering},
-            Arc, RwLock,
-        },
+        sync::{atomic::Ordering, Arc, RwLock},
     },
 };
 // Sonic:
-use {
-    log::*, solana_accounts_db::accounts_db::AccountsDb,
-    solana_sdk::program_utils::limited_deserialize, std::collections::HashSet,
-};
+use {log::*, solana_sdk::program_utils::limited_deserialize, std::collections::HashSet};
 
 /// A list of log messages emitted during a transaction
 pub type TransactionLogMessages = Vec<String>;
@@ -96,6 +89,13 @@ pub trait TransactionProcessingCallback {
     }
 }
 
+// Sonic: decouple
+pub trait AccountsDb {
+    fn default_for_testing() -> Self;
+    fn is_account_in_index(&self, addr: Pubkey) -> bool;
+    fn remote_loader(&self) -> Arc<sonic_hypergrid::remote_loader::RemoteAccountLoader>;
+}
+
 enum ProgramAccountLoadResult {
     AccountNotFound,
     InvalidAccountData(ProgramRuntimeEnvironment),
@@ -105,7 +105,7 @@ enum ProgramAccountLoadResult {
 }
 
 #[derive(AbiExample)]
-pub struct TransactionBatchProcessor<FG: ForkGraph> {
+pub struct TransactionBatchProcessor<FG: ForkGraph, A> {
     /// Bank slot (i.e. block)
     slot: Slot,
 
@@ -128,11 +128,11 @@ pub struct TransactionBatchProcessor<FG: ForkGraph> {
     pub loaded_programs_cache: Arc<RwLock<LoadedPrograms<FG>>>,
 
     //Sonic: TODO: add to debug
-    pub accounts_db: Arc<AccountsDb>,
+    pub accounts_db: Arc<A>,
     pub genesis_accounts_pubkeys: Arc<HashSet<Pubkey>>,
 }
 
-impl<FG: ForkGraph> Debug for TransactionBatchProcessor<FG> {
+impl<FG: ForkGraph, A> Debug for TransactionBatchProcessor<FG, A> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TransactionBatchProcessor")
             .field("slot", &self.slot)
@@ -150,7 +150,7 @@ impl<FG: ForkGraph> Debug for TransactionBatchProcessor<FG> {
     }
 }
 
-impl<FG: ForkGraph> Default for TransactionBatchProcessor<FG> {
+impl<FG: ForkGraph, A: AccountsDb> Default for TransactionBatchProcessor<FG, A> {
     fn default() -> Self {
         Self {
             slot: Slot::default(),
@@ -165,13 +165,13 @@ impl<FG: ForkGraph> Default for TransactionBatchProcessor<FG> {
                 Epoch::default(),
             ))),
             // Sonic: lets reinit it, by default
-            accounts_db: Arc::new(AccountsDb::default_for_tests()),
+            accounts_db: Arc::new(A::default_for_testing()),
             genesis_accounts_pubkeys: Default::default(),
         }
     }
 }
 
-impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
+impl<FG: ForkGraph, A: AccountsDb> TransactionBatchProcessor<FG, A> {
     pub fn new(
         slot: Slot,
         epoch: Epoch,
@@ -180,7 +180,7 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
         runtime_config: Arc<RuntimeConfig>,
         loaded_programs_cache: Arc<RwLock<LoadedPrograms<FG>>>,
         // Sonic:
-        accounts_db: Arc<AccountsDb>,
+        accounts_db: Arc<A>,
         genesis_accounts_pubkeys: Arc<HashSet<Pubkey>>,
     ) -> Self {
         Self {
@@ -439,7 +439,7 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
 
             if let Some((key, count)) = program_to_load {
                 // Load, verify and compile one program.
-                let program = self.load_program(callback, &key, false, None);
+                let program = self.load_program(callback, &key, false, self.epoch);
                 program.tx_usage_counter.store(count, Ordering::Relaxed);
                 program_to_store = Some((key, program));
             } else if missing_programs.is_empty() {
@@ -537,11 +537,7 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
         );
 
         //Sonic: get remote accounts.
-        let remote_accounts = self
-            .accounts_db
-            .accounts_cache
-            .remote_loader
-            .get_account_list();
+        let remote_accounts = self.accounts_db.remote_loader().get_account_list();
         debug!(
             "Sonic Bank.execute_loaded_transaction(): remote_accounts: {:?}",
             remote_accounts
@@ -702,7 +698,7 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
                 addresses,
             } => addresses
                 .iter()
-                .any(|addr| self.accounts_db.account_in_indexes(addr)),
+                .any(|addr| self.accounts_db.is_account_in_index(*addr)),
             ProgramInstruction::DeactivateRemoteAccounts { .. } => false,
             ProgramInstruction::InitializeDataAccount => {
                 let signers = msg.get_ix_signers(0).collect::<Vec<_>>();
@@ -723,7 +719,6 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
         let msg = tx.message();
         let account_keys = msg.account_keys();
         // info!("Bank.migrate_remote_accounts():{:?}", msg.instructions());
-        let accounts_cache = &self.accounts_db.accounts_cache;
 
         msg.instructions()
             .iter()
@@ -744,17 +739,26 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
                 info!("Bank.check_remote_accounts(): {ix:?}");
                 match ix {
                     ProgramInstruction::MigrateSourceAccounts { addresses, node_id } => {
-                        accounts_cache.load_accounts_from_remote(
-                            self.slot,
-                            addresses,
-                            Some(node_id),
+                        let (remote_loader, slot) = (self.accounts_db.remote_loader(), self.slot);
+                        info!(
+                            "Sonic AccountsCache::load_accounts_from_remote, {:?}, {:?}",
+                            addresses, self.slot
                         );
+                        std::thread::spawn(move || {
+                            remote_loader.load_accounts(slot, addresses, Some(node_id))
+                        });
                     }
                     ProgramInstruction::MigrateRemoteAccounts { addresses } => {
-                        accounts_cache.load_accounts_from_remote(self.slot, addresses, None);
+                        let (remote_loader, slot) = (self.accounts_db.remote_loader(), self.slot);
+                        std::thread::spawn(move || {
+                            remote_loader.load_accounts(slot, addresses, None)
+                        });
                     }
                     ProgramInstruction::DeactivateRemoteAccounts { addresses } => {
-                        accounts_cache.deactivate_remote_accounts(self.slot, addresses);
+                        let (remote_loader, slot) = (self.accounts_db.remote_loader(), self.slot);
+                        std::thread::spawn(move || {
+                            remote_loader.deactivate_accounts(slot, addresses)
+                        });
                     }
                     ProgramInstruction::InitializeDataAccount => {}
                 }
@@ -804,14 +808,9 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
         callbacks: &CB,
         pubkey: &Pubkey,
         reload: bool,
-        recompile: Option<Arc<LoadedProgram>>,
+        effective_epoch: Epoch,
     ) -> Arc<LoadedProgram> {
         let loaded_programs_cache = self.loaded_programs_cache.read().unwrap();
-        let effective_epoch = if recompile.is_some() {
-            loaded_programs_cache.latest_root_epoch.saturating_add(1)
-        } else {
-            self.epoch
-        };
         let environments = loaded_programs_cache.get_environments_for_epoch(effective_epoch);
         let mut load_program_metrics = LoadProgramMetrics {
             program_id: pubkey.to_string(),
@@ -900,14 +899,20 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
 
         let mut timings = ExecuteDetailsTimings::default();
         load_program_metrics.submit_datapoint(&mut timings);
-        if let Some(recompile) = recompile {
+        if !Arc::ptr_eq(
+            &environments.program_runtime_v1,
+            &loaded_programs_cache.environments.program_runtime_v1,
+        ) || !Arc::ptr_eq(
+            &environments.program_runtime_v2,
+            &loaded_programs_cache.environments.program_runtime_v2,
+        ) {
+            // There can be two entries per program when the environment changes.
+            // One for the old environment before the epoch boundary and one for the new environment after the epoch boundary.
+            // These two entries have the same deployment slot, so they must differ in their effective slot instead.
+            // This is done by setting the effective slot of the entry for the new environment to the epoch boundary.
             loaded_program.effective_slot = loaded_program
                 .effective_slot
                 .max(self.epoch_schedule.get_first_slot_in_epoch(effective_epoch));
-            loaded_program.tx_usage_counter =
-                AtomicU64::new(recompile.tx_usage_counter.load(Ordering::Relaxed));
-            loaded_program.ix_usage_counter =
-                AtomicU64::new(recompile.ix_usage_counter.load(Ordering::Relaxed));
         }
         loaded_program.update_access_slot(self.slot);
         Arc::new(loaded_program)

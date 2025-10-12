@@ -71,7 +71,7 @@ use {
     },
     serde::Serialize,
     solana_accounts_db::{
-        accounts::{AccountAddressFilter, Accounts, PubkeyAccountSlot, TransactionLoadResult},
+        accounts::{AccountAddressFilter, Accounts, PubkeyAccountSlot},
         accounts_db::{
             AccountShrinkThreshold, AccountStorageEntry, AccountsDb, AccountsDbConfig,
             CalcAccountsHashDataSource, VerifyAccountsHashAndLamportsConfig,
@@ -89,9 +89,6 @@ use {
         sorted_storages::SortedStorages,
         stake_rewards::StakeReward,
         storable_accounts::StorableAccounts,
-        transaction_results::{
-            TransactionExecutionDetails, TransactionExecutionResult, TransactionResults,
-        },
     },
     solana_bpf_loader_program::syscalls::create_program_runtime_environment_v1,
     solana_cost_model::cost_tracker::CostTracker,
@@ -120,7 +117,10 @@ use {
         epoch_info::EpochInfo,
         epoch_schedule::EpochSchedule,
         feature,
-        feature_set::{self, include_loaded_accounts_data_size_in_fee_calculation, FeatureSet},
+        feature_set::{
+            self, include_loaded_accounts_data_size_in_fee_calculation,
+            remove_rounding_in_fee_calculation, FeatureSet,
+        },
         fee::FeeStructure,
         fee_calculator::{FeeCalculator, FeeRateGovernor},
         genesis_config::{ClusterType, GenesisConfig},
@@ -160,12 +160,15 @@ use {
         self, InflationPointCalculationEvent, PointValue, StakeStateV2,
     },
     solana_svm::{
-        account_loader::TransactionCheckResult,
+        account_loader::{TransactionCheckResult, TransactionLoadResult},
         account_overrides::AccountOverrides,
         runtime_config::RuntimeConfig,
         transaction_error_metrics::TransactionErrorMetrics,
         transaction_processor::{
             TransactionBatchProcessor, TransactionLogMessages, TransactionProcessingCallback,
+        },
+        transaction_results::{
+            TransactionExecutionDetails, TransactionExecutionResult, TransactionResults,
         },
     },
     solana_system_program::{get_system_account_kind, SystemAccountKind},
@@ -806,7 +809,7 @@ pub struct Bank {
 
     epoch_reward_status: EpochRewardStatus,
 
-    transaction_processor: TransactionBatchProcessor<BankForks>,
+    transaction_processor: TransactionBatchProcessor<BankForks, AccountsDb>,
 }
 
 struct VoteWithStakeDelegations {
@@ -1376,8 +1379,15 @@ impl Bank {
                 if let Some((key, program_to_recompile)) =
                     loaded_programs_cache.programs_to_recompile.pop()
                 {
+                    let effective_epoch = loaded_programs_cache.latest_root_epoch.saturating_add(1);
                     drop(loaded_programs_cache);
-                    let recompiled = new.load_program(&key, false, Some(program_to_recompile));
+                    let recompiled = new.load_program(&key, false, effective_epoch);
+                    recompiled
+                        .tx_usage_counter
+                        .fetch_add(program_to_recompile.tx_usage_counter.load(Relaxed), Relaxed);
+                    recompiled
+                        .ix_usage_counter
+                        .fetch_add(program_to_recompile.ix_usage_counter.load(Relaxed), Relaxed);
                     let mut loaded_programs_cache = new.loaded_programs_cache.write().unwrap();
                     loaded_programs_cache.assign_program(key, recompiled);
                 }
@@ -4045,6 +4055,8 @@ impl Bank {
                 .into(),
             self.feature_set
                 .is_active(&include_loaded_accounts_data_size_in_fee_calculation::id()),
+            self.feature_set
+                .is_active(&remove_rounding_in_fee_calculation::id()),
         )
     }
 
@@ -7525,10 +7537,10 @@ impl Bank {
         &self,
         pubkey: &Pubkey,
         reload: bool,
-        recompile: Option<Arc<LoadedProgram>>,
+        effective_epoch: Epoch,
     ) -> Arc<LoadedProgram> {
         self.transaction_processor
-            .load_program(self, pubkey, reload, recompile)
+            .load_program(self, pubkey, reload, effective_epoch)
     }
 }
 

@@ -57,6 +57,7 @@ solana-program-runtime = { workspace = true }
 solana-rayon-threadlimit = { workspace = true }
 solana-sdk = { workspace = true }
 solana-stake-program = { workspace = true }
+solana-svm = { workspace = true }
 solana-system-program = { workspace = true }
 solana-vote-program = { workspace = true }
 static_assertions = { workspace = true }
@@ -65,9 +66,6 @@ strum_macros = { workspace = true }
 tar = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
-
-#Sonic: add tokio to use runtime handles for remote account loader to spawn blocking tasks
-tokio = { workspace = true, features = ["rt"] }
 
 [lib]
 crate-type = ["lib"]

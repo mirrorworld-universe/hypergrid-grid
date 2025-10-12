@@ -15,10 +15,6 @@ use {
     solana_account_decoder::parse_bpf_loader::{
         parse_bpf_upgradeable_loader, BpfUpgradeableLoaderAccountType,
     },
-    solana_accounts_db::transaction_results::{
-        DurableNonceFee, InnerInstruction, TransactionExecutionDetails, TransactionExecutionResult,
-        TransactionResults,
-    },
     solana_ledger::token_balances::collect_token_balances,
     solana_program_runtime::{
         compute_budget::ComputeBudget,
@@ -51,6 +47,10 @@ use {
         system_instruction::{self, MAX_PERMITTED_DATA_LENGTH},
         sysvar::{self, clock},
         transaction::VersionedTransaction,
+    },
+    solana_svm::transaction_results::{
+        DurableNonceFee, InnerInstruction, TransactionExecutionDetails, TransactionExecutionResult,
+        TransactionResults,
     },
     solana_transaction_status::{
         map_inner_instructions, ConfirmedTransactionWithStatusMeta, TransactionStatusMeta,
@@ -1356,7 +1356,7 @@ fn assert_instruction_count() {
     #[cfg(feature = "sbf_c")]
     {
         programs.extend_from_slice(&[
-            ("alloc", 11502),
+            ("alloc", 14575),
             ("sbf_to_sbf", 313),
             ("multiple_static", 208),
             ("noop", 5),
@@ -3713,6 +3713,7 @@ fn test_program_fees() {
             .unwrap_or_default()
             .into(),
         false,
+        true,
     );
     bank_client
         .send_and_confirm_message(&[&mint_keypair], message)
@@ -3736,6 +3737,7 @@ fn test_program_fees() {
             .unwrap_or_default()
             .into(),
         false,
+        true,
     );
     assert!(expected_normal_fee < expected_prioritized_fee);
 

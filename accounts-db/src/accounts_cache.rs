@@ -1,7 +1,6 @@
 use {
     crate::{accounts_db::AccountsDb, accounts_hash::AccountHash},
     dashmap::DashMap,
-    log::info,
     seqlock::SeqLock,
     solana_sdk::{
         account::{AccountSharedData, ReadableAccount},
@@ -246,34 +245,6 @@ impl AccountsCache {
     //Sonic: check if account exists in remote
     pub fn has_account_from_remote(&self, pubkey: &Pubkey) -> bool {
         self.remote_loader.has_account(pubkey)
-    }
-
-    //Sonic: load accounts from remote
-    pub fn load_accounts_from_remote(
-        &self,
-        slot: Slot,
-        pubkeys: Vec<Pubkey>,
-        source: Option<Pubkey>,
-    ) {
-        info!(
-            "Sonic AccountsCache::load_accounts_from_remote, {:?}, {:?}",
-            pubkeys, slot
-        );
-
-        let remote_loader = Arc::clone(&self.remote_loader);
-        tokio::runtime::Handle::current()
-            .spawn_blocking(move || remote_loader.load_accounts(slot, pubkeys, source));
-    }
-
-    //Sonic: load accounts from remote
-    pub fn deactivate_remote_accounts(&self, slot: Slot, pubkeys: Vec<Pubkey>) {
-        info!(
-            "Sonic AccountsCache::deactivate_remote_accounts, {:?}",
-            pubkeys
-        );
-        let remote_loader = Arc::clone(&self.remote_loader);
-        tokio::runtime::Handle::current()
-            .spawn_blocking(move || remote_loader.deactivate_accounts(slot, pubkeys));
     }
 
     pub fn remove_slot(&self, slot: Slot) -> Option<SlotCache> {
