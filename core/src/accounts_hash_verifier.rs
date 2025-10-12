@@ -24,6 +24,7 @@ use {
         hash::Hash,
     },
     std::{
+        io::{Error as IoError, Result as IoResult},
         sync::{
             atomic::{AtomicBool, Ordering},
             Arc,
@@ -71,12 +72,17 @@ impl AccountsHashVerifier {
                     info!("handling accounts package: {accounts_package:?}");
                     let enqueued_time = accounts_package.enqueued.elapsed();
 
-                    let (_, handling_time_us) = measure_us!(Self::process_accounts_package(
+                    let (result, handling_time_us) = measure_us!(Self::process_accounts_package(
                         accounts_package,
                         snapshot_package_sender.as_ref(),
                         &snapshot_config,
                         &exit,
                     ));
+                    if let Err(err) = result {
+                        error!("Stopping AccountsHashVerifier! Fatal error while processing accounts package: {err}");
+                        exit.store(true, Ordering::Relaxed);
+                        break;
+                    }
 
                     datapoint_info!(
                         "accounts_hash_verifier",
@@ -208,9 +214,9 @@ impl AccountsHashVerifier {
         snapshot_package_sender: Option<&Sender<SnapshotPackage>>,
         snapshot_config: &SnapshotConfig,
         exit: &AtomicBool,
-    ) {
+    ) -> IoResult<()> {
         let accounts_hash =
-            Self::calculate_and_verify_accounts_hash(&accounts_package, snapshot_config);
+            Self::calculate_and_verify_accounts_hash(&accounts_package, snapshot_config)?;
 
         Self::save_epoch_accounts_hash(&accounts_package, accounts_hash);
 
@@ -221,13 +227,15 @@ impl AccountsHashVerifier {
             accounts_hash,
             exit,
         );
+
+        Ok(())
     }
 
     /// returns calculated accounts hash
     fn calculate_and_verify_accounts_hash(
         accounts_package: &AccountsPackage,
         snapshot_config: &SnapshotConfig,
-    ) -> AccountsHashKind {
+    ) -> IoResult<AccountsHashKind> {
         info!(
             "calculate_and_verify_accounts_hash: {:?}, {:?}, {:?}",
             accounts_package.slot, accounts_package.block_height, accounts_package.package_kind
@@ -308,6 +316,23 @@ impl AccountsHashVerifier {
                 &accounts_hash_for_reserialize,
                 bank_incremental_snapshot_persistence.as_ref(),
             );
+
+            // now write the full snapshot slot file after reserializing so this bank snapshot is loadable
+            let full_snapshot_archive_slot = match accounts_package.package_kind {
+                AccountsPackageKind::Snapshot(SnapshotKind::IncrementalSnapshot(base_slot)) => {
+                    base_slot
+                }
+                _ => accounts_package.slot,
+            };
+            snapshot_utils::write_full_snapshot_slot_file(
+                &snapshot_info.bank_snapshot_dir,
+                full_snapshot_archive_slot,
+            )
+            .map_err(|err| {
+                IoError::other(format!(
+                    "failed to calculate accounts hash for {accounts_package:?}: {err}"
+                ))
+            })?;
         }
 
         if accounts_package.package_kind
@@ -345,7 +370,7 @@ impl AccountsHashVerifier {
             );
         }
 
-        accounts_hash_kind
+        Ok(accounts_hash_kind)
     }
 
     fn _calculate_full_accounts_hash(

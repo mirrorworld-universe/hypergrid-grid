@@ -18,6 +18,8 @@
 //! tracks the number of commits to the entire data store. So the latest
 //! commit for each slot entry would be indexed.
 
+mod geyser_plugin_utils;
+
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
 use {
@@ -788,6 +790,8 @@ pub enum LoadHint {
     // account loading, while maintaining the determinism of account loading and resultant
     // transaction execution thereof.
     FixedMaxRoot,
+    /// same as `FixedMaxRoot`, except do not populate the read cache on load
+    FixedMaxRootDoNotPopulateReadCache,
     // Caller can't hint the above safety assumption. Generally RPC and miscellaneous
     // other call-site falls into this category. The likelihood of slower path is slightly
     // increased as well.
@@ -802,8 +806,6 @@ pub enum LoadedAccountAccessor<'a> {
     // None value in Cached variant means the cache was flushed
     Cached(Option<Cow<'a, CachedAccount>>),
 }
-
-mod geyser_plugin_utils;
 
 impl<'a> LoadedAccountAccessor<'a> {
     fn check_and_get_loaded_account(&mut self) -> LoadedAccount {
@@ -2957,8 +2959,8 @@ impl AccountsDb {
                             dirty_ancient_stores.fetch_add(1, Ordering::Relaxed);
                         }
                         oldest_dirty_slot = oldest_dirty_slot.min(*slot);
-                        store.accounts.account_iter().for_each(|account| {
-                            pubkeys.insert(*account.pubkey());
+                        store.accounts.scan_pubkeys(|k| {
+                            pubkeys.insert(*k);
                         });
                     });
                     oldest_dirty_slot
@@ -5187,7 +5189,7 @@ impl AccountsDb {
                     // so retry. This works because in accounts cache flush, an account is written to
                     // storage *before* it is removed from the cache
                     match load_hint {
-                        LoadHint::FixedMaxRoot => {
+                        LoadHint::FixedMaxRootDoNotPopulateReadCache | LoadHint::FixedMaxRoot => {
                             // it's impossible for this to fail for transaction loads from
                             // replaying/banking more than once.
                             // This is because:
@@ -5207,7 +5209,7 @@ impl AccountsDb {
                 }
                 LoadedAccountAccessor::Stored(None) => {
                     match load_hint {
-                        LoadHint::FixedMaxRoot => {
+                        LoadHint::FixedMaxRootDoNotPopulateReadCache | LoadHint::FixedMaxRoot => {
                             // When running replay on the validator, or banking stage on the leader,
                             // it should be very rare that the storage entry doesn't exist if the
                             // entry in the accounts index is the latest version of this account.
@@ -5409,14 +5411,14 @@ impl AccountsDb {
             max_root,
             load_hint,
         )?;
+        let in_write_cache = matches!(account_accessor, LoadedAccountAccessor::Cached(_));
         let loaded_account = account_accessor.check_and_get_loaded_account();
-        let is_cached = loaded_account.is_cached();
         let account = loaded_account.take_account();
         if matches!(load_zero_lamports, LoadZeroLamports::None) && account.is_zero_lamport() {
             return None;
         }
 
-        if !is_cached {
+        if !in_write_cache && load_hint != LoadHint::FixedMaxRootDoNotPopulateReadCache {
             /*
             We show this store into the read-only cache for account 'A' and future loads of 'A' from the read-only cache are
             safe/reflect 'A''s latest state on this fork.
@@ -6386,49 +6388,6 @@ impl AccountsDb {
         self.flush_slot_cache_with_clean(slot, None::<&mut fn(&_, &_) -> bool>, None)
     }
 
-    /// 1.13 and some 1.14 could produce legal snapshots with more than 1 append vec per slot.
-    /// This is now illegal at runtime in the validator.
-    /// However, there is a clear path to be able to support this.
-    /// So, combine all accounts from 'slot_stores' into a new storage and return it.
-    /// This runs prior to the storages being put in AccountsDb.storage
-    pub fn combine_multiple_slots_into_one_at_startup(
-        path: &Path,
-        id: AccountsFileId,
-        slot: Slot,
-        slot_stores: &HashMap<AccountsFileId, Arc<AccountStorageEntry>>,
-    ) -> Arc<AccountStorageEntry> {
-        let size = slot_stores.values().map(|storage| storage.capacity()).sum();
-        let storage = AccountStorageEntry::new(path, slot, id, size);
-
-        // get unique accounts, most recent version by write_version
-        let mut accum = HashMap::<Pubkey, StoredAccountMeta<'_>>::default();
-        slot_stores.iter().for_each(|(_id, store)| {
-            store.accounts.account_iter().for_each(|loaded_account| {
-                match accum.entry(*loaded_account.pubkey()) {
-                    hash_map::Entry::Occupied(mut occupied_entry) => {
-                        if loaded_account.write_version() > occupied_entry.get().write_version() {
-                            occupied_entry.insert(loaded_account);
-                        }
-                    }
-                    hash_map::Entry::Vacant(vacant_entry) => {
-                        vacant_entry.insert(loaded_account);
-                    }
-                }
-            });
-        });
-
-        // store all unique accounts into new storage
-        let accounts = accum.values().collect::<Vec<_>>();
-        let to_store = (slot, &accounts[..]);
-        let storable =
-            StorableAccountsWithHashesAndWriteVersions::<'_, '_, _, _, &AccountHash>::new(
-                &to_store,
-            );
-        storage.accounts.append_accounts(&storable, 0);
-
-        Arc::new(storage)
-    }
-
     /// `should_flush_f` is an optional closure that determines whether a given
     /// account should be flushed. Passing `None` will by default flush all
     /// accounts
@@ -6538,10 +6497,18 @@ impl AccountsDb {
     ) -> Vec<AccountInfo> {
         let mut calc_stored_meta_time = Measure::start("calc_stored_meta");
         let slot = accounts.target_slot();
-        (0..accounts.len()).for_each(|index| {
-            let pubkey = accounts.pubkey(index);
-            self.read_only_accounts_cache.remove(*pubkey, slot);
-        });
+        if self
+            .read_only_accounts_cache
+            .can_slot_be_in_cache(accounts.target_slot())
+        {
+            (0..accounts.len()).for_each(|index| {
+                let pubkey = accounts.pubkey(index);
+                // based on the patterns of how a validator writes accounts, it is almost always the case that there is no read only cache entry
+                // for this pubkey and slot. So, we can give that hint to the `remove` for performance.
+                self.read_only_accounts_cache
+                    .remove_assume_not_present(*pubkey, slot);
+            });
+        }
         calc_stored_meta_time.stop();
         self.stats
             .calc_stored_meta
@@ -9593,7 +9560,6 @@ pub mod tests {
             ancient_append_vecs,
             append_vec::{test_utils::TempFile, AppendVecStoredAccountMeta},
             cache_hash_data::CacheHashDataFile,
-            inline_spl_token,
         },
         assert_matches::assert_matches,
         itertools::Itertools,
@@ -10188,33 +10154,6 @@ pub mod tests {
                 "bins: {bins}, start_bin_index: {start_bin_index}"
             );
         }
-    }
-
-    #[test]
-    fn test_combine_multiple_slots_into_one_at_startup() {
-        solana_logger::setup();
-        let (db, slot1) = create_db_with_storages_and_index(false, 2, None);
-        let slot2 = slot1 + 1;
-
-        let initial_accounts = get_all_accounts(&db, slot1..(slot2 + 1));
-
-        let tf = TempDir::new().unwrap();
-        let stores = db
-            .storage
-            .all_slots()
-            .into_iter()
-            .map(|slot| {
-                let storage = db.storage.get_slot_storage_entry(slot).unwrap();
-                (storage.append_vec_id(), storage)
-            })
-            .collect::<HashMap<_, _>>();
-        let new_storage =
-            AccountsDb::combine_multiple_slots_into_one_at_startup(tf.path(), 1000, slot1, &stores);
-
-        compare_all_accounts(
-            &initial_accounts,
-            &get_all_accounts_from_storages(std::iter::once(&new_storage)),
-        );
     }
 
     #[test]
@@ -11740,14 +11679,15 @@ pub mod tests {
 
         // Set up account to be added to secondary index
         let mint_key = Pubkey::new_unique();
-        let mut account_data_with_mint = vec![0; inline_spl_token::Account::get_packed_len()];
+        let mut account_data_with_mint =
+            vec![0; solana_inline_spl::token::Account::get_packed_len()];
         account_data_with_mint[..PUBKEY_BYTES].clone_from_slice(&(mint_key.to_bytes()));
 
         let mut normal_account = AccountSharedData::new(1, 0, AccountSharedData::default().owner());
-        normal_account.set_owner(inline_spl_token::id());
+        normal_account.set_owner(solana_inline_spl::token::id());
         normal_account.set_data(account_data_with_mint.clone());
         let mut zero_account = AccountSharedData::new(0, 0, AccountSharedData::default().owner());
-        zero_account.set_owner(inline_spl_token::id());
+        zero_account.set_owner(solana_inline_spl::token::id());
         zero_account.set_data(account_data_with_mint);
 
         //store an account
@@ -16807,11 +16747,19 @@ pub mod tests {
     ) -> Vec<(Pubkey, AccountSharedData)> {
         storages
             .flat_map(|storage| {
-                storage
+                let vec = storage
                     .accounts
                     .account_iter()
                     .map(|account| (*account.pubkey(), account.to_account_shared_data()))
-                    .collect::<Vec<_>>()
+                    .collect::<Vec<_>>();
+                // make sure scan_pubkeys results match
+                // Note that we assume traversals are both in the same order, but this doesn't have to be true.
+                let mut compare = Vec::default();
+                storage.accounts.scan_pubkeys(|k| {
+                    compare.push(*k);
+                });
+                assert_eq!(compare, vec.iter().map(|(k, _)| *k).collect::<Vec<_>>());
+                vec
             })
             .collect::<Vec<_>>()
     }
