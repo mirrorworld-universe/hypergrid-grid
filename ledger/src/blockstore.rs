@@ -31,10 +31,7 @@ use {
     itertools::Itertools,
     log::*,
     rand::Rng,
-    rayon::{
-        iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator},
-        ThreadPool,
-    },
+    rayon::iter::{IntoParallelIterator, ParallelIterator},
     rocksdb::{DBRawIterator, LiveFile},
     solana_accounts_db::hardened_unpack::{
         unpack_genesis_archive, MAX_GENESIS_ARCHIVE_UNPACKED_SIZE,
@@ -93,16 +90,6 @@ pub use {
     blockstore_purge::PurgeType,
     rocksdb::properties as RocksProperties,
 };
-
-// get_max_thread_count to match number of threads in the old code.
-// see: https://github.com/solana-labs/solana/pull/24853
-lazy_static! {
-    static ref PAR_THREAD_POOL_ALL_CPUS: ThreadPool = rayon::ThreadPoolBuilder::new()
-        .num_threads(num_cpus::get())
-        .thread_name(|i| format!("solBstoreAll{i:02}"))
-        .build()
-        .unwrap();
-}
 
 pub const MAX_REPLAY_WAKE_UP_SIGNALS: usize = 1;
 pub const MAX_COMPLETED_SLOTS_IN_CHANNEL: usize = 100_000;
@@ -3283,27 +3270,6 @@ impl Blockstore {
         self.get_slot_entries_in_block(slot, vec![(start_index, end_index)], slot_meta)
     }
 
-    fn get_any_valid_slot_entries(&self, slot: Slot, start_index: u64) -> Vec<Entry> {
-        let (completed_ranges, slot_meta) = self
-            .get_completed_ranges(slot, start_index)
-            .unwrap_or_default();
-        if completed_ranges.is_empty() {
-            return vec![];
-        }
-        let slot_meta = slot_meta.unwrap();
-
-        let entries: Vec<Vec<Entry>> = PAR_THREAD_POOL_ALL_CPUS.install(|| {
-            completed_ranges
-                .par_iter()
-                .map(|(start_index, end_index)| {
-                    self.get_entries_in_data_block(slot, *start_index, *end_index, Some(&slot_meta))
-                        .unwrap_or_default()
-                })
-                .collect()
-        });
-        entries.into_iter().flatten().collect()
-    }
-
     /// Returns a mapping from each elements of `slots` to a list of the
     /// element's children slots.
     pub fn get_slots_since(&self, slots: &[Slot]) -> Result<HashMap<Slot, Vec<Slot>>> {
@@ -4692,12 +4658,13 @@ pub fn make_many_slot_shreds(
 pub fn make_chaining_slot_entries(
     chain: &[u64],
     entries_per_slot: u64,
+    first_parent: u64,
 ) -> Vec<(Vec<Shred>, Vec<Entry>)> {
     let mut slots_shreds_and_entries = vec![];
     for (i, slot) in chain.iter().enumerate() {
         let parent_slot = {
             if *slot == 0 || i == 0 {
-                0
+                first_parent
             } else {
                 chain[i - 1]
             }
@@ -5643,7 +5610,7 @@ pub mod tests {
 
         let entries_per_slot = 10;
         let slots = [2, 5, 10];
-        let mut all_shreds = make_chaining_slot_entries(&slots[..], entries_per_slot);
+        let mut all_shreds = make_chaining_slot_entries(&slots[..], entries_per_slot, 0);
 
         // Get the shreds for slot 10, chaining to slot 5
         let (mut orphan_child, _) = all_shreds.remove(2);
@@ -5688,7 +5655,7 @@ pub mod tests {
 
         let entries_per_slot = 10;
         let mut slots = vec![2, 5, 10];
-        let mut all_shreds = make_chaining_slot_entries(&slots[..], entries_per_slot);
+        let mut all_shreds = make_chaining_slot_entries(&slots[..], entries_per_slot, 0);
         let disconnected_slot = 4;
 
         let (shreds0, _) = all_shreds.remove(0);
@@ -7462,7 +7429,7 @@ pub mod tests {
         let blockstore = Blockstore::open(ledger_path.path()).unwrap();
         let shreds_per_slot = 10;
         let slots = vec![2, 4, 8, 12];
-        let all_shreds = make_chaining_slot_entries(&slots, shreds_per_slot);
+        let all_shreds = make_chaining_slot_entries(&slots, shreds_per_slot, 0);
         let slot_8_shreds = all_shreds[2].0.clone();
         for (slot_shreds, _) in all_shreds {
             blockstore.insert_shreds(slot_shreds, None, false).unwrap();
@@ -9997,7 +9964,7 @@ pub mod tests {
         let slots = vec![2, unconfirmed_slot, unconfirmed_child_slot];
 
         // Insert into slot 9, mark it as dead
-        let shreds: Vec<_> = make_chaining_slot_entries(&slots, 1)
+        let shreds: Vec<_> = make_chaining_slot_entries(&slots, 1, 0)
             .into_iter()
             .flat_map(|x| x.0)
             .collect();
@@ -10039,7 +10006,7 @@ pub mod tests {
         let unconfirmed_slot = 8;
         let slots = vec![confirmed_slot, unconfirmed_slot];
 
-        let shreds: Vec<_> = make_chaining_slot_entries(&slots, 1)
+        let shreds: Vec<_> = make_chaining_slot_entries(&slots, 1, 0)
             .into_iter()
             .flat_map(|x| x.0)
             .collect();

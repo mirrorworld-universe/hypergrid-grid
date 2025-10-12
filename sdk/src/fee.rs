@@ -114,11 +114,11 @@ impl FeeStructure {
     ) -> u64 {
         // Fee based on compute units and signatures
         let congestion_multiplier = if lamports_per_signature == 0 {
-            0.0 // test only
+            0 // test only
         } else {
-            // 1.0 // multiplier that has no effect
+            // 1 // multiplier that has no effect
             //Sonic: custom congestion multiplier
-            self.fee_multiplier as f64 / 10000_f64
+            (self.fee_multiplier as f64 / 10000_f64) as _
         };
 
         self.calculate_fee_details(
@@ -127,7 +127,7 @@ impl FeeStructure {
             include_loaded_account_data_size_in_fee,
         )
         .total_fee(remove_rounding_in_fee_calculation)
-        .saturating_mul(congestion_multiplier as u64)
+        .saturating_mul(congestion_multiplier)
     }
 
     /// Calculate fee details for `SanitizedMessage`

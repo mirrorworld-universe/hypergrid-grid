@@ -9,13 +9,13 @@ use {
         accounts_hash::CalcAccountsHashConfig,
         accounts_index::AccountSecondaryIndexes,
         epoch_accounts_hash::EpochAccountsHash,
-        starting_snapshot_storages::StartingSnapshotStorages,
     },
     solana_core::{
         accounts_hash_verifier::AccountsHashVerifier,
         snapshot_packager_service::SnapshotPackagerService,
     },
     solana_gossip::{cluster_info::ClusterInfo, contact_info::ContactInfo},
+    solana_program_runtime::runtime_config::RuntimeConfig,
     solana_runtime::{
         accounts_background_service::{
             AbsRequestHandlers, AbsRequestSender, AccountsBackgroundService, DroppedSlotsReceiver,
@@ -39,7 +39,6 @@ use {
         timing::timestamp,
     },
     solana_streamer::socket::SocketAddrSpace,
-    solana_svm::runtime_config::RuntimeConfig,
     std::{
         mem::ManuallyDrop,
         sync::{
@@ -197,7 +196,6 @@ impl BackgroundServices {
             accounts_package_sender.clone(),
             accounts_package_receiver,
             Some(snapshot_package_sender),
-            StartingSnapshotStorages::Genesis,
             exit.clone(),
             snapshot_config.clone(),
         );
