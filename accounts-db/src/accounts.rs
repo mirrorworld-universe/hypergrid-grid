@@ -46,7 +46,8 @@ use {
 
 pub type PubkeyAccountSlot = (Pubkey, AccountSharedData, Slot);
 
-#[derive(Debug, Default, AbiExample)]
+#[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
+#[derive(Debug, Default)]
 pub struct AccountLocks {
     write_locks: HashSet<Pubkey>,
     readonly_locks: HashMap<Pubkey, u64>,
@@ -99,7 +100,8 @@ impl AccountLocks {
 }
 
 /// This structure handles synchronization for db
-#[derive(Debug, AbiExample)]
+#[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
+#[derive(Debug)]
 pub struct Accounts {
     /// Single global AccountsDb
     pub accounts_db: Arc<AccountsDb>,
@@ -705,11 +707,11 @@ impl Accounts {
     ) {
         let mut accounts = Vec::with_capacity(load_results.len());
         let mut transactions = Vec::with_capacity(load_results.len());
-        for (i, ((tx_load_result, nonce), tx)) in load_results.iter_mut().zip(txs).enumerate() {
-            if tx_load_result.is_err() {
+        for (i, (tx_load_result, tx)) in load_results.iter_mut().zip(txs).enumerate() {
+            let Ok(loaded_transaction) = tx_load_result else {
                 // Don't store any accounts if tx failed to load
                 continue;
-            }
+            };
 
             let execution_status = match &execution_results[i] {
                 TransactionExecutionResult::Executed { details, .. } => &details.status,
@@ -717,7 +719,7 @@ impl Accounts {
                 TransactionExecutionResult::NotExecuted(_) => continue,
             };
 
-            let maybe_nonce = match (execution_status, &*nonce) {
+            let maybe_nonce = match (execution_status, &loaded_transaction.nonce) {
                 (Ok(_), _) => None, // Success, don't do any additional nonce processing
                 (Err(_), Some(nonce)) => {
                     Some((nonce, true /* rollback */))
@@ -729,10 +731,10 @@ impl Accounts {
                 }
             };
 
-            // Accounts that are invoked and also not passed to a program don't
-            // need to be stored because it's assumed to be impossible for a
-            // committable transaction to modify an invoked account if said
-            // account isn't passed to some program.
+            // Accounts that are invoked and also not passed as an instruction
+            // account to a program don't need to be stored because it's assumed
+            // to be impossible for a committable transaction to modify an
+            // invoked account if said account isn't passed to some program.
             //
             // Note that this assumption might not hold in the future after
             // SIMD-0082 is implemented because we may decide to commit
@@ -742,11 +744,10 @@ impl Accounts {
             // if they aren't passed to any programs (because they are mutated
             // outside of the VM).
             let is_storable_account = |message: &SanitizedMessage, key_index: usize| -> bool {
-                !message.is_invoked(key_index) || message.is_key_passed_to_program(key_index)
+                !message.is_invoked(key_index) || message.is_instruction_account(key_index)
             };
 
             let message = tx.message();
-            let loaded_transaction = tx_load_result.as_mut().unwrap();
             for (i, (address, account)) in (0..message.account_keys().len())
                 .zip(loaded_transaction.accounts.iter_mut())
                 .filter(|(i, _)| is_storable_account(message, *i))
@@ -1573,25 +1574,21 @@ mod tests {
         ];
         let tx1 = new_sanitized_tx(&[&keypair1], message, Hash::default());
 
-        let loaded0 = (
-            Ok(LoadedTransaction {
-                accounts: transaction_accounts0,
-                program_indices: vec![],
-                rent: 0,
-                rent_debits: RentDebits::default(),
-            }),
-            None,
-        );
+        let loaded0 = Ok(LoadedTransaction {
+            accounts: transaction_accounts0,
+            program_indices: vec![],
+            nonce: None,
+            rent: 0,
+            rent_debits: RentDebits::default(),
+        });
 
-        let loaded1 = (
-            Ok(LoadedTransaction {
-                accounts: transaction_accounts1,
-                program_indices: vec![],
-                rent: 0,
-                rent_debits: RentDebits::default(),
-            }),
-            None,
-        );
+        let loaded1 = Ok(LoadedTransaction {
+            accounts: transaction_accounts1,
+            program_indices: vec![],
+            nonce: None,
+            rent: 0,
+            rent_debits: RentDebits::default(),
+        });
 
         let mut loaded = vec![loaded0, loaded1];
 
@@ -1961,15 +1958,13 @@ mod tests {
             Some(from_account_pre.clone()),
         ));
 
-        let loaded = (
-            Ok(LoadedTransaction {
-                accounts: transaction_accounts,
-                program_indices: vec![],
-                rent: 0,
-                rent_debits: RentDebits::default(),
-            }),
-            nonce.clone(),
-        );
+        let loaded = Ok(LoadedTransaction {
+            accounts: transaction_accounts,
+            program_indices: vec![],
+            nonce: nonce.clone(),
+            rent: 0,
+            rent_debits: RentDebits::default(),
+        });
 
         let mut loaded = vec![loaded];
 
@@ -2067,15 +2062,13 @@ mod tests {
             None,
         ));
 
-        let loaded = (
-            Ok(LoadedTransaction {
-                accounts: transaction_accounts,
-                program_indices: vec![],
-                rent: 0,
-                rent_debits: RentDebits::default(),
-            }),
-            nonce.clone(),
-        );
+        let loaded = Ok(LoadedTransaction {
+            accounts: transaction_accounts,
+            program_indices: vec![],
+            nonce: nonce.clone(),
+            rent: 0,
+            rent_debits: RentDebits::default(),
+        });
 
         let mut loaded = vec![loaded];
 

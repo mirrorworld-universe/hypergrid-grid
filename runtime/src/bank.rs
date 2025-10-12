@@ -243,7 +243,10 @@ struct RentMetrics {
 }
 
 pub type BankStatusCache = StatusCache<Result<()>>;
-#[frozen_abi(digest = "9Pf3NTGr1AEzB4nKaVBY24uNwoQR4aJi8vc96W6kGvNk")]
+#[cfg_attr(
+    feature = "frozen-abi",
+    frozen_abi(digest = "9Pf3NTGr1AEzB4nKaVBY24uNwoQR4aJi8vc96W6kGvNk")
+)]
 pub type BankSlotDelta = SlotDelta<Result<()>>;
 
 #[derive(Default, Copy, Clone, Debug, PartialEq, Eq)]
@@ -266,7 +269,8 @@ impl AddAssign for SquashTiming {
     }
 }
 
-#[derive(AbiExample, Debug, Default, PartialEq)]
+#[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
+#[derive(Debug, Default, PartialEq)]
 pub(crate) struct CollectorFeeDetails {
     transaction_fee: u64,
     priority_fee: u64,
@@ -310,10 +314,10 @@ pub struct BankRc {
     pub(crate) bank_id_generator: Arc<AtomicU64>,
 }
 
-#[cfg(RUSTC_WITH_SPECIALIZATION)]
+#[cfg(all(RUSTC_WITH_SPECIALIZATION, feature = "frozen-abi"))]
 use solana_frozen_abi::abi_example::AbiExample;
 
-#[cfg(RUSTC_WITH_SPECIALIZATION)]
+#[cfg(all(RUSTC_WITH_SPECIALIZATION, feature = "frozen-abi"))]
 impl AbiExample for BankRc {
     fn example() -> Self {
         BankRc {
@@ -379,7 +383,8 @@ impl TransactionBalancesSet {
 }
 pub type TransactionBalances = Vec<Vec<u64>>;
 
-#[derive(Serialize, Deserialize, AbiExample, AbiEnumVisitor, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "frozen-abi", derive(AbiExample, AbiEnumVisitor))]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub enum TransactionLogCollectorFilter {
     All,
     AllWithVotes,
@@ -393,13 +398,15 @@ impl Default for TransactionLogCollectorFilter {
     }
 }
 
-#[derive(AbiExample, Debug, Default)]
+#[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
+#[derive(Debug, Default)]
 pub struct TransactionLogCollectorConfig {
     pub mentioned_addresses: HashSet<Pubkey>,
     pub filter: TransactionLogCollectorFilter,
 }
 
-#[derive(AbiExample, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TransactionLogInfo {
     pub signature: Signature,
     pub result: Result<()>,
@@ -407,7 +414,8 @@ pub struct TransactionLogInfo {
     pub log_messages: TransactionLogMessages,
 }
 
-#[derive(AbiExample, Default, Debug)]
+#[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
+#[derive(Default, Debug)]
 pub struct TransactionLogCollector {
     // All the logs collected for from this Bank.  Exact contents depend on the
     // active `TransactionLogCollectorFilter`
@@ -442,7 +450,8 @@ impl TransactionLogCollector {
 /// Since it is difficult to insert fields to serialize/deserialize against existing code already deployed,
 /// new fields can be optionally serialized and optionally deserialized. At some point, the serialization and
 /// deserialization will use a new mechanism or otherwise be in sync more clearly.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default)]
+#[cfg_attr(feature = "dev-context-only-utils", derive(PartialEq))]
 pub struct BankFieldsToDeserialize {
     pub(crate) blockhash_queue: BlockhashQueue,
     pub(crate) ancestors: AncestorsForSerialization,
@@ -480,7 +489,7 @@ pub struct BankFieldsToDeserialize {
 }
 
 /// Bank's common fields shared by all supported snapshot versions for serialization.
-/// This is separated from BankFieldsToDeserialize to avoid cloning by using refs.
+/// This was separated from BankFieldsToDeserialize to avoid cloning by using refs.
 /// So, sync fields with BankFieldsToDeserialize!
 /// all members are made public to keep Bank private and to make versioned serializer workable on this.
 /// Note that some fields are missing from the serializer struct. This is because of fields added later.
@@ -488,13 +497,13 @@ pub struct BankFieldsToDeserialize {
 /// new fields can be optionally serialized and optionally deserialized. At some point, the serialization and
 /// deserialization will use a new mechanism or otherwise be in sync more clearly.
 #[derive(Debug)]
-pub(crate) struct BankFieldsToSerialize<'a> {
-    pub(crate) blockhash_queue: &'a RwLock<BlockhashQueue>,
+pub(crate) struct BankFieldsToSerialize {
+    pub(crate) blockhash_queue: BlockhashQueue,
     pub(crate) ancestors: AncestorsForSerialization,
     pub(crate) hash: Hash,
     pub(crate) parent_hash: Hash,
     pub(crate) parent_slot: Slot,
-    pub(crate) hard_forks: &'a RwLock<HardForks>,
+    pub(crate) hard_forks: HardForks,
     pub(crate) transaction_count: u64,
     pub(crate) tick_height: u64,
     pub(crate) signature_count: u64,
@@ -516,13 +525,14 @@ pub(crate) struct BankFieldsToSerialize<'a> {
     pub(crate) rent_collector: RentCollector,
     pub(crate) epoch_schedule: EpochSchedule,
     pub(crate) inflation: Inflation,
-    pub(crate) stakes: &'a StakesCache,
-    pub(crate) epoch_stakes: &'a HashMap<Epoch, EpochStakes>,
+    pub(crate) stakes: StakesEnum,
+    pub(crate) epoch_stakes: HashMap<Epoch, EpochStakes>,
     pub(crate) is_delta: bool,
     pub(crate) accounts_data_len: u64,
 }
 
 // Can't derive PartialEq because RwLock doesn't implement PartialEq
+#[cfg(feature = "dev-context-only-utils")]
 impl PartialEq for Bank {
     fn eq(&self, other: &Self) -> bool {
         if std::ptr::eq(self, other) {
@@ -649,7 +659,7 @@ pub trait DropCallback: fmt::Debug {
 #[derive(Debug, Default)]
 pub struct OptionalDropCallback(Option<Box<dyn DropCallback + Send + Sync>>);
 
-#[cfg(RUSTC_WITH_SPECIALIZATION)]
+#[cfg(all(RUSTC_WITH_SPECIALIZATION, feature = "frozen-abi"))]
 impl AbiExample for OptionalDropCallback {
     fn example() -> Self {
         Self(None)
@@ -659,7 +669,8 @@ impl AbiExample for OptionalDropCallback {
 /// Manager for the state of all accounts and programs after processing its entries.
 /// AbiExample is needed even without Serialize/Deserialize; actual (de-)serialization
 /// are implemented elsewhere for versioning
-#[derive(AbiExample, Debug)]
+#[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
+#[derive(Debug)]
 pub struct Bank {
     /// References to accounts, parent and signature status
     pub rc: BankRc,
@@ -1242,75 +1253,12 @@ impl Bank {
             }
         });
 
-        let (_, recompilation_time_us) = measure_us!({
-            // Recompile loaded programs one at a time before the next epoch hits
-            let (_epoch, slot_index) = new.get_epoch_and_slot_index(new.slot());
-            let slots_in_epoch = new.get_slots_in_epoch(new.epoch());
-            let slots_in_recompilation_phase =
-                (solana_program_runtime::loaded_programs::MAX_LOADED_ENTRY_COUNT as u64)
-                    .min(slots_in_epoch)
-                    .checked_div(2)
-                    .unwrap();
-            let mut program_cache = new.transaction_processor.program_cache.write().unwrap();
-            if program_cache.upcoming_environments.is_some() {
-                if let Some((key, program_to_recompile)) = program_cache.programs_to_recompile.pop()
-                {
-                    let effective_epoch = program_cache.latest_root_epoch.saturating_add(1);
-                    drop(program_cache);
-                    if let Some(recompiled) = new.load_program(&key, false, effective_epoch) {
-                        recompiled.tx_usage_counter.fetch_add(
-                            program_to_recompile.tx_usage_counter.load(Relaxed),
-                            Relaxed,
-                        );
-                        recompiled.ix_usage_counter.fetch_add(
-                            program_to_recompile.ix_usage_counter.load(Relaxed),
-                            Relaxed,
-                        );
-                        let mut program_cache =
-                            new.transaction_processor.program_cache.write().unwrap();
-                        program_cache.assign_program(key, recompiled);
-                    }
-                }
-            } else if new.epoch() != program_cache.latest_root_epoch
-                || slot_index.saturating_add(slots_in_recompilation_phase) >= slots_in_epoch
-            {
-                // Anticipate the upcoming program runtime environment for the next epoch,
-                // so we can try to recompile loaded programs before the feature transition hits.
-                drop(program_cache);
-                let (feature_set, _new_feature_activations) = new.compute_active_feature_set(true);
-                let mut program_cache = new.transaction_processor.program_cache.write().unwrap();
-                let program_runtime_environment_v1 = create_program_runtime_environment_v1(
-                    &feature_set,
-                    &new.runtime_config().compute_budget.unwrap_or_default(),
-                    false, /* deployment */
-                    false, /* debugging_features */
-                )
-                .unwrap();
-                let program_runtime_environment_v2 = create_program_runtime_environment_v2(
-                    &new.runtime_config().compute_budget.unwrap_or_default(),
-                    false, /* debugging_features */
-                );
-                let mut upcoming_environments = program_cache.environments.clone();
-                let changed_program_runtime_v1 =
-                    *upcoming_environments.program_runtime_v1 != program_runtime_environment_v1;
-                let changed_program_runtime_v2 =
-                    *upcoming_environments.program_runtime_v2 != program_runtime_environment_v2;
-                if changed_program_runtime_v1 {
-                    upcoming_environments.program_runtime_v1 =
-                        Arc::new(program_runtime_environment_v1);
-                }
-                if changed_program_runtime_v2 {
-                    upcoming_environments.program_runtime_v2 =
-                        Arc::new(program_runtime_environment_v2);
-                }
-                program_cache.upcoming_environments = Some(upcoming_environments);
-                program_cache.programs_to_recompile = program_cache
-                    .get_flattened_entries(changed_program_runtime_v1, changed_program_runtime_v2);
-                program_cache
-                    .programs_to_recompile
-                    .sort_by_cached_key(|(_id, program)| program.decayed_usage_counter(slot));
-            }
-        });
+        let (_, cache_preparation_time_us) = measure_us!(new
+            .transaction_processor
+            .prepare_program_cache_for_upcoming_feature_set(
+                &new,
+                &new.compute_active_feature_set(true).0
+            ));
 
         // Update sysvars before processing transactions
         let (_, update_sysvars_time_us) = measure_us!({
@@ -1346,7 +1294,7 @@ impl Bank {
                 feature_set_time_us,
                 ancestors_time_us,
                 update_epoch_time_us,
-                recompilation_time_us,
+                cache_preparation_time_us,
                 update_sysvars_time_us,
                 fill_sysvar_cache_time_us,
             },
@@ -1740,12 +1688,12 @@ impl Bank {
     /// Return subset of bank fields representing serializable state
     pub(crate) fn get_fields_to_serialize(&self) -> BankFieldsToSerialize {
         BankFieldsToSerialize {
-            blockhash_queue: &self.blockhash_queue,
+            blockhash_queue: self.blockhash_queue.read().unwrap().clone(),
             ancestors: AncestorsForSerialization::from(&self.ancestors),
             hash: *self.hash.read().unwrap(),
             parent_hash: self.parent_hash,
             parent_slot: self.parent_slot,
-            hard_forks: &self.hard_forks,
+            hard_forks: self.hard_forks.read().unwrap().clone(),
             transaction_count: self.transaction_count.load(Relaxed),
             tick_height: self.tick_height.load(Relaxed),
             signature_count: self.signature_count.load(Relaxed),
@@ -1767,8 +1715,8 @@ impl Bank {
             rent_collector: self.rent_collector.clone(),
             epoch_schedule: self.epoch_schedule.clone(),
             inflation: *self.inflation.read().unwrap(),
-            stakes: &self.stakes_cache,
-            epoch_stakes: &self.epoch_stakes,
+            stakes: StakesEnum::from(self.stakes_cache.stakes().clone()),
+            epoch_stakes: self.epoch_stakes.clone(),
             is_delta: self.is_delta.load(Relaxed),
             accounts_data_len: self.load_accounts_data_size(),
         }
@@ -3457,7 +3405,7 @@ impl Bank {
         let post_simulation_accounts = loaded_transactions
             .into_iter()
             .next()
-            .and_then(|(loaded_transactions_res, _)| loaded_transactions_res.ok())
+            .and_then(|loaded_transactions_res| loaded_transactions_res.ok())
             .map(|loaded_transaction| {
                 loaded_transaction
                     .accounts
@@ -4246,7 +4194,7 @@ impl Bank {
         let rent_debits: Vec<_> = loaded_txs
             .iter_mut()
             .zip(execution_results)
-            .map(|((load_result, _nonce), execution_result)| {
+            .map(|(load_result, execution_result)| {
                 if let (Ok(loaded_transaction), true) =
                     (load_result, execution_result.was_executed_successfully())
                 {
@@ -6202,7 +6150,7 @@ impl Bank {
         let new_warmup_cooldown_rate_epoch = self.new_warmup_cooldown_rate_epoch();
         izip!(txs, execution_results, loaded_txs)
             .filter(|(_, execution_result, _)| execution_result.was_executed_successfully())
-            .flat_map(|(tx, _, (load_result, _))| {
+            .flat_map(|(tx, _, load_result)| {
                 load_result.iter().flat_map(|loaded_transaction| {
                     let num_account_keys = tx.message().account_keys().len();
                     loaded_transaction.accounts.iter().take(num_account_keys)

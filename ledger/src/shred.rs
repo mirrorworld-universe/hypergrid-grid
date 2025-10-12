@@ -170,19 +170,9 @@ pub enum Error {
 }
 
 #[repr(u8)]
+#[cfg_attr(feature = "frozen-abi", derive(AbiExample, AbiEnumVisitor))]
 #[derive(
-    Clone,
-    Copy,
-    Debug,
-    Eq,
-    Hash,
-    PartialEq,
-    AbiEnumVisitor,
-    AbiExample,
-    Deserialize,
-    IntoPrimitive,
-    Serialize,
-    TryFromPrimitive,
+    Clone, Copy, Debug, Eq, Hash, PartialEq, Deserialize, IntoPrimitive, Serialize, TryFromPrimitive,
 )]
 #[serde(into = "u8", try_from = "u8")]
 pub enum ShredType {
@@ -313,6 +303,14 @@ impl ErasureSetId {
     }
 }
 
+/// To be used with the [`Shred`] enum.
+///
+/// Writes a function implementation that forwards the invocation to an identically defined function
+/// in one of the two enum branches.
+///
+/// Due to an inability of a macro to match on the `self` shorthand syntax, this macro has 3
+/// branches.  But they are only different in the `self` argument matching.  Make sure to keep the
+/// identical otherwise.
 macro_rules! dispatch {
     ($vis:vis fn $name:ident(&self $(, $arg:ident : $ty:ty)?) $(-> $out:ty)?) => {
         #[inline]
