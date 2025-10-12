@@ -1144,7 +1144,7 @@ impl<'a> AccountsHasher<'a> {
             capacity: max_inclusive_num_pubkeys * std::mem::size_of::<Hash>(),
         };
 
-        let mut overall_sum = 0;
+        let mut overall_sum: u64 = 0;
 
         // Sonic: skip accounts that are remote
         let remote_accounts = self.remote_accounts.clone();
@@ -1165,16 +1165,15 @@ impl<'a> AccountsHasher<'a> {
             if item.lamports != 0 {
                 // Sonic: skip accounts that are remote
                 if remote_accounts.is_empty() || !remote_accounts.contains(&item.pubkey) {
-                    overall_sum = Self::checked_cast_for_capitalization(
-                        item.lamports as u128 + overall_sum as u128,
-                    );
+                    overall_sum = overall_sum
+                        .checked_add(item.lamports)
+                        .expect("summing lamports cannot overflow");
                 } else {
                     info!(
                         "de_dup_accounts_in_parallel: Skipping remote account: {:?}, pointer:{:?}",
                         item.pubkey, pointer
                     );
                 }
-
                 hashes.write(&item.hash.0);
             } else {
                 // if lamports == 0, check if they should be included
@@ -2392,7 +2391,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "overflow is detected while summing capitalization")]
+    #[should_panic(expected = "summing lamports cannot overflow")]
     fn test_accountsdb_lamport_overflow() {
         solana_logger::setup();
 
@@ -2426,7 +2425,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "overflow is detected while summing capitalization")]
+    #[should_panic(expected = "summing lamports cannot overflow")]
     fn test_accountsdb_lamport_overflow2() {
         solana_logger::setup();
 

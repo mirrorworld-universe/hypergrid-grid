@@ -102,6 +102,34 @@ impl From<ProgramCacheEntryOwner> for Pubkey {
     }
 }
 
+/*
+    The possible ProgramCacheEntryType transitions:
+
+    DelayVisibility is special in that it is never stored in the cache.
+    It is only returned by ProgramCacheForTxBatch::find() when a Loaded entry
+    is encountered which is not effective yet.
+
+    Builtin re/deployment:
+    - Empty => Builtin in TransactionBatchProcessor::add_builtin
+    - Builtin => Builtin in TransactionBatchProcessor::add_builtin
+
+    Un/re/deployment (with delay and cooldown):
+    - Empty / Closed => Loaded in UpgradeableLoaderInstruction::DeployWithMaxDataLen
+    - Loaded / FailedVerification => Loaded in UpgradeableLoaderInstruction::Upgrade
+    - Loaded / FailedVerification => Closed in UpgradeableLoaderInstruction::Close
+
+    Eviction and unloading (in the same slot):
+    - Unloaded => Loaded in ProgramCache::assign_program
+    - Loaded => Unloaded in ProgramCache::unload_program_entry
+
+    At epoch boundary (when feature set and environment changes):
+    - Loaded => FailedVerification in Bank::_new_from_parent
+    - FailedVerification => Loaded in Bank::_new_from_parent
+
+    Through pruning (when on orphan fork or overshadowed on the rooted fork):
+    - Closed / Unloaded / Loaded / Builtin => Empty in ProgramCache::prune
+*/
+
 /// Actual payload of [ProgramCacheEntry].
 #[derive(Default)]
 pub enum ProgramCacheEntryType {
@@ -638,6 +666,8 @@ pub struct ProgramCacheForTxBatch {
     /// The epoch of the last rerooting
     pub latest_root_epoch: Epoch,
     pub hit_max_limit: bool,
+    pub loaded_missing: bool,
+    pub merged_modified: bool,
 }
 
 impl ProgramCacheForTxBatch {
@@ -654,6 +684,8 @@ impl ProgramCacheForTxBatch {
             upcoming_environments,
             latest_root_epoch,
             hit_max_limit: false,
+            loaded_missing: false,
+            merged_modified: false,
         }
     }
 
@@ -669,6 +701,8 @@ impl ProgramCacheForTxBatch {
             upcoming_environments: cache.get_upcoming_environments_for_epoch(epoch),
             latest_root_epoch: cache.latest_root_epoch,
             hit_max_limit: false,
+            loaded_missing: false,
+            merged_modified: false,
         }
     }
 
@@ -722,8 +756,13 @@ impl ProgramCacheForTxBatch {
 
     pub fn merge(&mut self, other: &Self) {
         other.entries.iter().for_each(|(key, entry)| {
+            self.merged_modified = true;
             self.replenish(*key, entry.clone());
         })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 }
 
