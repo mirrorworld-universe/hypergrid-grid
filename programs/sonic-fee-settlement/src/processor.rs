@@ -114,7 +114,7 @@ impl Processor {
         );
         let serialized_data =
             bincode::serialize(&state).map_err(|_| InstructionError::GenericError)?;
-        data_account.set_data_from_slice(&serialized_data, &invoke_context.feature_set)?;
+        data_account.set_data_from_slice(&serialized_data)?;
 
         Ok(())
     }
@@ -243,7 +243,7 @@ impl Processor {
         );
         let serialized_data =
             bincode::serialize(&state).map_err(|_| InstructionError::GenericError)?;
-        data_account.set_data_from_slice(&serialized_data, &invoke_context.feature_set)?;
+        data_account.set_data_from_slice(&serialized_data)?;
 
         ic_msg!(
             invoke_context,
@@ -332,7 +332,7 @@ impl Processor {
         );
         let serialized_data =
             bincode::serialize(&state).map_err(|_| InstructionError::GenericError)?;
-        data_account.set_data_from_slice(&serialized_data, &invoke_context.feature_set)?;
+        data_account.set_data_from_slice(&serialized_data)?;
 
         Ok(())
     }

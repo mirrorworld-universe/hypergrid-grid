@@ -76,7 +76,7 @@ impl Processor {
             let serialized_data =
                 bincode::serialize(&MigratedAccountsState::MigratedAccounts(vec![]))
                     .map_err(|_| InstructionError::GenericError)?;
-            data_account.set_data_from_slice(&serialized_data, &invoke_context.feature_set)?;
+            data_account.set_data_from_slice(&serialized_data)?;
         }
 
         let clock = invoke_context.get_sysvar_cache().get_clock()?;
@@ -169,7 +169,7 @@ impl Processor {
         let state = MigratedAccountsState::MigratedAccounts(accounts.values().cloned().collect());
         let serialized_data =
             bincode::serialize(&state).map_err(|_| InstructionError::GenericError)?;
-        data_account.set_data_from_slice(&serialized_data, &invoke_context.feature_set)?;
+        data_account.set_data_from_slice(&serialized_data)?;
 
         // let serialized_size =
         //     bincode::serialized_size(&state).map_err(|_| InstructionError::GenericError)?;
@@ -274,7 +274,7 @@ impl Processor {
         );
         let serialized_data =
             bincode::serialize(&state).map_err(|_| InstructionError::GenericError)?;
-        data_account.set_data_from_slice(&serialized_data, &invoke_context.feature_set)?;
+        data_account.set_data_from_slice(&serialized_data)?;
         // data_account.set_state(&MigratedAccountsState::MigratedAccounts(accouts.values().cloned().collect::<Vec<MigratedAccount>>()))?;
 
         // let clock = invoke_context.get_sysvar_cache().get_clock()?;
@@ -354,7 +354,7 @@ impl Processor {
         );
         let serialized_data =
             bincode::serialize(&state).map_err(|_| InstructionError::GenericError)?;
-        data_account.set_data_from_slice(&serialized_data, &invoke_context.feature_set)?;
+        data_account.set_data_from_slice(&serialized_data)?;
 
         let clock = invoke_context.get_sysvar_cache().get_clock()?;
         ic_msg!(
