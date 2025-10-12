@@ -42,9 +42,11 @@ use solana_sdk::recent_blockhashes_account;
 pub use solana_sdk::reward_type::RewardType;
 use {
     crate::{
-        bank::metrics::*,
+        bank::{
+            builtins::{BuiltinPrototype, BUILTINS},
+            metrics::*,
+        },
         bank_forks::BankForks,
-        builtins::{BuiltinPrototype, BUILTINS},
         epoch_rewards_hasher::hash_rewards_into_partitions,
         epoch_stakes::{EpochStakes, NodeVoteAccounts},
         installed_scheduler_pool::{BankWithScheduler, InstalledSchedulerRwLock},
@@ -99,7 +101,7 @@ use {
         compute_budget_processor::process_compute_budget_instructions,
         invoke_context::BuiltinFunctionWithContext,
         loaded_programs::{
-            LoadedProgram, LoadedProgramMatchCriteria, LoadedProgramType, LoadedPrograms,
+            LoadedProgram, LoadedProgramMatchCriteria, LoadedProgramType, ProgramCache,
             ProgramRuntimeEnvironments,
         },
         runtime_config::RuntimeConfig,
@@ -124,7 +126,7 @@ use {
             self, include_loaded_accounts_data_size_in_fee_calculation,
             remove_rounding_in_fee_calculation, FeatureSet,
         },
-        fee::FeeStructure,
+        fee::{FeeDetails, FeeStructure},
         fee_calculator::{FeeCalculator, FeeRateGovernor},
         genesis_config::{ClusterType, GenesisConfig},
         hard_forks::HardForks,
@@ -210,6 +212,7 @@ struct VerifyAccountsHashConfig {
 mod address_lookup_table;
 pub mod bank_hash_details;
 mod builtin_programs;
+pub mod builtins;
 pub mod epoch_accounts_hash_utils;
 mod fee_distribution;
 mod metrics;
@@ -253,6 +256,23 @@ impl AddAssign for SquashTiming {
         self.squash_accounts_index_ms += rhs.squash_accounts_index_ms;
         self.squash_accounts_store_ms += rhs.squash_accounts_store_ms;
         self.squash_cache_ms += rhs.squash_cache_ms;
+    }
+}
+
+#[derive(AbiExample, Debug, Default, PartialEq)]
+pub(crate) struct CollectorFeeDetails {
+    pub transaction_fee: u64,
+    pub priority_fee: u64,
+}
+
+impl CollectorFeeDetails {
+    pub(crate) fn accumulate(&mut self, fee_details: &FeeDetails) {
+        self.transaction_fee = self
+            .transaction_fee
+            .saturating_add(fee_details.transaction_fee());
+        self.priority_fee = self
+            .priority_fee
+            .saturating_add(fee_details.prioritization_fee());
     }
 }
 
@@ -548,10 +568,11 @@ impl PartialEq for Bank {
             accounts_data_size_delta_off_chain: _,
             fee_structure: _,
             incremental_snapshot_persistence: _,
-            loaded_programs_cache: _,
+            program_cache: _,
             epoch_reward_status: _,
             transaction_processor: _,
             check_program_modification_slot: _,
+            collector_fee_details: _,
             // Ignore new fields explicitly if they do not impact PartialEq.
             // Adding ".." will remove compile-time checks that if a new field
             // is added to the struct, this PartialEq is accordingly updated.
@@ -810,13 +831,16 @@ pub struct Bank {
 
     pub incremental_snapshot_persistence: Option<BankIncrementalSnapshotPersistence>,
 
-    loaded_programs_cache: Arc<RwLock<LoadedPrograms<BankForks>>>,
+    program_cache: Arc<RwLock<ProgramCache<BankForks>>>,
 
     epoch_reward_status: EpochRewardStatus,
 
     transaction_processor: TransactionBatchProcessor<BankForks, AccountsDb>,
 
     check_program_modification_slot: bool,
+
+    /// Collected fee details
+    collector_fee_details: RwLock<CollectorFeeDetails>,
 }
 
 struct VoteWithStakeDelegations {
@@ -998,13 +1022,14 @@ impl Bank {
             accounts_data_size_delta_on_chain: AtomicI64::new(0),
             accounts_data_size_delta_off_chain: AtomicI64::new(0),
             fee_structure: FeeStructure::default(),
-            loaded_programs_cache: Arc::new(RwLock::new(LoadedPrograms::new(
+            program_cache: Arc::new(RwLock::new(ProgramCache::new(
                 Slot::default(),
                 Epoch::default(),
             ))),
             epoch_reward_status: EpochRewardStatus::default(),
             transaction_processor: TransactionBatchProcessor::default(),
             check_program_modification_slot: false,
+            collector_fee_details: RwLock::new(CollectorFeeDetails::default()),
         };
 
         bank.transaction_processor = TransactionBatchProcessor::new(
@@ -1013,7 +1038,7 @@ impl Bank {
             bank.epoch_schedule.clone(),
             bank.fee_structure.clone(),
             bank.runtime_config.clone(),
-            bank.loaded_programs_cache.clone(),
+            bank.program_cache.clone(),
             // Sonic:
             Arc::clone(&bank.accounts().accounts_db),
             Arc::clone(&bank.genesis_accounts_pubkeys),
@@ -1328,10 +1353,11 @@ impl Bank {
             accounts_data_size_delta_on_chain: AtomicI64::new(0),
             accounts_data_size_delta_off_chain: AtomicI64::new(0),
             fee_structure: parent.fee_structure.clone(),
-            loaded_programs_cache: parent.loaded_programs_cache.clone(),
+            program_cache: parent.program_cache.clone(),
             epoch_reward_status: parent.epoch_reward_status.clone(),
             transaction_processor: TransactionBatchProcessor::default(),
             check_program_modification_slot: false,
+            collector_fee_details: RwLock::new(CollectorFeeDetails::default()),
         };
 
         new.transaction_processor = TransactionBatchProcessor::new(
@@ -1340,7 +1366,7 @@ impl Bank {
             new.epoch_schedule.clone(),
             new.fee_structure.clone(),
             new.runtime_config.clone(),
-            new.loaded_programs_cache.clone(),
+            new.program_cache.clone(),
             // Sonic:
             Arc::clone(&new.accounts().accounts_db),
             Arc::clone(&new.genesis_accounts_pubkeys),
@@ -1383,13 +1409,12 @@ impl Bank {
                     .min(slots_in_epoch)
                     .checked_div(2)
                     .unwrap();
-            let mut loaded_programs_cache = new.loaded_programs_cache.write().unwrap();
-            if loaded_programs_cache.upcoming_environments.is_some() {
-                if let Some((key, program_to_recompile)) =
-                    loaded_programs_cache.programs_to_recompile.pop()
+            let mut program_cache = new.program_cache.write().unwrap();
+            if program_cache.upcoming_environments.is_some() {
+                if let Some((key, program_to_recompile)) = program_cache.programs_to_recompile.pop()
                 {
-                    let effective_epoch = loaded_programs_cache.latest_root_epoch.saturating_add(1);
-                    drop(loaded_programs_cache);
+                    let effective_epoch = program_cache.latest_root_epoch.saturating_add(1);
+                    drop(program_cache);
                     let recompiled = new.load_program(&key, false, effective_epoch);
                     recompiled
                         .tx_usage_counter
@@ -1397,17 +1422,17 @@ impl Bank {
                     recompiled
                         .ix_usage_counter
                         .fetch_add(program_to_recompile.ix_usage_counter.load(Relaxed), Relaxed);
-                    let mut loaded_programs_cache = new.loaded_programs_cache.write().unwrap();
-                    loaded_programs_cache.assign_program(key, recompiled);
+                    let mut program_cache = new.program_cache.write().unwrap();
+                    program_cache.assign_program(key, recompiled);
                 }
-            } else if new.epoch() != loaded_programs_cache.latest_root_epoch
+            } else if new.epoch() != program_cache.latest_root_epoch
                 || slot_index.saturating_add(slots_in_recompilation_phase) >= slots_in_epoch
             {
                 // Anticipate the upcoming program runtime environment for the next epoch,
                 // so we can try to recompile loaded programs before the feature transition hits.
-                drop(loaded_programs_cache);
+                drop(program_cache);
                 let (feature_set, _new_feature_activations) = new.compute_active_feature_set(true);
-                let mut loaded_programs_cache = new.loaded_programs_cache.write().unwrap();
+                let mut program_cache = new.program_cache.write().unwrap();
                 let program_runtime_environment_v1 = create_program_runtime_environment_v1(
                     &feature_set,
                     &new.runtime_config.compute_budget.unwrap_or_default(),
@@ -1419,7 +1444,7 @@ impl Bank {
                     &new.runtime_config.compute_budget.unwrap_or_default(),
                     false, /* debugging_features */
                 );
-                let mut upcoming_environments = loaded_programs_cache.environments.clone();
+                let mut upcoming_environments = program_cache.environments.clone();
                 let changed_program_runtime_v1 =
                     *upcoming_environments.program_runtime_v1 != program_runtime_environment_v1;
                 let changed_program_runtime_v2 =
@@ -1432,10 +1457,10 @@ impl Bank {
                     upcoming_environments.program_runtime_v2 =
                         Arc::new(program_runtime_environment_v2);
                 }
-                loaded_programs_cache.upcoming_environments = Some(upcoming_environments);
-                loaded_programs_cache.programs_to_recompile = loaded_programs_cache
+                program_cache.upcoming_environments = Some(upcoming_environments);
+                program_cache.programs_to_recompile = program_cache
                     .get_flattened_entries(changed_program_runtime_v1, changed_program_runtime_v2);
-                loaded_programs_cache
+                program_cache
                     .programs_to_recompile
                     .sort_by_cached_key(|(_id, program)| program.decayed_usage_counter(slot));
             }
@@ -1480,32 +1505,32 @@ impl Bank {
         );
 
         parent
-            .loaded_programs_cache
+            .program_cache
             .read()
             .unwrap()
             .stats
             .submit(parent.slot());
 
-        new.loaded_programs_cache.write().unwrap().stats.reset();
+        new.program_cache.write().unwrap().stats.reset();
         new
     }
 
     pub fn set_fork_graph_in_program_cache(&self, fork_graph: Arc<RwLock<BankForks>>) {
-        self.loaded_programs_cache
+        self.program_cache
             .write()
             .unwrap()
             .set_fork_graph(fork_graph);
     }
 
     pub fn prune_program_cache(&self, new_root_slot: Slot, new_root_epoch: Epoch) {
-        self.loaded_programs_cache
+        self.program_cache
             .write()
             .unwrap()
             .prune(new_root_slot, new_root_epoch);
     }
 
     pub fn prune_program_cache_by_deployment_slot(&self, deployment_slot: Slot) {
-        self.loaded_programs_cache
+        self.program_cache
             .write()
             .unwrap()
             .prune_by_deployment_slot(deployment_slot);
@@ -1513,7 +1538,7 @@ impl Bank {
 
     pub fn get_runtime_environments_for_slot(&self, slot: Slot) -> ProgramRuntimeEnvironments {
         let epoch = self.epoch_schedule.get_epoch(slot);
-        self.loaded_programs_cache
+        self.program_cache
             .read()
             .unwrap()
             .get_environments_for_epoch(epoch)
@@ -1880,13 +1905,12 @@ impl Bank {
             accounts_data_size_delta_on_chain: AtomicI64::new(0),
             accounts_data_size_delta_off_chain: AtomicI64::new(0),
             fee_structure: FeeStructure::default(),
-            loaded_programs_cache: Arc::new(RwLock::new(LoadedPrograms::new(
-                fields.slot,
-                fields.epoch,
-            ))),
+            program_cache: Arc::new(RwLock::new(ProgramCache::new(fields.slot, fields.epoch))),
             epoch_reward_status: fields.epoch_reward_status,
             transaction_processor: TransactionBatchProcessor::default(),
             check_program_modification_slot: false,
+            // collector_fee_details is not serialized to snapshot
+            collector_fee_details: RwLock::new(CollectorFeeDetails::default()),
         };
 
         bank.transaction_processor = TransactionBatchProcessor::new(
@@ -1895,7 +1919,7 @@ impl Bank {
             bank.epoch_schedule.clone(),
             bank.fee_structure.clone(),
             bank.runtime_config.clone(),
-            bank.loaded_programs_cache.clone(),
+            bank.program_cache.clone(),
             // Sonic:
             Arc::clone(&bank.accounts().accounts_db),
             Arc::clone(&bank.genesis_accounts_pubkeys),
@@ -4916,16 +4940,12 @@ impl Bank {
                     lamports_per_signature,
                 );
 
-                // In case of instruction error, even though no accounts
-                // were stored we still need to charge the payer the
-                // fee.
-                //
-                //...except nonce accounts, which already have their
-                // post-load, fee deducted, pre-execute account state
-                // stored
-                if execution_status.is_err() && !is_nonce {
-                    self.withdraw(tx.message().fee_payer(), fee)?;
-                }
+                self.check_execution_status_and_charge_fee(
+                    tx.message(),
+                    execution_status,
+                    is_nonce,
+                    fee,
+                )?;
 
                 fees += fee;
                 Ok(())
@@ -4934,6 +4954,80 @@ impl Bank {
 
         self.collector_fees.fetch_add(fees, Relaxed);
         results
+    }
+
+    // Note: this function is not yet used; next PR will call it behind a feature gate
+    #[allow(dead_code)]
+    fn filter_program_errors_and_collect_fee_details(
+        &self,
+        txs: &[SanitizedTransaction],
+        execution_results: &[TransactionExecutionResult],
+    ) -> Vec<Result<()>> {
+        let mut accumulated_fee_details = FeeDetails::default();
+
+        let results = txs
+            .iter()
+            .zip(execution_results)
+            .map(|(tx, execution_result)| {
+                let (execution_status, durable_nonce_fee) = match &execution_result {
+                    TransactionExecutionResult::Executed { details, .. } => {
+                        Ok((&details.status, details.durable_nonce_fee.as_ref()))
+                    }
+                    TransactionExecutionResult::NotExecuted(err) => Err(err.clone()),
+                }?;
+                let is_nonce = durable_nonce_fee.is_some();
+
+                let message = tx.message();
+                let fee_details = self.fee_structure.calculate_fee_details(
+                    message,
+                    &process_compute_budget_instructions(message.program_instructions_iter())
+                        .unwrap_or_default()
+                        .into(),
+                    self.feature_set
+                        .is_active(&include_loaded_accounts_data_size_in_fee_calculation::id()),
+                );
+
+                self.check_execution_status_and_charge_fee(
+                    message,
+                    execution_status,
+                    is_nonce,
+                    fee_details.total_fee(
+                        self.feature_set
+                            .is_active(&remove_rounding_in_fee_calculation::id()),
+                    ),
+                )?;
+
+                accumulated_fee_details.accumulate(&fee_details);
+                Ok(())
+            })
+            .collect();
+
+        self.collector_fee_details
+            .write()
+            .unwrap()
+            .accumulate(&accumulated_fee_details);
+        results
+    }
+
+    fn check_execution_status_and_charge_fee(
+        &self,
+        message: &SanitizedMessage,
+        execution_status: &transaction::Result<()>,
+        is_nonce: bool,
+        fee: u64,
+    ) -> Result<()> {
+        // In case of instruction error, even though no accounts
+        // were stored we still need to charge the payer the
+        // fee.
+        //
+        //...except nonce accounts, which already have their
+        // post-load, fee deducted, pre-execute account state
+        // stored
+        if execution_status.is_err() && !is_nonce {
+            self.withdraw(message.fee_payer(), fee)?;
+        }
+
+        Ok(())
     }
 
     /// `committed_transactions_count` is the number of transactions out of `sanitized_txs`
@@ -5016,7 +5110,7 @@ impl Bank {
             } = execution_result
             {
                 if details.status.is_ok() {
-                    let mut cache = self.loaded_programs_cache.write().unwrap();
+                    let mut cache = self.program_cache.write().unwrap();
                     cache.merge(programs_modified_by_tx);
                 }
             }
@@ -6043,7 +6137,7 @@ impl Bank {
                 .iter()
                 .chain(additional_builtins.unwrap_or(&[]).iter())
             {
-                if builtin.feature_id.is_none() {
+                if builtin.enable_feature_id.is_none() {
                     self.add_builtin(
                         builtin.program_id,
                         builtin.name.to_string(),
@@ -6058,10 +6152,10 @@ impl Bank {
             }
         }
 
-        let mut loaded_programs_cache = self.loaded_programs_cache.write().unwrap();
-        loaded_programs_cache.latest_root_slot = self.slot();
-        loaded_programs_cache.latest_root_epoch = self.epoch();
-        loaded_programs_cache.environments.program_runtime_v1 = Arc::new(
+        let mut program_cache = self.program_cache.write().unwrap();
+        program_cache.latest_root_slot = self.slot();
+        program_cache.latest_root_epoch = self.epoch();
+        program_cache.environments.program_runtime_v1 = Arc::new(
             create_program_runtime_environment_v1(
                 &self.feature_set,
                 &self.runtime_config.compute_budget.unwrap_or_default(),
@@ -6070,7 +6164,7 @@ impl Bank {
             )
             .unwrap(),
         );
-        loaded_programs_cache.environments.program_runtime_v2 =
+        program_cache.environments.program_runtime_v2 =
             Arc::new(create_program_runtime_environment_v2(
                 &self.runtime_config.compute_budget.unwrap_or_default(),
                 false, /* debugging_features */
@@ -7139,7 +7233,7 @@ impl Bank {
         debug!("Adding program {} under {:?}", name, program_id);
         self.add_builtin_account(name.as_str(), &program_id, false);
         self.builtin_programs.insert(program_id);
-        self.loaded_programs_cache
+        self.program_cache
             .write()
             .unwrap()
             .assign_program(program_id, Arc::new(builtin));
@@ -7389,7 +7483,7 @@ impl Bank {
         new_feature_activations: &HashSet<Pubkey>,
     ) {
         for builtin in BUILTINS.iter() {
-            if let Some(feature_id) = builtin.feature_id {
+            if let Some(feature_id) = builtin.enable_feature_id {
                 let should_apply_action_for_feature_transition =
                     if only_apply_transitions_for_new_features {
                         new_feature_activations.contains(&feature_id)
@@ -7444,7 +7538,7 @@ impl Bank {
                 self.store_account(new_address, &AccountSharedData::default());
 
                 // Unload a program from the bank's cache
-                self.loaded_programs_cache
+                self.program_cache
                     .write()
                     .unwrap()
                     .remove_programs([*old_address].into_iter());
