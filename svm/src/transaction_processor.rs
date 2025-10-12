@@ -15,6 +15,7 @@ use {
     solana_measure::measure::Measure,
     solana_program_runtime::{
         compute_budget::ComputeBudget,
+        invoke_context::InvokeContext,
         loaded_programs::{
             ForkGraph, LoadProgramMetrics, LoadedProgram, LoadedProgramMatchCriteria,
             LoadedProgramType, LoadedProgramsForTxBatch, ProgramCache, ProgramRuntimeEnvironment,
@@ -232,6 +233,7 @@ impl<FG: ForkGraph, A: AccountsDb> TransactionBatchProcessor<FG, A> {
         log_messages_bytes_limit: Option<usize>,
         limit_to_load_programs: bool,
     ) -> LoadAndExecuteSanitizedTransactionsOutput {
+        let mut program_cache_time = Measure::start("program_cache");
         let mut program_accounts_map = Self::filter_executable_program_accounts(
             callbacks,
             sanitized_txs,
@@ -255,6 +257,7 @@ impl<FG: ForkGraph, A: AccountsDb> TransactionBatchProcessor<FG, A> {
                 execution_results: vec![],
             };
         }
+        program_cache_time.stop();
 
         let mut load_time = Measure::start("accounts_load");
         let mut loaded_transactions = load_accounts(
@@ -350,6 +353,10 @@ impl<FG: ForkGraph, A: AccountsDb> TransactionBatchProcessor<FG, A> {
             sanitized_txs.len(),
         );
 
+        timings.saturating_add_in_place(
+            ExecuteTimingType::ProgramCacheUs,
+            program_cache_time.as_us(),
+        );
         timings.saturating_add_in_place(ExecuteTimingType::LoadUs, load_time.as_us());
         timings.saturating_add_in_place(ExecuteTimingType::ExecuteUs, execution_time.as_us());
 
@@ -791,24 +798,32 @@ impl<FG: ForkGraph, A: AccountsDb> TransactionBatchProcessor<FG, A> {
             remote_accounts
         );
 
+        let sysvar_cache = &self.sysvar_cache.read().unwrap();
+
+        let mut invoke_context = InvokeContext::new(
+            &mut transaction_context,
+            sysvar_cache,
+            log_collector.clone(),
+            compute_budget,
+            programs_loaded_for_tx_batch,
+            &mut programs_modified_by_tx,
+            callback.get_feature_set(),
+            blockhash,
+            lamports_per_signature,
+        );
+
         let mut process_message_time = Measure::start("process_message_time");
         let process_result = MessageProcessor::process_message(
             tx.message(),
             &loaded_transaction.program_indices,
-            &mut transaction_context,
-            log_collector.clone(),
-            programs_loaded_for_tx_batch,
-            &mut programs_modified_by_tx,
-            callback.get_feature_set(),
-            compute_budget,
+            &mut invoke_context,
             timings,
-            &self.sysvar_cache.read().unwrap(),
-            blockhash,
-            lamports_per_signature,
             &mut executed_units,
             remote_accounts, //Sonic: pass remote accounts to process_message.
         );
         process_message_time.stop();
+
+        drop(invoke_context);
 
         saturating_add_assign!(
             timings.execute_accessories.process_message_us,
