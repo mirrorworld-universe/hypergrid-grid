@@ -39,7 +39,7 @@ pub use solana_sdk::reward_type::RewardType;
 use {
     crate::{
         bank::{
-            builtins::{BuiltinPrototype, BUILTINS},
+            builtins::{BuiltinPrototype, BUILTINS, STATELESS_BUILTINS},
             metrics::*,
             partitioned_epoch_rewards::{EpochRewardStatus, StakeRewards, VoteRewardsAccounts},
         },
@@ -137,7 +137,6 @@ use {
         native_token::LAMPORTS_PER_SOL,
         nonce::{self, state::DurableNonce, NONCED_TX_MARKER_IX_INDEX},
         nonce_account,
-        nonce_info::{NonceInfo, NoncePartial},
         packet::PACKET_DATA_SIZE,
         precompiles::get_precompiles,
         pubkey::Pubkey,
@@ -167,6 +166,7 @@ use {
     solana_svm::{
         account_loader::{TransactionCheckResult, TransactionLoadResult},
         account_overrides::AccountOverrides,
+        nonce_info::{NonceInfo, NoncePartial},
         program_loader::load_program_with_pubkey,
         transaction_error_metrics::TransactionErrorMetrics,
         transaction_processing_callback::TransactionProcessingCallback,
@@ -185,7 +185,7 @@ use {
         collections::{HashMap, HashSet},
         convert::TryFrom,
         fmt, mem,
-        ops::{AddAssign, RangeInclusive},
+        ops::{AddAssign, RangeFull, RangeInclusive},
         path::PathBuf,
         slice,
         sync::{
@@ -687,12 +687,13 @@ pub struct Bank {
     /// slots to hard fork at
     hard_forks: Arc<RwLock<HardForks>>,
 
-    /// The number of transactions processed without error
+    /// The number of committed transactions since genesis.
     transaction_count: AtomicU64,
 
-    /// The number of non-vote transactions processed without error since the most recent boot from
-    /// snapshot or genesis. This value is not shared though the network, nor retained within
-    /// snapshots, but is preserved in `Bank::new_from_parent`.
+    /// The number of non-vote transactions committed since the most
+    /// recent boot from snapshot or genesis. This value is only stored in
+    /// blockstore for the RPC method "getPerformanceSamples". It is not
+    /// retained within snapshots, but is preserved in `Bank::new_from_parent`.
     non_vote_transaction_count_since_restart: AtomicU64,
 
     /// The number of transaction errors in this slot
@@ -1656,7 +1657,7 @@ impl Bank {
             accounts_data_size_initial,
             accounts_data_size_delta_on_chain: AtomicI64::new(0),
             accounts_data_size_delta_off_chain: AtomicI64::new(0),
-            epoch_reward_status: fields.epoch_reward_status,
+            epoch_reward_status: EpochRewardStatus::default(),
             transaction_processor: TransactionBatchProcessor::default(),
             check_program_modification_slot: false,
             // collector_fee_details is not serialized to snapshot
@@ -1674,6 +1675,12 @@ impl Bank {
             Arc::clone(&bank.accounts().accounts_db),
             Arc::clone(&bank.genesis_accounts_pubkeys),
         );
+
+        let thread_pool = ThreadPoolBuilder::new()
+            .thread_name(|i| format!("solBnkNewFlds{i:02}"))
+            .build()
+            .expect("new rayon threadpool");
+        bank.recalculate_partitioned_rewards(null_tracer(), &thread_pool);
 
         bank.finish_init(
             genesis_config,
@@ -2025,7 +2032,7 @@ impl Bank {
         // update epoch_stakes cache
         //  if my parent didn't populate for this staker's epoch, we've
         //  crossed a boundary
-        if self.epoch_stakes.get(&leader_schedule_epoch).is_none() {
+        if !self.epoch_stakes.contains_key(&leader_schedule_epoch) {
             self.epoch_stakes.retain(|&epoch, _| {
                 epoch >= leader_schedule_epoch.saturating_sub(MAX_LEADER_SCHEDULE_STAKES)
             });
@@ -3847,13 +3854,14 @@ impl Bank {
                 // replay could occur
                 signature_count += u64::from(tx.message().header().num_required_signatures);
                 executed_transactions_count += 1;
+
+                if !is_vote {
+                    executed_non_vote_transactions_count += 1;
+                }
             }
 
             match execution_result.flattened_result() {
                 Ok(()) => {
-                    if !is_vote {
-                        executed_non_vote_transactions_count += 1;
-                    }
                     executed_with_successful_result_count += 1;
                 }
                 Err(err) => {
@@ -5210,7 +5218,17 @@ impl Bank {
                 .iter()
                 .chain(additional_builtins.unwrap_or(&[]).iter())
             {
-                if builtin.enable_feature_id.is_none() {
+                // The builtin should be added if it has no enable feature ID
+                // and it has not been migrated to Core BPF.
+                //
+                // If a program was previously migrated to Core BPF, accountsDB
+                // from snapshot should contain the BPF program accounts.
+                let builtin_is_bpf = |program_id: &Pubkey| {
+                    self.get_account(program_id)
+                        .map(|a| a.owner() == &bpf_loader_upgradeable::id())
+                        .unwrap_or(false)
+                };
+                if builtin.enable_feature_id.is_none() && !builtin_is_bpf(&builtin.program_id) {
                     self.transaction_processor.add_builtin(
                         self,
                         builtin.program_id,
@@ -5668,7 +5686,15 @@ impl Bank {
                 panic!("cannot verify accounts hash because slot {slot} is not a root");
             }
         }
-        let cap = self.capitalization();
+        // The snapshot storages must be captured *before* starting the background verification.
+        // Otherwise, it is possible that a delayed call to `get_snapshot_storages()` will *not*
+        // get the correct storages required to calculate and verify the accounts hashes.
+        let snapshot_storages = self
+            .rc
+            .accounts
+            .accounts_db
+            .get_snapshot_storages(RangeFull);
+        let capitalization = self.capitalization();
         let verify_config = VerifyAccountsHashAndLamportsConfig {
             ancestors: &self.ancestors,
             epoch_schedule: self.epoch_schedule(),
@@ -5689,9 +5715,14 @@ impl Bank {
                     .name("solBgHashVerify".into())
                     .spawn(move || {
                         info!("Initial background accounts hash verification has started");
+                        let snapshot_storages_and_slots = (
+                            snapshot_storages.0.as_slice(),
+                            snapshot_storages.1.as_slice(),
+                        );
                         let result = accounts_.verify_accounts_hash_and_lamports(
+                            snapshot_storages_and_slots,
                             slot,
-                            cap,
+                            capitalization,
                             base,
                             VerifyAccountsHashAndLamportsConfig {
                                 ancestors: &ancestors,
@@ -5711,7 +5742,17 @@ impl Bank {
             });
             true // initial result is true. We haven't failed yet. If verification fails, we'll panic from bg thread.
         } else {
-            let result = accounts.verify_accounts_hash_and_lamports(slot, cap, base, verify_config);
+            let snapshot_storages_and_slots = (
+                snapshot_storages.0.as_slice(),
+                snapshot_storages.1.as_slice(),
+            );
+            let result = accounts.verify_accounts_hash_and_lamports(
+                snapshot_storages_and_slots,
+                slot,
+                capitalization,
+                base,
+                verify_config,
+            );
             self.set_initial_accounts_hash_verification_completed();
             result
         }
@@ -6555,14 +6596,58 @@ impl Bank {
         new_feature_activations: &HashSet<Pubkey>,
     ) {
         for builtin in BUILTINS.iter() {
+            // The `builtin_is_bpf` flag is used to handle the case where a
+            // builtin is scheduled to be enabled by one feature gate and
+            // later migrated to Core BPF by another.
+            //
+            // There should never be a case where a builtin is set to be
+            // migrated to Core BPF and is also set to be enabled on feature
+            // activation on the same feature gate. However, the
+            // `builtin_is_bpf` flag will handle this case as well, electing
+            // to first attempt the migration to Core BPF.
+            //
+            // The migration to Core BPF will fail gracefully because the
+            // program account will not exist. The builtin will subsequently
+            // be enabled, but it will never be migrated to Core BPF.
+            //
+            // Using the same feature gate for both enabling and migrating a
+            // builtin to Core BPF should be strictly avoided.
+            let mut builtin_is_bpf = false;
+            if let Some(core_bpf_migration_config) = &builtin.core_bpf_migration_config {
+                // If the builtin is set to be migrated to Core BPF on feature
+                // activation, perform the migration and do not add the program
+                // to the bank's builtins. The migration will remove it from
+                // the builtins list and the cache.
+                if new_feature_activations.contains(&core_bpf_migration_config.feature_id) {
+                    if let Err(e) = self
+                        .migrate_builtin_to_core_bpf(&builtin.program_id, core_bpf_migration_config)
+                    {
+                        warn!(
+                            "Failed to migrate builtin {} to Core BPF: {}",
+                            builtin.name, e
+                        );
+                    } else {
+                        builtin_is_bpf = true;
+                    }
+                } else {
+                    // If the builtin has already been migrated to Core BPF, do not
+                    // add it to the bank's builtins.
+                    builtin_is_bpf = self
+                        .get_account(&builtin.program_id)
+                        .map(|a| a.owner() == &bpf_loader_upgradeable::id())
+                        .unwrap_or(false);
+                }
+            };
+
             if let Some(feature_id) = builtin.enable_feature_id {
-                let should_apply_action_for_feature_transition =
-                    if only_apply_transitions_for_new_features {
+                let should_enable_builtin_on_feature_transition = !builtin_is_bpf
+                    && if only_apply_transitions_for_new_features {
                         new_feature_activations.contains(&feature_id)
                     } else {
                         self.feature_set.is_active(&feature_id)
                     };
-                if should_apply_action_for_feature_transition {
+
+                if should_enable_builtin_on_feature_transition {
                     self.transaction_processor.add_builtin(
                         self,
                         builtin.program_id,
@@ -6576,6 +6661,26 @@ impl Bank {
                 }
             }
         }
+
+        // Migrate any necessary stateless builtins to core BPF.
+        // Stateless builtins do not have an `enable_feature_id` since they
+        // do not exist on-chain.
+        for stateless_builtin in STATELESS_BUILTINS.iter() {
+            if let Some(core_bpf_migration_config) = &stateless_builtin.core_bpf_migration_config {
+                if new_feature_activations.contains(&core_bpf_migration_config.feature_id) {
+                    if let Err(e) = self.migrate_builtin_to_core_bpf(
+                        &stateless_builtin.program_id,
+                        core_bpf_migration_config,
+                    ) {
+                        warn!(
+                            "Failed to migrate stateless builtin {} to Core BPF: {}",
+                            stateless_builtin.name, e
+                        );
+                    }
+                }
+            }
+        }
+
         for precompile in get_precompiles() {
             let should_add_precompile = precompile
                 .feature
@@ -6674,13 +6779,6 @@ impl Bank {
             ("waiting-time-us", measure.as_us(), i64),
         );
         Some(epoch_accounts_hash)
-    }
-
-    /// Return the epoch_reward_status field on the bank to serialize
-    /// Returns none if we are NOT in the reward interval.
-    pub(crate) fn get_epoch_reward_status_to_serialize(&self) -> Option<&EpochRewardStatus> {
-        matches!(self.epoch_reward_status, EpochRewardStatus::Active(_))
-            .then_some(&self.epoch_reward_status)
     }
 
     /// Convenience fn to get the Epoch Accounts Hash

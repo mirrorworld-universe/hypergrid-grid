@@ -1,5 +1,3 @@
-#![allow(clippy::arithmetic_side_effects)]
-
 use {
     crate::{
         checks::*,
@@ -55,22 +53,22 @@ use {
         account_utils::StateMut,
         bpf_loader, bpf_loader_deprecated,
         bpf_loader_upgradeable::{self, get_program_data_address, UpgradeableLoaderState},
+        commitment_config::CommitmentConfig,
         compute_budget,
         feature_set::FeatureSet,
         instruction::{Instruction, InstructionError},
         message::Message,
-        native_token::Sol,
         packet::PACKET_DATA_SIZE,
         pubkey::Pubkey,
         signature::{keypair_from_seed, read_keypair_file, Keypair, Signature, Signer},
-        system_instruction::{self, SystemError},
-        system_program,
+        system_instruction::{SystemError, MAX_PERMITTED_DATA_LENGTH},
         transaction::{Transaction, TransactionError},
     },
     std::{
         fs::File,
         io::{Read, Write},
         mem::size_of,
+        num::Saturating,
         path::PathBuf,
         rc::Rc,
         str::FromStr,
@@ -95,7 +93,6 @@ pub enum ProgramCliCommand {
         upgrade_authority_signer_index: SignerIndex,
         is_final: bool,
         max_len: Option<usize>,
-        allow_excessive_balance: bool,
         skip_fee_check: bool,
         compute_unit_price: Option<u64>,
         max_sign_attempts: usize,
@@ -245,10 +242,11 @@ impl ProgramSubCommands for App<'_, '_> {
                         .arg(
                             Arg::with_name("allow_excessive_balance")
                                 .long("allow-excessive-deploy-account-balance")
+                                .hidden(hidden_unless_forced())
                                 .takes_value(false)
                                 .help(
                                     "Use the designated program id even if the account already \
-                                     holds a large balance of SOL",
+                                     holds a large balance of SOL (Obsolete)",
                                 ),
                         )
                         .arg(
@@ -687,7 +685,6 @@ pub fn parse_program_subcommand(
                         .unwrap(),
                     is_final: matches.is_present("final"),
                     max_len,
-                    allow_excessive_balance: matches.is_present("allow_excessive_balance"),
                     skip_fee_check,
                     compute_unit_price,
                     max_sign_attempts,
@@ -976,7 +973,6 @@ pub fn process_program_subcommand(
             upgrade_authority_signer_index,
             is_final,
             max_len,
-            allow_excessive_balance,
             skip_fee_check,
             compute_unit_price,
             max_sign_attempts,
@@ -994,7 +990,6 @@ pub fn process_program_subcommand(
             *upgrade_authority_signer_index,
             *is_final,
             *max_len,
-            *allow_excessive_balance,
             *skip_fee_check,
             *compute_unit_price,
             *max_sign_attempts,
@@ -1173,7 +1168,6 @@ fn process_program_deploy(
     upgrade_authority_signer_index: SignerIndex,
     is_final: bool,
     max_len: Option<usize>,
-    allow_excessive_balance: bool,
     skip_fee_check: bool,
     compute_unit_price: Option<u64>,
     max_sign_attempts: usize,
@@ -1270,14 +1264,14 @@ fn process_program_deploy(
         true
     };
 
-    let (program_data, program_len, buffer_account) =
+    let (program_data, program_len, buffer_program_data) =
         if let Some(program_location) = program_location {
             let program_data = read_and_verify_elf(program_location)?;
             let program_len = program_data.len();
 
             // If a buffer was provided, check if it has already been created and set up properly
-            let buffer_account = if buffer_provided {
-                fetch_buffer_account(
+            let buffer_program_data = if buffer_provided {
+                fetch_buffer_program_data(
                     &rpc_client,
                     config,
                     Some(program_len),
@@ -1288,21 +1282,16 @@ fn process_program_deploy(
                 None
             };
 
-            (program_data, program_len, buffer_account)
+            (program_data, program_len, buffer_program_data)
         } else if buffer_provided {
-            let buffer_account = fetch_verified_buffer_account(
+            let buffer_program_data = fetch_verified_buffer_program_data(
                 &rpc_client,
                 config,
                 buffer_pubkey,
                 upgrade_authority_signer.pubkey(),
             )?;
 
-            let program_len = buffer_account
-                .data
-                .len()
-                .saturating_sub(UpgradeableLoaderState::size_of_buffer_metadata());
-
-            (vec![], program_len, Some(buffer_account))
+            (vec![], buffer_program_data.len(), Some(buffer_program_data))
         } else {
             return Err("Program location required if buffer not supplied".into());
         };
@@ -1328,7 +1317,7 @@ fn process_program_deploy(
                 "Initial deployments require a keypair be provided for the program id".into(),
             );
         }
-        do_process_program_write_and_deploy(
+        do_process_program_deploy(
             rpc_client.clone(),
             config,
             &program_data,
@@ -1336,12 +1325,11 @@ fn process_program_deploy(
             program_data_max_len,
             min_rent_exempt_program_data_balance,
             fee_payer_signer,
-            Some(&[program_signer.unwrap(), upgrade_authority_signer]),
+            &[program_signer.unwrap(), upgrade_authority_signer],
             buffer_signer,
             &buffer_pubkey,
-            buffer_account,
+            buffer_program_data,
             upgrade_authority_signer,
-            allow_excessive_balance,
             skip_fee_check,
             compute_unit_price,
             max_sign_attempts,
@@ -1359,7 +1347,7 @@ fn process_program_deploy(
             upgrade_authority_signer,
             &buffer_pubkey,
             buffer_signer,
-            buffer_account,
+            buffer_program_data,
             skip_fee_check,
             compute_unit_price,
             max_sign_attempts,
@@ -1388,39 +1376,36 @@ fn process_program_deploy(
     result
 }
 
-fn fetch_verified_buffer_account(
+fn fetch_verified_buffer_program_data(
     rpc_client: &RpcClient,
     config: &CliConfig,
     buffer_pubkey: Pubkey,
     buffer_authority: Pubkey,
-) -> Result<Account, Box<dyn std::error::Error>> {
-    let Some(buffer_account) =
-        fetch_buffer_account(rpc_client, config, None, buffer_pubkey, buffer_authority)?
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let Some(buffer_program_data) =
+        fetch_buffer_program_data(rpc_client, config, None, buffer_pubkey, buffer_authority)?
     else {
         return Err(format!("Buffer account {buffer_pubkey} not found").into());
     };
 
-    let buffer_program_data =
-        &buffer_account.data[UpgradeableLoaderState::size_of_buffer_metadata()..];
-
-    verify_elf(buffer_program_data).map_err(|err| {
+    verify_elf(&buffer_program_data).map_err(|err| {
         format!(
             "Buffer account {buffer_pubkey} has invalid program data: {:?}",
             err
         )
     })?;
 
-    Ok(buffer_account)
+    Ok(buffer_program_data)
 }
 
-fn fetch_buffer_account(
+fn fetch_buffer_program_data(
     rpc_client: &RpcClient,
     config: &CliConfig,
     min_program_len: Option<usize>,
     buffer_pubkey: Pubkey,
     buffer_authority: Pubkey,
-) -> Result<Option<Account>, Box<dyn std::error::Error>> {
-    let Some(account) = rpc_client
+) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
+    let Some(mut account) = rpc_client
         .get_account_with_commitment(&buffer_pubkey, config.commitment)?
         .value
     else {
@@ -1461,7 +1446,11 @@ fn fetch_buffer_account(
         }
     }
 
-    Ok(Some(account))
+    let buffer_program_data = account
+        .data
+        .split_off(UpgradeableLoaderState::size_of_buffer_metadata());
+
+    Ok(Some(buffer_program_data))
 }
 
 /// Upgrade existing program using upgradeable loader
@@ -1506,7 +1495,7 @@ fn process_program_upgrade(
             },
         )
     } else {
-        fetch_verified_buffer_account(
+        fetch_verified_buffer_program_data(
             &rpc_client,
             config,
             buffer_pubkey,
@@ -1569,7 +1558,7 @@ fn process_write_buffer(
         )
     };
 
-    let buffer_account = fetch_buffer_account(
+    let buffer_program_data = fetch_buffer_program_data(
         &rpc_client,
         config,
         Some(program_len),
@@ -1586,20 +1575,17 @@ fn process_write_buffer(
         UpgradeableLoaderState::size_of_programdata(buffer_data_max_len),
     )?;
 
-    let result = do_process_program_write_and_deploy(
+    let result = do_process_write_buffer(
         rpc_client,
         config,
         &program_data,
         program_data.len(),
-        buffer_data_max_len,
         min_rent_exempt_program_data_balance,
         fee_payer_signer,
-        None,
         buffer_signer,
         &buffer_pubkey,
-        buffer_account,
+        buffer_program_data,
         buffer_authority,
-        true,
         skip_fee_check,
         compute_unit_price,
         max_sign_attempts,
@@ -1857,8 +1843,10 @@ fn get_programs(
                     .map(|pubkey| pubkey.to_string())
                     .unwrap_or_else(|| "none".to_string()),
                 last_deploy_slot: slot,
-                data_len: programdata_account.data.len()
-                    - UpgradeableLoaderState::size_of_programdata_metadata(),
+                data_len: programdata_account
+                    .data
+                    .len()
+                    .saturating_sub(UpgradeableLoaderState::size_of_programdata_metadata()),
                 lamports: programdata_account.lamports,
                 use_lamports_unit,
             });
@@ -1937,8 +1925,9 @@ fn process_show(
                                         .map(|pubkey| pubkey.to_string())
                                         .unwrap_or_else(|| "none".to_string()),
                                     last_deploy_slot: slot,
-                                    data_len: programdata_account.data.len()
-                                        - UpgradeableLoaderState::size_of_programdata_metadata(),
+                                    data_len: programdata_account.data.len().saturating_sub(
+                                        UpgradeableLoaderState::size_of_programdata_metadata(),
+                                    ),
                                     lamports: programdata_account.lamports,
                                     use_lamports_unit,
                                 }))
@@ -1958,8 +1947,10 @@ fn process_show(
                             authority: authority_address
                                 .map(|pubkey| pubkey.to_string())
                                 .unwrap_or_else(|| "none".to_string()),
-                            data_len: account.data.len()
-                                - UpgradeableLoaderState::size_of_buffer_metadata(),
+                            data_len: account
+                                .data
+                                .len()
+                                .saturating_sub(UpgradeableLoaderState::size_of_buffer_metadata()),
                             lamports: account.lamports,
                             use_lamports_unit,
                         }))
@@ -2342,7 +2333,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn do_process_program_write_and_deploy(
+fn do_process_program_deploy(
     rpc_client: Arc<RpcClient>,
     config: &CliConfig,
     program_data: &[u8], // can be empty, hence we have program_len
@@ -2350,12 +2341,11 @@ fn do_process_program_write_and_deploy(
     program_data_max_len: usize,
     min_rent_exempt_program_data_balance: u64,
     fee_payer_signer: &dyn Signer,
-    program_signers: Option<&[&dyn Signer]>,
+    program_signers: &[&dyn Signer],
     buffer_signer: Option<&dyn Signer>,
     buffer_pubkey: &Pubkey,
-    buffer_account: Option<Account>,
+    buffer_program_data: Option<Vec<u8>>,
     buffer_authority_signer: &dyn Signer,
-    allow_excessive_balance: bool,
     skip_fee_check: bool,
     compute_unit_price: Option<u64>,
     max_sign_attempts: usize,
@@ -2363,21 +2353,9 @@ fn do_process_program_write_and_deploy(
 ) -> ProcessResult {
     let blockhash = rpc_client.get_latest_blockhash()?;
 
-    // Initialize buffer account or complete if already partially initialized
     let (initial_instructions, balance_needed, buffer_program_data) =
-        if let Some(mut account) = buffer_account {
-            let (ixs, balance_needed) = complete_partial_program_init(
-                &fee_payer_signer.pubkey(),
-                buffer_pubkey,
-                &account,
-                UpgradeableLoaderState::size_of_buffer(program_len),
-                min_rent_exempt_program_data_balance,
-                allow_excessive_balance,
-            )?;
-            let buffer_program_data = account
-                .data
-                .split_off(UpgradeableLoaderState::size_of_buffer_metadata());
-            (ixs, balance_needed, buffer_program_data)
+        if let Some(buffer_program_data) = buffer_program_data {
+            (vec![], 0, buffer_program_data)
         } else {
             (
                 bpf_loader_upgradeable::create_buffer(
@@ -2419,15 +2397,15 @@ fn do_process_program_write_and_deploy(
 
     let mut write_messages = vec![];
     let chunk_size = calculate_max_chunk_size(&create_msg);
-    for (chunk, i) in program_data.chunks(chunk_size).zip(0..) {
-        let offset = i * chunk_size;
-        if chunk != &buffer_program_data[offset..offset + chunk.len()] {
+    for (chunk, i) in program_data.chunks(chunk_size).zip(0usize..) {
+        let offset = i.saturating_mul(chunk_size);
+        if chunk != &buffer_program_data[offset..offset.saturating_add(chunk.len())] {
             write_messages.push(create_msg(offset as u32, chunk.to_vec()));
         }
     }
 
     // Create and add final message
-    let final_message = if let Some(program_signers) = program_signers {
+    let final_message = {
         let instructions = bpf_loader_upgradeable::deploy_with_max_program_len(
             &fee_payer_signer.pubkey(),
             &program_signers[0].pubkey(),
@@ -2444,8 +2422,6 @@ fn do_process_program_write_and_deploy(
             Some(&fee_payer_signer.pubkey()),
             &blockhash,
         ))
-    } else {
-        None
     };
 
     if !skip_fee_check {
@@ -2469,23 +2445,118 @@ fn do_process_program_write_and_deploy(
         fee_payer_signer,
         buffer_signer,
         Some(buffer_authority_signer),
-        program_signers,
+        Some(program_signers),
         max_sign_attempts,
         use_rpc,
     )?;
 
-    if let Some(program_signers) = program_signers {
-        let program_id = CliProgramId {
-            program_id: program_signers[0].pubkey().to_string(),
-            signature: final_tx_sig.as_ref().map(ToString::to_string),
+    let program_id = CliProgramId {
+        program_id: program_signers[0].pubkey().to_string(),
+        signature: final_tx_sig.as_ref().map(ToString::to_string),
+    };
+    Ok(config.output_format.formatted_string(&program_id))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn do_process_write_buffer(
+    rpc_client: Arc<RpcClient>,
+    config: &CliConfig,
+    program_data: &[u8], // can be empty, hence we have program_len
+    program_len: usize,
+    min_rent_exempt_program_data_balance: u64,
+    fee_payer_signer: &dyn Signer,
+    buffer_signer: Option<&dyn Signer>,
+    buffer_pubkey: &Pubkey,
+    buffer_program_data: Option<Vec<u8>>,
+    buffer_authority_signer: &dyn Signer,
+    skip_fee_check: bool,
+    compute_unit_price: Option<u64>,
+    max_sign_attempts: usize,
+    use_rpc: bool,
+) -> ProcessResult {
+    let blockhash = rpc_client.get_latest_blockhash()?;
+
+    let (initial_instructions, balance_needed, buffer_program_data) =
+        if let Some(buffer_program_data) = buffer_program_data {
+            (vec![], 0, buffer_program_data)
+        } else {
+            (
+                bpf_loader_upgradeable::create_buffer(
+                    &fee_payer_signer.pubkey(),
+                    buffer_pubkey,
+                    &buffer_authority_signer.pubkey(),
+                    min_rent_exempt_program_data_balance,
+                    program_len,
+                )?,
+                min_rent_exempt_program_data_balance,
+                vec![0; program_len],
+            )
         };
-        Ok(config.output_format.formatted_string(&program_id))
+
+    let initial_message = if !initial_instructions.is_empty() {
+        Some(Message::new_with_blockhash(
+            &initial_instructions
+                .with_compute_unit_config(&ComputeUnitConfig { compute_unit_price }),
+            Some(&fee_payer_signer.pubkey()),
+            &blockhash,
+        ))
     } else {
-        let buffer = CliProgramBuffer {
-            buffer: buffer_pubkey.to_string(),
-        };
-        Ok(config.output_format.formatted_string(&buffer))
+        None
+    };
+
+    // Create and add write messages
+    let create_msg = |offset: u32, bytes: Vec<u8>| {
+        let instruction = bpf_loader_upgradeable::write(
+            buffer_pubkey,
+            &buffer_authority_signer.pubkey(),
+            offset,
+            bytes,
+        );
+
+        let instructions =
+            vec![instruction].with_compute_unit_config(&ComputeUnitConfig { compute_unit_price });
+        Message::new_with_blockhash(&instructions, Some(&fee_payer_signer.pubkey()), &blockhash)
+    };
+
+    let mut write_messages = vec![];
+    let chunk_size = calculate_max_chunk_size(&create_msg);
+    for (chunk, i) in program_data.chunks(chunk_size).zip(0usize..) {
+        let offset = i.saturating_mul(chunk_size);
+        if chunk != &buffer_program_data[offset..offset.saturating_add(chunk.len())] {
+            write_messages.push(create_msg(offset as u32, chunk.to_vec()));
+        }
     }
+
+    if !skip_fee_check {
+        check_payer(
+            &rpc_client,
+            config,
+            fee_payer_signer.pubkey(),
+            balance_needed,
+            &initial_message,
+            &write_messages,
+            &None,
+        )?;
+    }
+
+    let _final_tx_sig = send_deploy_messages(
+        rpc_client,
+        config,
+        initial_message,
+        write_messages,
+        None,
+        fee_payer_signer,
+        buffer_signer,
+        Some(buffer_authority_signer),
+        None,
+        max_sign_attempts,
+        use_rpc,
+    )?;
+
+    let buffer = CliProgramBuffer {
+        buffer: buffer_pubkey.to_string(),
+    };
+    Ok(config.output_format.formatted_string(&buffer))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2500,7 +2571,7 @@ fn do_process_program_upgrade(
     upgrade_authority: &dyn Signer,
     buffer_pubkey: &Pubkey,
     buffer_signer: Option<&dyn Signer>,
-    buffer_account: Option<Account>,
+    buffer_program_data: Option<Vec<u8>>,
     skip_fee_check: bool,
     compute_unit_price: Option<u64>,
     max_sign_attempts: usize,
@@ -2512,26 +2583,14 @@ fn do_process_program_upgrade(
     let (initial_message, write_messages, balance_needed) = if let Some(buffer_signer) =
         buffer_signer
     {
-        // Check Buffer account to see if partial initialization has occurred
         let (mut initial_instructions, balance_needed, buffer_program_data) =
-            if let Some(mut account) = buffer_account {
-                let (ixs, balance_needed) = complete_partial_program_init(
-                    &fee_payer_signer.pubkey(),
-                    &buffer_signer.pubkey(),
-                    &account,
-                    UpgradeableLoaderState::size_of_buffer(program_len),
-                    min_rent_exempt_program_data_balance,
-                    true,
-                )?;
-                let buffer_program_data = account
-                    .data
-                    .split_off(UpgradeableLoaderState::size_of_buffer_metadata());
-                (ixs, balance_needed, buffer_program_data)
+            if let Some(buffer_program_data) = buffer_program_data {
+                (vec![], 0, buffer_program_data)
             } else {
                 (
                     bpf_loader_upgradeable::create_buffer(
                         &fee_payer_signer.pubkey(),
-                        buffer_pubkey,
+                        &buffer_signer.pubkey(),
                         &upgrade_authority.pubkey(),
                         min_rent_exempt_program_data_balance,
                         program_len,
@@ -2542,32 +2601,14 @@ fn do_process_program_upgrade(
             };
 
         if auto_extend {
-            // Attempt to look up the existing program's size, and automatically
-            // add an extend instruction if the program data account is too small.
-            let program_data_address = get_program_data_address(program_id);
-            if let Some(program_data_account) = rpc_client
-                .get_account_with_commitment(&program_data_address, config.commitment)?
-                .value
-            {
-                let program_len = UpgradeableLoaderState::size_of_programdata(program_len);
-                let account_data_len = program_data_account.data.len();
-                if program_len > account_data_len {
-                    let additional_bytes = program_len.saturating_sub(account_data_len);
-                    let additional_bytes: u32 = additional_bytes.try_into().map_err(|_| {
-                        format!(
-                            "Cannot auto-extend Program Data Account space due to size limit \
-                        please extend it manually with command `solana program extend {} \
-                        <BYTES>`. Additional bytes required: {}",
-                            program_id, additional_bytes
-                        )
-                    })?;
-                    initial_instructions.push(bpf_loader_upgradeable::extend_program(
-                        program_id,
-                        Some(&fee_payer_signer.pubkey()),
-                        additional_bytes,
-                    ));
-                }
-            }
+            extend_program_data_if_needed(
+                &mut initial_instructions,
+                &rpc_client,
+                config.commitment,
+                &fee_payer_signer.pubkey(),
+                program_id,
+                program_len,
+            )?;
         }
 
         let initial_message = if !initial_instructions.is_empty() {
@@ -2597,9 +2638,9 @@ fn do_process_program_upgrade(
         // Create and add write messages
         let mut write_messages = vec![];
         let chunk_size = calculate_max_chunk_size(&create_msg);
-        for (chunk, i) in program_data.chunks(chunk_size).zip(0..) {
-            let offset = i * chunk_size;
-            if chunk != &buffer_program_data[offset..offset + chunk.len()] {
+        for (chunk, i) in program_data.chunks(chunk_size).zip(0usize..) {
+            let offset = i.saturating_mul(chunk_size);
+            if chunk != &buffer_program_data[offset..offset.saturating_add(chunk.len())] {
                 write_messages.push(create_msg(offset as u32, chunk.to_vec()));
             }
         }
@@ -2657,6 +2698,56 @@ fn do_process_program_upgrade(
     Ok(config.output_format.formatted_string(&program_id))
 }
 
+// Attempts to look up the program data account, and adds an extend program data instruction if the
+// program data account is too small.
+fn extend_program_data_if_needed(
+    initial_instructions: &mut Vec<Instruction>,
+    rpc_client: &RpcClient,
+    commitment: CommitmentConfig,
+    fee_payer: &Pubkey,
+    program_id: &Pubkey,
+    program_len: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let program_data_address = get_program_data_address(program_id);
+
+    let Some(program_data_account) = rpc_client
+        .get_account_with_commitment(&program_data_address, commitment)?
+        .value
+    else {
+        // Program data has not been allocated yet.
+        return Ok(());
+    };
+
+    let required_len = UpgradeableLoaderState::size_of_programdata(program_len);
+    let max_permitted_data_length = usize::try_from(MAX_PERMITTED_DATA_LENGTH).unwrap();
+    if required_len > max_permitted_data_length {
+        let max_program_len = max_permitted_data_length
+            .saturating_sub(UpgradeableLoaderState::size_of_programdata(0));
+        return Err(format!(
+            "New program ({program_id}) data account is too big: {required_len}.\n\
+             Maximum program size: {max_program_len}.",
+        )
+        .into());
+    }
+
+    let current_len = program_data_account.data.len();
+    let additional_bytes = required_len.saturating_sub(current_len);
+    if additional_bytes == 0 {
+        // Current allocation is sufficient.
+        return Ok(());
+    }
+
+    let additional_bytes =
+        u32::try_from(additional_bytes).expect("`u32` is big enough to hold an account size");
+    initial_instructions.push(bpf_loader_upgradeable::extend_program(
+        program_id,
+        Some(fee_payer),
+        additional_bytes,
+    ));
+
+    Ok(())
+}
+
 fn read_and_verify_elf(program_location: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut file = File::open(program_location)
         .map_err(|err| format!("Unable to open program file: {err}"))?;
@@ -2687,60 +2778,6 @@ fn verify_elf(program_data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|err| format!("ELF error: {err}").into())
 }
 
-fn complete_partial_program_init(
-    payer_pubkey: &Pubkey,
-    elf_pubkey: &Pubkey,
-    account: &Account,
-    account_data_len: usize,
-    minimum_balance: u64,
-    allow_excessive_balance: bool,
-) -> Result<(Vec<Instruction>, u64), Box<dyn std::error::Error>> {
-    let mut instructions: Vec<Instruction> = vec![];
-    let mut balance_needed = 0;
-    if account.executable {
-        return Err("Buffer account is already executable".into());
-    }
-    if account.owner != bpf_loader_upgradeable::id() && !system_program::check_id(&account.owner) {
-        return Err("Buffer account passed is already in use by another program".into());
-    }
-    if !account.data.is_empty() && account.data.len() < account_data_len {
-        return Err(
-            "Buffer account passed is not large enough, may have been for a different deploy?"
-                .into(),
-        );
-    }
-
-    if account.data.is_empty() && system_program::check_id(&account.owner) {
-        instructions.push(system_instruction::allocate(
-            elf_pubkey,
-            account_data_len as u64,
-        ));
-        instructions.push(system_instruction::assign(
-            elf_pubkey,
-            &bpf_loader_upgradeable::id(),
-        ));
-        if account.lamports < minimum_balance {
-            let balance = minimum_balance - account.lamports;
-            instructions.push(system_instruction::transfer(
-                payer_pubkey,
-                elf_pubkey,
-                balance,
-            ));
-            balance_needed = balance;
-        } else if account.lamports > minimum_balance
-            && system_program::check_id(&account.owner)
-            && !allow_excessive_balance
-        {
-            return Err(format!(
-                "Buffer account has a balance: {:?}; it may already be in use",
-                Sol(account.lamports)
-            )
-            .into());
-        }
-    }
-    Ok((instructions, balance_needed))
-}
-
 fn check_payer(
     rpc_client: &RpcClient,
     config: &CliConfig,
@@ -2750,15 +2787,15 @@ fn check_payer(
     write_messages: &[Message],
     final_message: &Option<Message>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut fee = 0;
+    let mut fee = Saturating(0);
     if let Some(message) = initial_message {
         fee += rpc_client.get_fee_for_message(message)?;
     }
-    if !write_messages.is_empty() {
-        // Assume all write messages cost the same
-        if let Some(message) = write_messages.first() {
-            fee += rpc_client.get_fee_for_message(message)? * (write_messages.len() as u64);
-        }
+    // Assume all write messages cost the same
+    if let Some(message) = write_messages.first() {
+        fee += rpc_client
+            .get_fee_for_message(message)?
+            .saturating_mul(write_messages.len() as u64);
     }
     if let Some(message) = final_message {
         fee += rpc_client.get_fee_for_message(message)?;
@@ -2767,7 +2804,7 @@ fn check_payer(
         rpc_client,
         &fee_payer_pubkey,
         balance_needed,
-        fee,
+        fee.0,
         config.commitment,
     )?;
     Ok(())
@@ -3000,7 +3037,6 @@ mod tests {
                     upgrade_authority_signer_index: 0,
                     is_final: false,
                     max_len: None,
-                    allow_excessive_balance: false,
                     skip_fee_check: false,
                     compute_unit_price: None,
                     max_sign_attempts: 5,
@@ -3032,7 +3068,6 @@ mod tests {
                     upgrade_authority_signer_index: 0,
                     is_final: false,
                     max_len: Some(42),
-                    allow_excessive_balance: false,
                     skip_fee_check: false,
                     compute_unit_price: None,
                     max_sign_attempts: 5,
@@ -3066,7 +3101,6 @@ mod tests {
                     upgrade_authority_signer_index: 0,
                     is_final: false,
                     max_len: None,
-                    allow_excessive_balance: false,
                     skip_fee_check: false,
                     compute_unit_price: None,
                     max_sign_attempts: 5,
@@ -3102,7 +3136,6 @@ mod tests {
                     upgrade_authority_signer_index: 0,
                     is_final: false,
                     max_len: None,
-                    allow_excessive_balance: false,
                     skip_fee_check: false,
                     compute_unit_price: None,
                     max_sign_attempts: 5,
@@ -3137,7 +3170,6 @@ mod tests {
                     upgrade_authority_signer_index: 0,
                     is_final: false,
                     max_len: None,
-                    allow_excessive_balance: false,
                     skip_fee_check: false,
                     compute_unit_price: None,
                     max_sign_attempts: 5,
@@ -3175,7 +3207,6 @@ mod tests {
                     upgrade_authority_signer_index: 1,
                     is_final: false,
                     max_len: None,
-                    allow_excessive_balance: false,
                     skip_fee_check: false,
                     compute_unit_price: None,
                     max_sign_attempts: 5,
@@ -3210,7 +3241,6 @@ mod tests {
                     is_final: true,
                     max_len: None,
                     skip_fee_check: false,
-                    allow_excessive_balance: false,
                     compute_unit_price: None,
                     max_sign_attempts: 5,
                     auto_extend: true,
@@ -3241,7 +3271,6 @@ mod tests {
                     upgrade_authority_signer_index: 0,
                     is_final: false,
                     max_len: None,
-                    allow_excessive_balance: false,
                     skip_fee_check: false,
                     compute_unit_price: None,
                     max_sign_attempts: 1,
@@ -3272,7 +3301,6 @@ mod tests {
                     upgrade_authority_signer_index: 0,
                     is_final: false,
                     max_len: None,
-                    allow_excessive_balance: false,
                     skip_fee_check: false,
                     compute_unit_price: None,
                     max_sign_attempts: 5,
@@ -4016,7 +4044,6 @@ mod tests {
                 upgrade_authority_signer_index: 0,
                 is_final: false,
                 max_len: None,
-                allow_excessive_balance: false,
                 skip_fee_check: false,
                 compute_unit_price: None,
                 max_sign_attempts: 5,

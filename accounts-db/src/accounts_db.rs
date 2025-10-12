@@ -144,9 +144,9 @@ const SHRINK_COLLECT_CHUNK_SIZE: usize = 50;
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum CreateAncientStorage {
     /// ancient storages are created by appending
-    #[default]
     Append,
     /// ancient storages are created by 1-shot write to pack multiple accounts together more efficiently with new formats
+    #[default]
     Pack,
 }
 
@@ -499,6 +499,7 @@ pub const ACCOUNTS_DB_CONFIG_FOR_TESTING: AccountsDbConfig = AccountsDbConfig {
     base_working_path: None,
     accounts_hash_cache_path: None,
     shrink_paths: None,
+    read_cache_limit_bytes: None,
     write_cache_limit_bytes: None,
     ancient_append_vec_offset: None,
     skip_initial_hash_calc: false,
@@ -512,6 +513,7 @@ pub const ACCOUNTS_DB_CONFIG_FOR_BENCHMARKS: AccountsDbConfig = AccountsDbConfig
     base_working_path: None,
     accounts_hash_cache_path: None,
     shrink_paths: None,
+    read_cache_limit_bytes: None,
     write_cache_limit_bytes: None,
     ancient_append_vec_offset: None,
     skip_initial_hash_calc: false,
@@ -595,6 +597,9 @@ pub struct AccountsDbConfig {
     pub base_working_path: Option<PathBuf>,
     pub accounts_hash_cache_path: Option<PathBuf>,
     pub shrink_paths: Option<Vec<PathBuf>>,
+    /// The low and high watermark sizes for the read cache, in bytes.
+    /// If None, defaults will be used.
+    pub read_cache_limit_bytes: Option<(usize, usize)>,
     pub write_cache_limit_bytes: Option<u64>,
     /// if None, ancient append vecs are set to ANCIENT_APPEND_VEC_DEFAULT_OFFSET
     /// Some(offset) means include slots up to (max_slot - (slots_per_epoch - 'offset'))
@@ -2351,6 +2356,14 @@ pub struct PubkeyHashAccount {
 impl AccountsDb {
     pub const DEFAULT_ACCOUNTS_HASH_CACHE_DIR: &'static str = "accounts_hash_cache";
 
+    // read only cache does not update lru on read of an entry unless it has been at least this many ms since the last lru update
+    const READ_ONLY_CACHE_MS_TO_SKIP_LRU_UPDATE: u32 = 100;
+
+    // The default high and low watermark sizes for the accounts read cache.
+    // If the cache size exceeds MAX_SIZE_HI, it'll evict entries until the size is <= MAX_SIZE_LO.
+    const DEFAULT_MAX_READ_ONLY_CACHE_DATA_SIZE_LO: usize = 400_000_000;
+    const DEFAULT_MAX_READ_ONLY_CACHE_DATA_SIZE_HI: usize = 400_000_000;
+
     pub fn default_for_tests() -> Self {
         Self::default_with_accounts_index(AccountInfoAccountsIndex::default_for_tests(), None, None)
     }
@@ -2361,12 +2374,6 @@ impl AccountsDb {
         accounts_hash_cache_path: Option<PathBuf>,
     ) -> Self {
         let num_threads = get_thread_count();
-        // The high and low watermark sizes for the accounts read cache.  If the cache size exceeds
-        // MAX_SIZE_HI, it'll evict entries until the size is <= MAX_SIZE_LO.
-        const MAX_READ_ONLY_CACHE_DATA_SIZE_LO: usize = 400_000_000;
-        const MAX_READ_ONLY_CACHE_DATA_SIZE_HI: usize = 400_000_000;
-        // read only cache does not update lru on read of an entry unless it has been at least this many ms since the last lru update
-        const READ_ONLY_CACHE_MS_TO_SKIP_LRU_UPDATE: u32 = 100;
 
         let (base_working_path, base_working_temp_dir) =
             if let Some(base_working_path) = base_working_path {
@@ -2394,7 +2401,7 @@ impl AccountsDb {
         const ACCOUNTS_STACK_SIZE: usize = 8 * 1024 * 1024;
 
         AccountsDb {
-            create_ancient_storage: CreateAncientStorage::Pack,
+            create_ancient_storage: CreateAncientStorage::default(),
             verify_accounts_hash_in_bg: VerifyAccountsHashInBackground::default(),
             active_stats: ActiveStats::default(),
             skip_initial_hash_calc: false,
@@ -2404,9 +2411,9 @@ impl AccountsDb {
             accounts_cache: AccountsCache::default(),
             sender_bg_hasher: None,
             read_only_accounts_cache: ReadOnlyAccountsCache::new(
-                MAX_READ_ONLY_CACHE_DATA_SIZE_LO,
-                MAX_READ_ONLY_CACHE_DATA_SIZE_HI,
-                READ_ONLY_CACHE_MS_TO_SKIP_LRU_UPDATE,
+                Self::DEFAULT_MAX_READ_ONLY_CACHE_DATA_SIZE_LO,
+                Self::DEFAULT_MAX_READ_ONLY_CACHE_DATA_SIZE_HI,
+                Self::READ_ONLY_CACHE_MS_TO_SKIP_LRU_UPDATE,
             ),
             uncleaned_pubkeys: DashMap::new(),
             next_id: AtomicAccountsFileId::new(0),
@@ -2528,7 +2535,7 @@ impl AccountsDb {
         let create_ancient_storage = accounts_db_config
             .as_ref()
             .map(|config| config.create_ancient_storage)
-            .unwrap_or(CreateAncientStorage::Append);
+            .unwrap_or_default();
 
         let test_partitioned_epoch_rewards = accounts_db_config
             .as_ref()
@@ -2543,6 +2550,14 @@ impl AccountsDb {
         let partitioned_epoch_rewards_config: PartitionedEpochRewardsConfig =
             PartitionedEpochRewardsConfig::new(test_partitioned_epoch_rewards);
 
+        let read_cache_size = accounts_db_config
+            .as_ref()
+            .and_then(|config| config.read_cache_limit_bytes)
+            .unwrap_or((
+                Self::DEFAULT_MAX_READ_ONLY_CACHE_DATA_SIZE_LO,
+                Self::DEFAULT_MAX_READ_ONLY_CACHE_DATA_SIZE_HI,
+            ));
+
         let paths_is_empty = paths.is_empty();
         let mut new = Self {
             paths,
@@ -2553,6 +2568,11 @@ impl AccountsDb {
             shrink_ratio,
             accounts_update_notifier,
             create_ancient_storage,
+            read_only_accounts_cache: ReadOnlyAccountsCache::new(
+                read_cache_size.0,
+                read_cache_size.1,
+                Self::READ_ONLY_CACHE_MS_TO_SKIP_LRU_UPDATE,
+            ),
             write_cache_limit_bytes: accounts_db_config
                 .as_ref()
                 .and_then(|x| x.write_cache_limit_bytes),
@@ -4456,7 +4476,9 @@ impl AccountsDb {
             .slots_considered
             .fetch_add(1, Ordering::Relaxed);
 
-        if is_ancient(accounts) {
+        // if an append vec is at least 80% of the ideal capacity of an ancient append vec, that's close enough.
+        // If we packed, then we end up allocating exact size ancient append vecs. Those will likely never be exactly the ideal ancient capacity.
+        if accounts.capacity() * 100 / get_ancient_append_vec_capacity() > 80 {
             self.shrink_ancient_stats
                 .ancient_scanned
                 .fetch_add(1, Ordering::Relaxed);
@@ -5449,12 +5471,6 @@ impl AccountsDb {
             false,
             load_zero_lamports,
         )
-    }
-
-    /// remove all entries from the read only accounts cache
-    /// useful for benches/tests
-    pub fn flush_read_only_cache_for_tests(&self) {
-        self.read_only_accounts_cache.reset_for_tests();
     }
 
     /// if 'load_into_read_cache_only', then return value is meaningless.
@@ -7569,6 +7585,7 @@ impl AccountsDb {
     /// and then calculate the incremental accounts hash for `(base slot, slot]`.
     pub fn verify_accounts_hash_and_lamports(
         &self,
+        snapshot_storages_and_slots: (&[Arc<AccountStorageEntry>], &[Slot]),
         slot: Slot,
         total_lamports: u64,
         base: Option<(Slot, /*capitalization*/ u64)>,
@@ -7584,11 +7601,21 @@ impl AccountsDb {
         let hash_mismatch_is_error = !config.ignore_mismatch;
 
         if let Some((base_slot, base_capitalization)) = base {
-            self.verify_accounts_hash_and_lamports(base_slot, base_capitalization, None, config)?;
-            let (storages, slots) =
-                self.get_snapshot_storages(base_slot.checked_add(1).unwrap()..=slot);
-            let sorted_storages =
-                SortedStorages::new_with_slots(storages.iter().zip(slots), None, None);
+            self.verify_accounts_hash_and_lamports(
+                snapshot_storages_and_slots,
+                base_slot,
+                base_capitalization,
+                None,
+                config,
+            )?;
+
+            let storages_and_slots = snapshot_storages_and_slots
+                .0
+                .iter()
+                .zip(snapshot_storages_and_slots.1.iter())
+                .filter(|storage_and_slot| *storage_and_slot.1 > base_slot)
+                .map(|(storage, slot)| (storage, *slot));
+            let sorted_storages = SortedStorages::new_with_slots(storages_and_slots, None, None);
             let calculated_incremental_accounts_hash = self.calculate_incremental_accounts_hash(
                 &calc_config,
                 &sorted_storages,
@@ -7607,15 +7634,15 @@ impl AccountsDb {
                 }
             }
         } else {
-            let (calculated_accounts_hash, calculated_lamports) = self
-                .calculate_accounts_hash_with_verify_from(
-                    CalcAccountsHashDataSource::Storages,
-                    config.test_hash_calculation,
-                    slot,
-                    calc_config,
-                    None,
-                );
-
+            let storages_and_slots = snapshot_storages_and_slots
+                .0
+                .iter()
+                .zip(snapshot_storages_and_slots.1.iter())
+                .filter(|storage_and_slot| *storage_and_slot.1 <= slot)
+                .map(|(storage, slot)| (storage, *slot));
+            let sorted_storages = SortedStorages::new_with_slots(storages_and_slots, None, None);
+            let (calculated_accounts_hash, calculated_lamports) =
+                self.calculate_accounts_hash(&calc_config, &sorted_storages, HashStats::default());
             if calculated_lamports != total_lamports {
                 warn!(
                     "Mismatched total lamports: {} calculated: {}",
@@ -7626,7 +7653,6 @@ impl AccountsDb {
                     total_lamports,
                 ));
             }
-
             let (found_accounts_hash, _) = self
                 .get_accounts_hash(slot)
                 .ok_or(AccountsHashVerificationError::MissingAccountsHash)?;
@@ -7926,20 +7952,12 @@ impl AccountsDb {
         true
     }
 
-    fn is_candidate_for_shrink(
-        &self,
-        store: &AccountStorageEntry,
-        allow_shrink_ancient: bool,
-    ) -> bool {
+    fn is_candidate_for_shrink(&self, store: &AccountStorageEntry) -> bool {
         // appended ancient append vecs should not be shrunk by the normal shrink codepath.
         // It is not possible to identify ancient append vecs when we pack, so no check for ancient when we are not appending.
         let total_bytes = if self.create_ancient_storage == CreateAncientStorage::Append
             && is_ancient(&store.accounts)
         {
-            if !allow_shrink_ancient {
-                return false;
-            }
-
             store.written_bytes()
         } else {
             store.capacity()
@@ -8007,7 +8025,7 @@ impl AccountsDb {
                     let dead_bytes = store.accounts.get_account_sizes(&offsets).iter().sum();
                     store.remove_accounts(dead_bytes, reset_accounts, offsets.len());
                     if Self::is_shrinking_productive(*slot, &store)
-                        && self.is_candidate_for_shrink(&store, false)
+                        && self.is_candidate_for_shrink(&store)
                     {
                         // Checking that this single storage entry is ready for shrinking,
                         // should be a sufficient indication that the slot is ready to be shrunk
@@ -8325,14 +8343,7 @@ impl AccountsDb {
 
     fn report_store_timings(&self) {
         if self.stats.last_store_report.should_update(1000) {
-            let (
-                read_only_cache_hits,
-                read_only_cache_misses,
-                read_only_cache_evicts,
-                read_only_cache_load_us,
-                read_only_cache_store_us,
-                read_only_cache_evict_us,
-            ) = self.read_only_accounts_cache.get_and_reset_stats();
+            let read_cache_stats = self.read_only_accounts_cache.get_and_reset_stats();
             datapoint_info!(
                 "accounts_db_store_timings",
                 (
@@ -8387,30 +8398,40 @@ impl AccountsDb {
                     self.read_only_accounts_cache.data_size(),
                     i64
                 ),
-                ("read_only_accounts_cache_hits", read_only_cache_hits, i64),
+                ("read_only_accounts_cache_hits", read_cache_stats.hits, i64),
                 (
                     "read_only_accounts_cache_misses",
-                    read_only_cache_misses,
+                    read_cache_stats.misses,
                     i64
                 ),
                 (
                     "read_only_accounts_cache_evicts",
-                    read_only_cache_evicts,
+                    read_cache_stats.evicts,
                     i64
                 ),
                 (
                     "read_only_accounts_cache_load_us",
-                    read_only_cache_load_us,
+                    read_cache_stats.load_us,
                     i64
                 ),
                 (
                     "read_only_accounts_cache_store_us",
-                    read_only_cache_store_us,
+                    read_cache_stats.store_us,
                     i64
                 ),
                 (
                     "read_only_accounts_cache_evict_us",
-                    read_only_cache_evict_us,
+                    read_cache_stats.evict_us,
+                    i64
+                ),
+                (
+                    "read_only_accounts_cache_evictor_wakeup_count_all",
+                    read_cache_stats.evictor_wakeup_count_all,
+                    i64
+                ),
+                (
+                    "read_only_accounts_cache_evictor_wakeup_count_productive",
+                    read_cache_stats.evictor_wakeup_count_productive,
                     i64
                 ),
                 (
@@ -9529,6 +9550,26 @@ impl AccountsDb {
         } else {
             0
         }
+    }
+
+    pub fn verify_accounts_hash_and_lamports_for_tests(
+        &self,
+        slot: Slot,
+        total_lamports: u64,
+        config: VerifyAccountsHashAndLamportsConfig,
+    ) -> Result<(), AccountsHashVerificationError> {
+        let snapshot_storages = self.get_snapshot_storages(..);
+        let snapshot_storages_and_slots = (
+            snapshot_storages.0.as_slice(),
+            snapshot_storages.1.as_slice(),
+        );
+        self.verify_accounts_hash_and_lamports(
+            snapshot_storages_and_slots,
+            slot,
+            total_lamports,
+            None,
+            config,
+        )
     }
 }
 
@@ -12433,14 +12474,14 @@ pub mod tests {
         );
 
         assert_matches!(
-            db.verify_accounts_hash_and_lamports(some_slot, 1, None, config.clone()),
+            db.verify_accounts_hash_and_lamports_for_tests(some_slot, 1, config.clone()),
             Ok(_)
         );
 
         db.accounts_hashes.lock().unwrap().remove(&some_slot);
 
         assert_matches!(
-            db.verify_accounts_hash_and_lamports(some_slot, 1, None, config.clone()),
+            db.verify_accounts_hash_and_lamports_for_tests(some_slot, 1, config.clone()),
             Err(AccountsHashVerificationError::MissingAccountsHash)
         );
 
@@ -12450,7 +12491,7 @@ pub mod tests {
         );
 
         assert_matches!(
-            db.verify_accounts_hash_and_lamports(some_slot, 1, None, config),
+            db.verify_accounts_hash_and_lamports_for_tests(some_slot, 1, config),
             Err(AccountsHashVerificationError::MismatchedAccountsHash)
         );
     }
@@ -12480,7 +12521,7 @@ pub mod tests {
                 db.update_accounts_hash_for_tests(some_slot, &ancestors, true, true);
 
                 assert_matches!(
-                    db.verify_accounts_hash_and_lamports(some_slot, 1, None, config.clone()),
+                    db.verify_accounts_hash_and_lamports_for_tests(some_slot, 1, config.clone()),
                     Ok(_)
                 );
                 continue;
@@ -12498,12 +12539,12 @@ pub mod tests {
             db.update_accounts_hash_for_tests(some_slot, &ancestors, true, true);
 
             assert_matches!(
-                db.verify_accounts_hash_and_lamports(some_slot, 2, None, config.clone()),
+                db.verify_accounts_hash_and_lamports_for_tests(some_slot, 2, config.clone()),
                 Ok(_)
             );
 
             assert_matches!(
-                db.verify_accounts_hash_and_lamports(some_slot, 10, None, config),
+                db.verify_accounts_hash_and_lamports_for_tests(some_slot, 10, config),
                 Err(AccountsHashVerificationError::MismatchedTotalLamports(expected, actual)) if expected == 2 && actual == 10
             );
         }
@@ -12529,7 +12570,7 @@ pub mod tests {
         );
 
         assert_matches!(
-            db.verify_accounts_hash_and_lamports(some_slot, 0, None, config),
+            db.verify_accounts_hash_and_lamports_for_tests(some_slot, 0, config),
             Ok(_)
         );
     }
@@ -12567,7 +12608,7 @@ pub mod tests {
         );
 
         assert_matches!(
-            db.verify_accounts_hash_and_lamports(some_slot, 1, None, config),
+            db.verify_accounts_hash_and_lamports_for_tests(some_slot, 1, config),
             Err(AccountsHashVerificationError::MismatchedAccountsHash)
         );
     }
@@ -15161,14 +15202,14 @@ pub mod tests {
             }
         }
         entry.alive_bytes.store(3000, Ordering::Release);
-        assert!(accounts.is_candidate_for_shrink(&entry, false));
+        assert!(accounts.is_candidate_for_shrink(&entry));
         entry.alive_bytes.store(5000, Ordering::Release);
-        assert!(!accounts.is_candidate_for_shrink(&entry, false));
+        assert!(!accounts.is_candidate_for_shrink(&entry));
         accounts.shrink_ratio = AccountShrinkThreshold::TotalSpace { shrink_ratio: 0.3 };
         entry.alive_bytes.store(3000, Ordering::Release);
-        assert!(accounts.is_candidate_for_shrink(&entry, false));
+        assert!(accounts.is_candidate_for_shrink(&entry));
         accounts.shrink_ratio = AccountShrinkThreshold::IndividualStore { shrink_ratio: 0.3 };
-        assert!(!accounts.is_candidate_for_shrink(&entry, false));
+        assert!(!accounts.is_candidate_for_shrink(&entry));
     }
 
     define_accounts_db_test!(test_calculate_storage_count_and_alive_bytes, |accounts| {

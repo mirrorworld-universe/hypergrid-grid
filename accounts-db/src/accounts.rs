@@ -1,8 +1,8 @@
 use {
     crate::{
         accounts_db::{
-            AccountsAddRootTiming, AccountsDb, LoadHint, LoadedAccount, ScanAccountStorageData,
-            ScanStorageResult, VerifyAccountsHashAndLamportsConfig,
+            AccountStorageEntry, AccountsAddRootTiming, AccountsDb, LoadHint, LoadedAccount,
+            ScanAccountStorageData, ScanStorageResult, VerifyAccountsHashAndLamportsConfig,
         },
         accounts_index::{IndexKey, ScanConfig, ScanError, ScanResult},
         ancestors::Ancestors,
@@ -20,14 +20,15 @@ use {
             state::{DurableNonce, Versions as NonceVersions},
             State as NonceState,
         },
-        nonce_info::{NonceFull, NonceInfo},
         pubkey::Pubkey,
         slot_hashes::SlotHashes,
         transaction::{Result, SanitizedTransaction, TransactionAccountLocks, TransactionError},
         transaction_context::TransactionAccount,
     },
     solana_svm::{
-        account_loader::TransactionLoadResult, transaction_results::TransactionExecutionResult,
+        account_loader::TransactionLoadResult,
+        nonce_info::{NonceFull, NonceInfo},
+        transaction_results::TransactionExecutionResult,
     },
     std::{
         cmp::Reverse,
@@ -297,15 +298,19 @@ impl Accounts {
     #[must_use]
     pub fn verify_accounts_hash_and_lamports(
         &self,
+        snapshot_storages_and_slots: (&[Arc<AccountStorageEntry>], &[Slot]),
         slot: Slot,
         total_lamports: u64,
         base: Option<(Slot, /*capitalization*/ u64)>,
         config: VerifyAccountsHashAndLamportsConfig,
     ) -> bool {
-        if let Err(err) =
-            self.accounts_db
-                .verify_accounts_hash_and_lamports(slot, total_lamports, base, config)
-        {
+        if let Err(err) = self.accounts_db.verify_accounts_hash_and_lamports(
+            snapshot_storages_and_slots,
+            slot,
+            total_lamports,
+            base,
+            config,
+        ) {
             warn!("verify_accounts_hash failed: {err:?}, slot: {slot}");
             false
         } else {
@@ -726,16 +731,12 @@ impl Accounts {
 
             let message = tx.message();
             let loaded_transaction = tx_load_result.as_mut().unwrap();
-            let mut fee_payer_index = None;
             for (i, (address, account)) in (0..message.account_keys().len())
                 .zip(loaded_transaction.accounts.iter_mut())
                 .filter(|(i, _)| message.is_non_loader_key(*i))
             {
-                if fee_payer_index.is_none() {
-                    fee_payer_index = Some(i);
-                }
-                let is_fee_payer = Some(i) == fee_payer_index;
                 if message.is_writable(i) {
+                    let is_fee_payer = i == 0;
                     let is_nonce_account = prepare_if_nonce_account(
                         address,
                         account,
@@ -1251,13 +1252,12 @@ mod tests {
         );
 
         // Check that read-only lock with zero references is deleted
-        assert!(accounts
+        assert!(!accounts
             .account_locks
             .lock()
             .unwrap()
             .readonly_locks
-            .get(&keypair1.pubkey())
-            .is_none());
+            .contains_key(&keypair1.pubkey()));
     }
 
     #[test]
@@ -1494,13 +1494,12 @@ mod tests {
             2
         );
         // verify that keypair2 (for tx1) is not write-locked
-        assert!(accounts
+        assert!(!accounts
             .account_locks
             .lock()
             .unwrap()
             .write_locks
-            .get(&keypair2.pubkey())
-            .is_none());
+            .contains(&keypair2.pubkey()));
 
         accounts.unlock_accounts(txs.iter().zip(&results));
 
