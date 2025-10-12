@@ -35,7 +35,6 @@
 //! already been signed and verified.
 #[allow(deprecated)]
 use solana_sdk::recent_blockhashes_account;
-pub use solana_sdk::reward_type::RewardType;
 use {
     crate::{
         bank::{
@@ -176,7 +175,7 @@ use {
         transaction_processing_callback::TransactionProcessingCallback,
         transaction_processor::{
             ExecutionRecordingConfig, TransactionBatchProcessor, TransactionLogMessages,
-            TransactionProcessingConfig,
+            TransactionProcessingConfig, TransactionProcessingEnvironment,
         },
         transaction_results::{
             TransactionExecutionDetails, TransactionExecutionResult,
@@ -204,6 +203,9 @@ use {
         thread::Builder,
         time::{Duration, Instant},
     },
+};
+pub use {
+    partitioned_epoch_rewards::KeyedRewardsAndNumPartitions, solana_sdk::reward_type::RewardType,
 };
 #[cfg(feature = "dev-context-only-utils")]
 use {
@@ -601,6 +603,7 @@ impl PartialEq for Bank {
             collector_fee_details: _,
             compute_budget: _,
             transaction_account_lock_limit: _,
+            fee_structure: _,
             // Ignore new fields explicitly if they do not impact PartialEq.
             // Adding ".." will remove compile-time checks that if a new field
             // is added to the struct, this PartialEq is accordingly updated.
@@ -889,6 +892,9 @@ pub struct Bank {
 
     /// The max number of accounts that a transaction may lock.
     transaction_account_lock_limit: Option<usize>,
+
+    /// Fee structure to use for assessing transaction fees.
+    fee_structure: FeeStructure,
 }
 
 struct VoteWithStakeDelegations {
@@ -1007,12 +1013,12 @@ impl Bank {
             collector_fee_details: RwLock::new(CollectorFeeDetails::default()),
             compute_budget: None,
             transaction_account_lock_limit: None,
+            fee_structure: FeeStructure::default(),
         };
 
         bank.transaction_processor = TransactionBatchProcessor::new(
             bank.slot,
             bank.epoch,
-            bank.epoch_schedule.clone(),
             HashSet::default(),
             // Sonic:
             Arc::clone(&bank.accounts().accounts_db),
@@ -1270,6 +1276,7 @@ impl Bank {
             collector_fee_details: RwLock::new(CollectorFeeDetails::default()),
             compute_budget: parent.compute_budget,
             transaction_account_lock_limit: parent.transaction_account_lock_limit,
+            fee_structure: parent.fee_structure.clone(),
         };
 
         let (_, ancestors_time_us) = measure_us!({
@@ -1300,12 +1307,17 @@ impl Bank {
             }
         });
 
+        let (_epoch, slot_index) = new.epoch_schedule.get_epoch_and_slot_index(new.slot);
+        let slots_in_epoch = new.epoch_schedule.get_slots_in_epoch(new.epoch);
+
         let (_, cache_preparation_time_us) = measure_us!(new
             .transaction_processor
             .prepare_program_cache_for_upcoming_feature_set(
                 &new,
                 &new.compute_active_feature_set(true).0,
                 &new.compute_budget.unwrap_or_default(),
+                slot_index,
+                slots_in_epoch,
             ));
 
         // Update sysvars before processing transactions
@@ -1657,12 +1669,12 @@ impl Bank {
             collector_fee_details: RwLock::new(CollectorFeeDetails::default()),
             compute_budget: runtime_config.compute_budget,
             transaction_account_lock_limit: runtime_config.transaction_account_lock_limit,
+            fee_structure: FeeStructure::default(),
         };
 
         bank.transaction_processor = TransactionBatchProcessor::new(
             bank.slot,
             bank.epoch,
-            bank.epoch_schedule.clone(),
             HashSet::default(),
             // Sonic:
             Arc::clone(&bank.accounts().accounts_db),
@@ -3001,7 +3013,6 @@ impl Bank {
         self.slots_per_year = genesis_config.slots_per_year();
 
         self.epoch_schedule = genesis_config.epoch_schedule.clone();
-        self.transaction_processor.epoch_schedule = genesis_config.epoch_schedule.clone();
 
         self.inflation = Arc::new(RwLock::new(genesis_config.inflation));
 
@@ -3744,12 +3755,24 @@ impl Bank {
         debug!("check: {}us", check_time.as_us());
         timings.saturating_add_in_place(ExecuteTimingType::CheckUs, check_time.as_us());
 
+        let (blockhash, lamports_per_signature) = self.last_blockhash_and_lamports_per_signature();
+        let processing_environment = TransactionProcessingEnvironment {
+            blockhash,
+            epoch_total_stake: self.epoch_total_stake(self.epoch()),
+            epoch_vote_accounts: self.epoch_vote_accounts(self.epoch()),
+            feature_set: Arc::clone(&self.feature_set),
+            fee_structure: Some(&self.fee_structure),
+            lamports_per_signature,
+            rent_collector: Some(&self.rent_collector),
+        };
+
         let sanitized_output = self
             .transaction_processor
             .load_and_execute_sanitized_transactions(
                 self,
                 sanitized_txs,
                 check_results,
+                &processing_environment,
                 &processing_config,
             );
 
@@ -5412,18 +5435,20 @@ impl Bank {
     }
 
     /// Returns all the accounts this bank can load
-    pub fn get_all_accounts(&self) -> ScanResult<Vec<PubkeyAccountSlot>> {
-        self.rc.accounts.load_all(&self.ancestors, self.bank_id)
+    pub fn get_all_accounts(&self, sort_results: bool) -> ScanResult<Vec<PubkeyAccountSlot>> {
+        self.rc
+            .accounts
+            .load_all(&self.ancestors, self.bank_id, sort_results)
     }
 
     // Scans all the accounts this bank can load, applying `scan_func`
-    pub fn scan_all_accounts<F>(&self, scan_func: F) -> ScanResult<()>
+    pub fn scan_all_accounts<F>(&self, scan_func: F, sort_results: bool) -> ScanResult<()>
     where
         F: FnMut(Option<(&Pubkey, AccountSharedData, Slot)>),
     {
         self.rc
             .accounts
-            .scan_all(&self.ancestors, self.bank_id, scan_func)
+            .scan_all(&self.ancestors, self.bank_id, scan_func, sort_results)
     }
 
     pub fn get_program_accounts_modified_since_parent(
@@ -5469,6 +5494,7 @@ impl Bank {
         num: usize,
         filter_by_address: &HashSet<Pubkey>,
         filter: AccountAddressFilter,
+        sort_results: bool,
     ) -> ScanResult<Vec<(Pubkey, u64)>> {
         self.rc.accounts.load_largest_accounts(
             &self.ancestors,
@@ -5476,6 +5502,7 @@ impl Bank {
             num,
             filter_by_address,
             filter,
+            sort_results,
         )
     }
 
@@ -6758,7 +6785,7 @@ impl Bank {
 
     /// Get all the accounts for this bank and calculate stats
     pub fn get_total_accounts_stats(&self) -> ScanResult<TotalAccountsStats> {
-        let accounts = self.get_all_accounts()?;
+        let accounts = self.get_all_accounts(false)?;
         Ok(self.calculate_total_accounts_stats(
             accounts
                 .iter()
@@ -6848,10 +6875,8 @@ impl Bank {
 
     pub fn is_in_slot_hashes_history(&self, slot: &Slot) -> bool {
         if slot < &self.slot {
-            if let Ok(sysvar_cache) = self.transaction_processor.sysvar_cache.read() {
-                if let Ok(slot_hashes) = sysvar_cache.get_slot_hashes() {
-                    return slot_hashes.get(slot).is_some();
-                }
+            if let Ok(slot_hashes) = self.transaction_processor.sysvar_cache().get_slot_hashes() {
+                return slot_hashes.get(slot).is_some();
             }
         }
         false
@@ -6862,7 +6887,7 @@ impl Bank {
     }
 
     pub fn fee_structure(&self) -> &FeeStructure {
-        &self.transaction_processor.fee_structure
+        &self.fee_structure
     }
 
     pub fn compute_budget(&self) -> Option<ComputeBudget> {
@@ -6924,26 +6949,6 @@ impl TransactionProcessingCallback for Bank {
             .accounts_db
             .load_with_fixed_root(&self.ancestors, pubkey)
             .map(|(acc, _)| acc)
-    }
-
-    fn get_last_blockhash_and_lamports_per_signature(&self) -> (Hash, u64) {
-        self.last_blockhash_and_lamports_per_signature()
-    }
-
-    fn get_rent_collector(&self) -> &RentCollector {
-        &self.rent_collector
-    }
-
-    fn get_feature_set(&self) -> Arc<FeatureSet> {
-        self.feature_set.clone()
-    }
-
-    fn get_epoch_total_stake(&self) -> Option<u64> {
-        self.epoch_total_stake(self.epoch())
-    }
-
-    fn get_epoch_vote_accounts(&self) -> Option<&VoteAccountsHashMap> {
-        self.epoch_vote_accounts(self.epoch())
     }
 
     fn get_program_match_criteria(&self, program: &Pubkey) -> ProgramCacheMatchCriteria {
@@ -7204,7 +7209,7 @@ impl Bank {
     }
 
     pub fn set_fee_structure(&mut self, fee_structure: &FeeStructure) {
-        self.transaction_processor.fee_structure = fee_structure.clone();
+        self.fee_structure = fee_structure.clone();
     }
 
     pub fn load_program(
@@ -7216,14 +7221,7 @@ impl Bank {
         let environments = self
             .transaction_processor
             .get_environments_for_epoch(effective_epoch)?;
-        load_program_with_pubkey(
-            self,
-            &environments,
-            pubkey,
-            self.slot(),
-            self.epoch_schedule(),
-            reload,
-        )
+        load_program_with_pubkey(self, &environments, pubkey, self.slot(), reload)
     }
 }
 

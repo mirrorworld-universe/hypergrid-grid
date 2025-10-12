@@ -4352,7 +4352,7 @@ fn test_bank_get_program_accounts() {
     let parent = Arc::new(Bank::new_for_tests(&genesis_config));
     parent.restore_old_behavior_for_fragile_tests();
 
-    let genesis_accounts: Vec<_> = parent.get_all_accounts().unwrap();
+    let genesis_accounts: Vec<_> = parent.get_all_accounts(false).unwrap();
     assert!(
         genesis_accounts
             .iter()
@@ -6755,7 +6755,12 @@ fn test_add_builtin_account() {
         activate_all_features(&mut genesis_config);
 
         let slot = 123;
-        let program_id = solana_sdk::pubkey::new_rand();
+        // The account at program_id will be created initially with just 1 lamport.
+        // This is below the rent-exempt minimum.  If the program_id is in the
+        // rent collection partition for the banks used in this test, then the
+        // account will be rent-collected away.  That'll make the test fail.
+        // So pick a pubkey that is guaranteed to *not* be part of rent collection.
+        let program_id = Pubkey::new_from_array([0xFF; 32]);
 
         let bank = Arc::new(Bank::new_from_parent(
             Arc::new(Bank::new_for_tests(&genesis_config)),
@@ -7980,7 +7985,7 @@ fn test_reserved_account_keys() {
 
     assert_eq!(
         bank.get_reserved_account_keys().len(),
-        29,
+        30,
         "after activating the new feature, bank should have new active reserved keys"
     );
 }
@@ -9111,10 +9116,7 @@ fn test_epoch_schedule_from_genesis_config() {
         Arc::default(),
     ));
 
-    assert_eq!(
-        &bank.transaction_processor.epoch_schedule,
-        &genesis_config.epoch_schedule
-    );
+    assert_eq!(bank.epoch_schedule(), &genesis_config.epoch_schedule);
 }
 
 fn check_stake_vote_account_validity<F>(check_owner_change: bool, load_vote_and_stake_accounts: F)
@@ -9476,24 +9478,24 @@ fn test_get_largest_accounts() {
 
     // Return only one largest account
     assert_eq!(
-        bank.get_largest_accounts(1, &pubkeys_hashset, AccountAddressFilter::Include)
+        bank.get_largest_accounts(1, &pubkeys_hashset, AccountAddressFilter::Include, false)
             .unwrap(),
         vec![(pubkeys[4], sol_to_lamports(5.0))]
     );
     assert_eq!(
-        bank.get_largest_accounts(1, &HashSet::new(), AccountAddressFilter::Exclude)
+        bank.get_largest_accounts(1, &HashSet::new(), AccountAddressFilter::Exclude, false)
             .unwrap(),
         vec![(pubkeys[4], sol_to_lamports(5.0))]
     );
     assert_eq!(
-        bank.get_largest_accounts(1, &exclude4, AccountAddressFilter::Exclude)
+        bank.get_largest_accounts(1, &exclude4, AccountAddressFilter::Exclude, false)
             .unwrap(),
         vec![(pubkeys[3], sol_to_lamports(4.0))]
     );
 
     // Return all added accounts
     let results = bank
-        .get_largest_accounts(10, &pubkeys_hashset, AccountAddressFilter::Include)
+        .get_largest_accounts(10, &pubkeys_hashset, AccountAddressFilter::Include, false)
         .unwrap();
     assert_eq!(results.len(), sorted_accounts.len());
     for pubkey_balance in sorted_accounts.iter() {
@@ -9505,7 +9507,7 @@ fn test_get_largest_accounts() {
 
     let expected_accounts = sorted_accounts[1..].to_vec();
     let results = bank
-        .get_largest_accounts(10, &exclude4, AccountAddressFilter::Exclude)
+        .get_largest_accounts(10, &exclude4, AccountAddressFilter::Exclude, false)
         .unwrap();
     // results include 5 Bank builtins
     assert_eq!(results.len(), 10);
@@ -9519,7 +9521,7 @@ fn test_get_largest_accounts() {
     // Return 3 added accounts
     let expected_accounts = sorted_accounts[0..4].to_vec();
     let results = bank
-        .get_largest_accounts(4, &pubkeys_hashset, AccountAddressFilter::Include)
+        .get_largest_accounts(4, &pubkeys_hashset, AccountAddressFilter::Include, false)
         .unwrap();
     assert_eq!(results.len(), expected_accounts.len());
     for pubkey_balance in expected_accounts.iter() {
@@ -9528,7 +9530,7 @@ fn test_get_largest_accounts() {
 
     let expected_accounts = expected_accounts[1..4].to_vec();
     let results = bank
-        .get_largest_accounts(3, &exclude4, AccountAddressFilter::Exclude)
+        .get_largest_accounts(3, &exclude4, AccountAddressFilter::Exclude, false)
         .unwrap();
     assert_eq!(results.len(), expected_accounts.len());
     for pubkey_balance in expected_accounts.iter() {
@@ -9541,7 +9543,7 @@ fn test_get_largest_accounts() {
         .cloned()
         .collect();
     assert_eq!(
-        bank.get_largest_accounts(2, &exclude, AccountAddressFilter::Exclude)
+        bank.get_largest_accounts(2, &exclude, AccountAddressFilter::Exclude, false)
             .unwrap(),
         vec![pubkeys_balances[3], pubkeys_balances[1]]
     );
