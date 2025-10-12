@@ -1206,10 +1206,6 @@ impl AccountStorageEntry {
         }
     }
 
-    pub fn all_accounts(&self) -> Vec<StoredAccountMeta> {
-        self.accounts.accounts(0)
-    }
-
     fn remove_accounts(
         &self,
         num_bytes: usize,
@@ -2884,12 +2880,12 @@ impl AccountsDb {
     }
 
     #[must_use]
-    pub fn purge_keys_exact<'a, C: 'a>(
+    pub fn purge_keys_exact<'a, C>(
         &'a self,
         pubkey_to_slot_set: impl Iterator<Item = &'a (Pubkey, C)>,
     ) -> (Vec<(Slot, AccountInfo)>, PubkeysRemovedFromAccountsIndex)
     where
-        C: Contains<'a, Slot>,
+        C: Contains<'a, Slot> + 'a,
     {
         let mut reclaims = Vec::new();
         let mut dead_keys = Vec::new();
@@ -3141,7 +3137,7 @@ impl AccountsDb {
                 return;
             }
             if let Some(storage) = self.storage.get_slot_storage_entry(slot) {
-                storage.all_accounts().iter().for_each(|account| {
+                storage.accounts.scan_accounts(|account| {
                     let pk = account.pubkey();
                     match pubkey_refcount.entry(*pk) {
                         dashmap::mapref::entry::Entry::Occupied(mut occupied_entry) => {
@@ -6785,7 +6781,7 @@ impl AccountsDb {
         debug_verify: bool,
         is_startup: bool,
     ) -> (AccountsHash, u64) {
-        self.update_accounts_hash_with_verify(
+        self.update_accounts_hash_with_verify_from(
             CalcAccountsHashDataSource::IndexForTests,
             debug_verify,
             slot,
@@ -7099,7 +7095,7 @@ impl AccountsDb {
         stats.num_dirty_slots = num_dirty_slots;
     }
 
-    pub fn calculate_accounts_hash(
+    pub fn calculate_accounts_hash_from(
         &self,
         data_source: CalcAccountsHashDataSource,
         slot: Slot,
@@ -7132,7 +7128,7 @@ impl AccountsDb {
                 };
                 timings.calc_storage_size_quartiles(&combined_maps);
 
-                self.calculate_accounts_hash_from_storages(config, &storages, timings)
+                self.calculate_accounts_hash(config, &storages, timings)
             }
             CalcAccountsHashDataSource::IndexForTests => {
                 self.calculate_accounts_hash_from_index(slot, config)
@@ -7140,7 +7136,7 @@ impl AccountsDb {
         }
     }
 
-    fn calculate_accounts_hash_with_verify(
+    fn calculate_accounts_hash_with_verify_from(
         &self,
         data_source: CalcAccountsHashDataSource,
         debug_verify: bool,
@@ -7149,7 +7145,7 @@ impl AccountsDb {
         expected_capitalization: Option<u64>,
     ) -> (AccountsHash, u64) {
         let (accounts_hash, total_lamports) =
-            self.calculate_accounts_hash(data_source, slot, &config);
+            self.calculate_accounts_hash_from(data_source, slot, &config);
         if debug_verify {
             // calculate the other way (store or non-store) and verify results match.
             let data_source_other = match data_source {
@@ -7157,7 +7153,7 @@ impl AccountsDb {
                 CalcAccountsHashDataSource::Storages => CalcAccountsHashDataSource::IndexForTests,
             };
             let (accounts_hash_other, total_lamports_other) =
-                self.calculate_accounts_hash(data_source_other, slot, &config);
+                self.calculate_accounts_hash_from(data_source_other, slot, &config);
 
             let success = accounts_hash == accounts_hash_other
                 && total_lamports == total_lamports_other
@@ -7169,7 +7165,7 @@ impl AccountsDb {
 
     /// run the accounts hash calculation and store the results
     #[allow(clippy::too_many_arguments)]
-    pub fn update_accounts_hash_with_verify(
+    pub fn update_accounts_hash_with_verify_from(
         &self,
         data_source: CalcAccountsHashDataSource,
         debug_verify: bool,
@@ -7180,7 +7176,7 @@ impl AccountsDb {
         rent_collector: &RentCollector,
         is_startup: bool,
     ) -> (AccountsHash, u64) {
-        let (accounts_hash, total_lamports) = self.calculate_accounts_hash_with_verify(
+        let (accounts_hash, total_lamports) = self.calculate_accounts_hash_with_verify_from(
             data_source,
             debug_verify,
             slot,
@@ -7205,7 +7201,7 @@ impl AccountsDb {
         slot: Slot,
         stats: HashStats,
     ) -> (AccountsHash, /*capitalization*/ u64) {
-        let accounts_hash = self.calculate_accounts_hash_from_storages(config, storages, stats);
+        let accounts_hash = self.calculate_accounts_hash(config, storages, stats);
         let old_accounts_hash = self.set_accounts_hash(slot, accounts_hash);
         if let Some(old_accounts_hash) = old_accounts_hash {
             warn!("Accounts hash was already set for slot {slot}! old: {old_accounts_hash:?}, new: {accounts_hash:?}");
@@ -7409,15 +7405,17 @@ impl AccountsDb {
         CacheHashData::new(accounts_hash_cache_path, deletion_policy)
     }
 
-    // modeled after calculate_accounts_delta_hash
-    // intended to be faster than calculate_accounts_hash
-    pub fn calculate_accounts_hash_from_storages(
+    /// Calculate the full accounts hash
+    ///
+    /// This is intended to be used by startup verification, and also AccountsHashVerifier.
+    /// Uses account storage files as the data source for the calculation.
+    pub fn calculate_accounts_hash(
         &self,
         config: &CalcAccountsHashConfig<'_>,
         storages: &SortedStorages<'_>,
         stats: HashStats,
     ) -> (AccountsHash, u64) {
-        let (accounts_hash, capitalization) = self._calculate_accounts_hash_from_storages(
+        let (accounts_hash, capitalization) = self.calculate_accounts_hash_from_storages(
             config,
             storages,
             stats,
@@ -7443,7 +7441,7 @@ impl AccountsDb {
         storages: &SortedStorages<'_>,
         stats: HashStats,
     ) -> (IncrementalAccountsHash, /* capitalization */ u64) {
-        let (accounts_hash, capitalization) = self._calculate_accounts_hash_from_storages(
+        let (accounts_hash, capitalization) = self.calculate_accounts_hash_from_storages(
             config,
             storages,
             stats,
@@ -7455,7 +7453,9 @@ impl AccountsDb {
         (incremental_accounts_hash, capitalization)
     }
 
-    fn _calculate_accounts_hash_from_storages(
+    /// The shared code for calculating accounts hash from storages.
+    /// Used for both full accounts hash and incremental accounts hash calculation.
+    fn calculate_accounts_hash_from_storages(
         &self,
         config: &CalcAccountsHashConfig<'_>,
         storages: &SortedStorages<'_>,
@@ -7608,7 +7608,7 @@ impl AccountsDb {
             }
         } else {
             let (calculated_accounts_hash, calculated_lamports) = self
-                .calculate_accounts_hash_with_verify(
+                .calculate_accounts_hash_with_verify_from(
                     CalcAccountsHashDataSource::Storages,
                     config.test_hash_calculation,
                     slot,
@@ -9343,6 +9343,18 @@ pub(crate) enum UpdateIndexThreadSelection {
 
 // These functions/fields are only usable from a dev context (i.e. tests and benches)
 #[cfg(feature = "dev-context-only-utils")]
+impl AccountStorageEntry {
+    fn accounts_count(&self) -> usize {
+        let mut count = 0;
+        self.accounts.scan_accounts(|_| {
+            count += 1;
+        });
+        count
+    }
+}
+
+// These functions/fields are only usable from a dev context (i.e. tests and benches)
+#[cfg(feature = "dev-context-only-utils")]
 impl AccountsDb {
     pub fn load_without_fixed_root(
         &self,
@@ -9426,7 +9438,7 @@ impl AccountsDb {
         assert_eq!(store.status(), AccountStorageStatus::Available);
         assert_eq!(total_count, count);
         let (expected_store_count, actual_store_count): (usize, usize) =
-            (store.approx_stored_count(), store.all_accounts().len());
+            (store.approx_stored_count(), store.accounts_count());
         assert_eq!(expected_store_count, actual_store_count);
     }
 
@@ -9510,7 +9522,7 @@ impl AccountsDb {
     pub fn all_account_count_in_accounts_file(&self, slot: Slot) -> usize {
         let store = self.storage.get_slot_storage_entry(slot);
         if let Some(store) = store {
-            let count = store.all_accounts().len();
+            let count = store.accounts_count();
             let stored_count = store.approx_stored_count();
             assert_eq!(stored_count, count);
             count
@@ -10340,11 +10352,10 @@ pub mod tests {
                 .map(|storage| {
                     let slot = storage.slot();
                     let copied_storage = accounts_db.create_and_insert_store(slot, 10000, "test");
-                    let all_accounts = storage
-                        .all_accounts()
-                        .iter()
-                        .map(|acct| (*acct.pubkey(), acct.to_account_shared_data()))
-                        .collect::<Vec<_>>();
+                    let mut all_accounts = Vec::default();
+                    storage.accounts.scan_accounts(|acct| {
+                        all_accounts.push((*acct.pubkey(), acct.to_account_shared_data()));
+                    });
                     let accounts = all_accounts
                         .iter()
                         .map(|stored| (&stored.0, &stored.1))
@@ -10375,11 +10386,10 @@ pub mod tests {
             .map(|storage| {
                 let slot = storage.slot() + max_slot;
                 let copied_storage = accounts_db.create_and_insert_store(slot, 10000, "test");
-                let all_accounts = storage
-                    .all_accounts()
-                    .iter()
-                    .map(|acct| (*acct.pubkey(), acct.to_account_shared_data()))
-                    .collect::<Vec<_>>();
+                let mut all_accounts = Vec::default();
+                storage.accounts.scan_accounts(|acct| {
+                    all_accounts.push((*acct.pubkey(), acct.to_account_shared_data()));
+                });
                 let accounts = all_accounts
                     .iter()
                     .map(|stored| (&stored.0, &stored.1))
@@ -10645,7 +10655,7 @@ pub mod tests {
         |db| {
             let (storages, _size, _slot_expected) = sample_storage();
 
-            let result = db.calculate_accounts_hash_from_storages(
+            let result = db.calculate_accounts_hash(
                 &CalcAccountsHashConfig::default(),
                 &get_storage_refs(&storages),
                 HashStats::default(),
@@ -10667,7 +10677,7 @@ pub mod tests {
                 |item| &item.hash.0,
             );
             let sum = raw_expected.iter().map(|item| item.lamports).sum();
-            let result = db.calculate_accounts_hash_from_storages(
+            let result = db.calculate_accounts_hash(
                 &CalcAccountsHashConfig::default(),
                 &get_storage_refs(&storages),
                 HashStats::default(),
@@ -12771,7 +12781,7 @@ pub mod tests {
         accounts.store_for_tests(current_slot, &[(&pubkey3, &zero_lamport_account)]);
 
         let snapshot_stores = accounts.get_snapshot_storages(..=current_slot).0;
-        let total_accounts: usize = snapshot_stores.iter().map(|s| s.all_accounts().len()).sum();
+        let total_accounts: usize = snapshot_stores.iter().map(|s| s.accounts_count()).sum();
         assert!(!snapshot_stores.is_empty());
         assert!(total_accounts > 0);
 
@@ -12785,7 +12795,7 @@ pub mod tests {
         accounts.print_accounts_stats("Post-D clean");
 
         let total_accounts_post_clean: usize =
-            snapshot_stores.iter().map(|s| s.all_accounts().len()).sum();
+            snapshot_stores.iter().map(|s| s.accounts_count()).sum();
         assert_eq!(total_accounts, total_accounts_post_clean);
 
         // should clean all 3 pubkeys
@@ -14035,9 +14045,8 @@ pub mod tests {
 
         // Flushing cache should only create one storage entry
         let storage0 = accounts_db.get_and_assert_single_storage(slot);
-        let accounts = storage0.all_accounts();
 
-        for account in accounts {
+        storage0.accounts.scan_accounts(|account| {
             let before_size = storage0.alive_bytes.load(Ordering::Acquire);
             let account_info = accounts_db
                 .accounts_index
@@ -14060,7 +14069,7 @@ pub mod tests {
             } else {
                 assert_eq!(before_size, after_size + account.stored_size());
             }
-        }
+        });
     });
 
     fn setup_accounts_db_cache_clean(
@@ -17717,7 +17726,7 @@ pub mod tests {
             accounts_db.clean_accounts(Some(slot - 1), false, None, &EpochSchedule::default());
             let (storages, _) = accounts_db.get_snapshot_storages(..=slot);
             let storages = SortedStorages::new(&storages);
-            accounts_db.calculate_accounts_hash_from_storages(
+            accounts_db.calculate_accounts_hash(
                 &CalcAccountsHashConfig::default(),
                 &storages,
                 HashStats::default(),

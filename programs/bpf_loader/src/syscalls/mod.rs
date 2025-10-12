@@ -34,7 +34,7 @@ use {
         feature_set::bpf_account_data_direct_mapping,
         feature_set::FeatureSet,
         feature_set::{
-            self, blake3_syscall_enabled, curve25519_syscall_enabled,
+            self, abort_on_invalid_curve, blake3_syscall_enabled, curve25519_syscall_enabled,
             disable_deploy_of_alloc_free_syscall, disable_fees_sysvar,
             enable_alt_bn128_compression_syscall, enable_alt_bn128_syscall,
             enable_big_mod_exp_syscall, enable_partitioned_epoch_reward, enable_poseidon_syscall,
@@ -916,7 +916,16 @@ declare_builtin_function!(
                     Ok(1)
                 }
             }
-            _ => Ok(1),
+            _ => {
+                if invoke_context
+                    .get_feature_set()
+                    .is_active(&abort_on_invalid_curve::id())
+                {
+                    Err(SyscallError::InvalidAttribute.into())
+                } else {
+                    Ok(1)
+                }
+            }
         }
     }
 );
@@ -1024,7 +1033,16 @@ declare_builtin_function!(
                         Ok(1)
                     }
                 }
-                _ => Ok(1),
+                _ => {
+                    if invoke_context
+                        .get_feature_set()
+                        .is_active(&abort_on_invalid_curve::id())
+                    {
+                        Err(SyscallError::InvalidAttribute.into())
+                    } else {
+                        Ok(1)
+                    }
+                }
             },
 
             CURVE25519_RISTRETTO => match group_op {
@@ -1114,10 +1132,28 @@ declare_builtin_function!(
                         Ok(1)
                     }
                 }
-                _ => Ok(1),
+                _ => {
+                    if invoke_context
+                        .get_feature_set()
+                        .is_active(&abort_on_invalid_curve::id())
+                    {
+                        Err(SyscallError::InvalidAttribute.into())
+                    } else {
+                        Ok(1)
+                    }
+                }
             },
 
-            _ => Ok(1),
+            _ => {
+                if invoke_context
+                    .get_feature_set()
+                    .is_active(&abort_on_invalid_curve::id())
+                {
+                    Err(SyscallError::InvalidAttribute.into())
+                } else {
+                    Ok(1)
+                }
+            }
         }
     }
 );
@@ -1223,7 +1259,16 @@ declare_builtin_function!(
                 }
             }
 
-            _ => Ok(1),
+            _ => {
+                if invoke_context
+                    .get_feature_set()
+                    .is_active(&abort_on_invalid_curve::id())
+                {
+                    Err(SyscallError::InvalidAttribute.into())
+                } else {
+                    Ok(1)
+                }
+            }
         }
     }
 );
@@ -1568,7 +1613,7 @@ declare_builtin_function!(
         };
 
         let simplify_alt_bn128_syscall_error_codes = invoke_context
-            .feature_set
+            .get_feature_set()
             .is_active(&feature_set::simplify_alt_bn128_syscall_error_codes::id());
 
         let result_point = match calculation(input) {
@@ -1726,7 +1771,7 @@ declare_builtin_function!(
             .collect::<Result<Vec<_>, Error>>()?;
 
         let simplify_alt_bn128_syscall_error_codes = invoke_context
-            .feature_set
+            .get_feature_set()
             .is_active(&feature_set::simplify_alt_bn128_syscall_error_codes::id());
 
         let hash = match poseidon::hashv(parameters, endianness, inputs.as_slice()) {
@@ -1821,7 +1866,7 @@ declare_builtin_function!(
         )?;
 
         let simplify_alt_bn128_syscall_error_codes = invoke_context
-            .feature_set
+            .get_feature_set()
             .is_active(&feature_set::simplify_alt_bn128_syscall_error_codes::id());
 
         match op {
@@ -2439,7 +2484,7 @@ mod tests {
         // many small unaligned allocs
         {
             prepare_mockup!(invoke_context, program_id, bpf_loader::id());
-            invoke_context.feature_set = Arc::new(FeatureSet::default());
+            invoke_context.mock_set_feature_set(Arc::new(FeatureSet::default()));
             mock_create_vm!(vm, Vec::new(), Vec::new(), &mut invoke_context);
             let mut vm = vm.unwrap();
             let invoke_context = &mut vm.context_object_pointer;
