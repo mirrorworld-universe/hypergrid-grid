@@ -1277,9 +1277,9 @@ checksum = "fd16c4719339c4530435d38e511904438d07cce7950afa3718a84ac36c10e89e"
 
 [[package]]
 name = "chrono"
-version = "0.4.34"
+version = "0.4.37"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5bc015644b92d5890fab7489e49d21f879d5c990186827d42ec511919404f38b"
+checksum = "8a0d04d43504c61aa6c7531f1871dd0d418d91130162063b789da00fd7057a5e"
 dependencies = [
  "android-tzdata",
  "iana-time-zone",
@@ -1706,11 +1706,11 @@ dependencies = [
 
 [[package]]
 name = "ctrlc"
-version = "3.4.2"
+version = "3.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b467862cc8610ca6fc9a1532d7777cee0804e678ab45410897b9396495994a0b"
+checksum = "672465ae37dc1bc6380a6547a8883d5dd397b0f1faaad4f265726cc7042a5345"
 dependencies = [
- "nix 0.27.1",
+ "nix 0.28.0",
  "windows-sys 0.52.0",
 ]
 
@@ -3509,12 +3509,13 @@ dependencies = [
 
 [[package]]
 name = "nix"
-version = "0.27.1"
+version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2eb04e9c688eff1c89d72b407f168cf79bb9e867a9d3323ed6c01519eb9cc053"
+checksum = "ab2156c4fce2f8df6c499cc1c763e4394b7482525bf2a9701c9d79d215f519e4"
 dependencies = [
  "bitflags 2.4.2",
  "cfg-if 1.0.0",
+ "cfg_aliases",
  "libc",
 ]
 
@@ -4363,9 +4364,9 @@ dependencies = [
 
 [[package]]
 name = "quote"
-version = "1.0.35"
+version = "1.0.36"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "291ec9ab5efd934aaf503a6466c5d5251535d108ee747472c3977cc5acc868ef"
+checksum = "0fa76aaf39101c457836aec0ce2316dbdc3ab723cdda1c6bd4e6ad4208acaca7"
 dependencies = [
  "proc-macro2",
 ]
@@ -6080,6 +6081,7 @@ dependencies = [
  "solana-quic-client",
  "solana-rpc",
  "solana-rpc-client",
+ "solana-runtime",
  "solana-sdk",
  "solana-streamer",
  "solana-tpu-client",
@@ -7561,7 +7563,9 @@ dependencies = [
 name = "solana-unified-scheduler-logic"
 version = "2.0.0"
 dependencies = [
+ "assert_matches",
  "solana-sdk",
+ "static_assertions",
 ]
 
 [[package]]
@@ -7570,6 +7574,7 @@ version = "2.0.0"
 dependencies = [
  "assert_matches",
  "crossbeam-channel",
+ "dashmap",
  "derivative",
  "log",
  "solana-ledger",
@@ -7657,6 +7662,7 @@ dependencies = [
  "prost-types",
  "protobuf-src",
  "rand 0.8.5",
+ "rayon",
  "rustc_version 0.4.0",
  "serial_test",
  "solana-accounts-db",
@@ -7665,6 +7671,7 @@ dependencies = [
  "solana-ledger",
  "solana-logger",
  "solana-program",
+ "solana-program-runtime",
  "solana-runtime",
  "solana-sdk",
  "solana-streamer",

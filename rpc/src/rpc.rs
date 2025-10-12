@@ -3813,6 +3813,7 @@ pub mod rpc_full {
                             units_consumed: Some(units_consumed),
                             return_data: return_data.map(|return_data| return_data.into()),
                             inner_instructions: None,
+                            replacement_blockhash: None,
                         },
                     }
                     .into());
@@ -3858,15 +3859,24 @@ pub mod rpc_full {
                 commitment,
                 min_context_slot,
             })?;
+            let mut blockhash: Option<RpcBlockhash> = None;
             if replace_recent_blockhash {
                 if sig_verify {
                     return Err(Error::invalid_params(
                         "sigVerify may not be used with replaceRecentBlockhash",
                     ));
                 }
+                let recent_blockhash = bank.last_blockhash();
                 unsanitized_tx
                     .message
-                    .set_recent_blockhash(bank.last_blockhash());
+                    .set_recent_blockhash(recent_blockhash);
+                let last_valid_block_height = bank
+                    .get_blockhash_last_valid_block_height(&recent_blockhash)
+                    .expect("bank blockhash queue should contain blockhash");
+                blockhash.replace(RpcBlockhash {
+                    blockhash: recent_blockhash.to_string(),
+                    last_valid_block_height,
+                });
             }
 
             let transaction = sanitize_transaction(unsanitized_tx, bank)?;
@@ -3947,6 +3957,7 @@ pub mod rpc_full {
                     units_consumed: Some(units_consumed),
                     return_data: return_data.map(|return_data| return_data.into()),
                     inner_instructions,
+                    replacement_blockhash: blockhash,
                 },
             ))
         }
@@ -6099,6 +6110,7 @@ pub mod tests {
                         "Program 11111111111111111111111111111111 invoke [1]",
                         "Program 11111111111111111111111111111111 success"
                     ],
+                    "replacementBlockhash": null,
                     "returnData":null,
                     "unitsConsumed":150,
                 }
@@ -6184,6 +6196,7 @@ pub mod tests {
                         "Program 11111111111111111111111111111111 invoke [1]",
                         "Program 11111111111111111111111111111111 success"
                     ],
+                    "replacementBlockhash": null,
                     "returnData":null,
                     "unitsConsumed":150,
                 }
@@ -6213,7 +6226,8 @@ pub mod tests {
                         "Program 11111111111111111111111111111111 invoke [1]",
                         "Program 11111111111111111111111111111111 success"
                     ],
-                    "returnData":null,
+                    "replacementBlockhash": null,
+                    "returnData": null,
                     "unitsConsumed":150,
                 }
             },
@@ -6263,7 +6277,8 @@ pub mod tests {
                     "accounts":null,
                     "innerInstructions":null,
                     "logs":[],
-                    "returnData":null,
+                    "replacementBlockhash": null,
+                    "returnData": null,
                     "unitsConsumed":0,
                 }
             },
@@ -6281,6 +6296,11 @@ pub mod tests {
             r#"{{"jsonrpc":"2.0","id":1,"method":"simulateTransaction","params":["{tx_invalid_recent_blockhash}", {{"replaceRecentBlockhash": true}}]}}"#,
         );
         let res = io.handle_request_sync(&req, meta.clone());
+        let latest_blockhash = bank.confirmed_last_blockhash();
+        let expiry_slot = bank
+            .get_blockhash_last_valid_block_height(&latest_blockhash)
+            .expect("blockhash exists");
+
         let expected = json!({
             "jsonrpc": "2.0",
             "result": {
@@ -6293,6 +6313,10 @@ pub mod tests {
                         "Program 11111111111111111111111111111111 invoke [1]",
                         "Program 11111111111111111111111111111111 success"
                     ],
+                    "replacementBlockhash": {
+                        "blockhash": latest_blockhash.to_string(),
+                        "lastValidBlockHeight": expiry_slot
+                    },
                     "returnData":null,
                     "unitsConsumed":150,
                 }
@@ -6437,6 +6461,7 @@ pub mod tests {
                         "Program 11111111111111111111111111111111 invoke [1]",
                         "Program 11111111111111111111111111111111 success"
                     ],
+                    "replacementBlockhash": null,
                     "returnData": null,
                     "unitsConsumed": 150,
                 }
@@ -6517,6 +6542,7 @@ pub mod tests {
                         "Program 11111111111111111111111111111111 success",
                         "Program AddressLookupTab1e1111111111111111111111111 success"
                     ],
+                    "replacementBlockhash": null,
                     "returnData":null,
                     "unitsConsumed":1200,
                 }
@@ -6560,6 +6586,7 @@ pub mod tests {
                         "Program 11111111111111111111111111111111 success",
                         "Program AddressLookupTab1e1111111111111111111111111 success"
                     ],
+                    "replacementBlockhash": null,
                     "returnData":null,
                     "unitsConsumed":1200,
                 }
@@ -6646,6 +6673,7 @@ pub mod tests {
                         "Program 11111111111111111111111111111111 success",
                         "Program AddressLookupTab1e1111111111111111111111111 success"
                     ],
+                    "replacementBlockhash": null,
                     "returnData":null,
                     "unitsConsumed":1200,
                 }
@@ -7021,7 +7049,7 @@ pub mod tests {
         assert_eq!(
             res,
             Some(
-                r#"{"jsonrpc":"2.0","error":{"code":-32002,"message":"Transaction simulation failed: Blockhash not found","data":{"accounts":null,"err":"BlockhashNotFound","innerInstructions":null,"logs":[],"returnData":null,"unitsConsumed":0}},"id":1}"#.to_string(),
+                r#"{"jsonrpc":"2.0","error":{"code":-32002,"message":"Transaction simulation failed: Blockhash not found","data":{"accounts":null,"err":"BlockhashNotFound","innerInstructions":null,"logs":[],"replacementBlockhash":null,"returnData":null,"unitsConsumed":0}},"id":1}"#.to_string(),
             )
         );
 

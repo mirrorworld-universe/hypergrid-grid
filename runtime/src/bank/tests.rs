@@ -39,11 +39,7 @@ use {
         compute_budget::ComputeBudget,
         compute_budget_processor::{self, MAX_COMPUTE_UNIT_LIMIT},
         declare_process_instruction,
-        invoke_context::mock_process_instruction,
-        loaded_programs::{
-            LoadedProgram, LoadedProgramType, LoadedProgramsForTxBatch,
-            DELAY_VISIBILITY_SLOT_OFFSET,
-        },
+        loaded_programs::{LoadedProgram, LoadedProgramType, LoadedProgramsForTxBatch},
         prioritization_fee::{PrioritizationFeeDetails, PrioritizationFeeType},
         timings::ExecuteTimings,
     },
@@ -4704,12 +4700,14 @@ fn test_add_instruction_processor_for_existing_unrelated_accounts() {
             continue;
         }
 
-        bank.add_builtin(
+        bank.transaction_processor.add_builtin(
+            &bank,
             vote_id,
             "mock_program1",
             LoadedProgram::new_builtin(0, 0, MockBuiltin::vm),
         );
-        bank.add_builtin(
+        bank.transaction_processor.add_builtin(
+            &bank,
             stake_id,
             "mock_program2",
             LoadedProgram::new_builtin(0, 0, MockBuiltin::vm),
@@ -6290,7 +6288,7 @@ fn test_ref_account_key_after_program_id() {
 fn test_fuzz_instructions() {
     solana_logger::setup();
     use rand::{thread_rng, Rng};
-    let mut bank = create_simple_test_bank(1_000_000_000);
+    let bank = create_simple_test_bank(1_000_000_000);
 
     let max_programs = 5;
     let program_keys: Vec<_> = (0..max_programs)
@@ -6298,7 +6296,8 @@ fn test_fuzz_instructions() {
         .map(|i| {
             let key = solana_sdk::pubkey::new_rand();
             let name = format!("program{i:?}");
-            bank.add_builtin(
+            bank.transaction_processor.add_builtin(
+                &bank,
                 key,
                 name.as_str(),
                 LoadedProgram::new_builtin(0, 0, MockBuiltin::vm),
@@ -6781,7 +6780,7 @@ fn test_add_builtin_account() {
 
         assert_capitalization_diff(
             &bank,
-            || bank.add_builtin_account("mock_program", &program_id, false),
+            || bank.add_builtin_account("mock_program", &program_id),
             |old, new| {
                 assert_eq!(old + 1, new);
                 pass == 0
@@ -6797,7 +6796,7 @@ fn test_add_builtin_account() {
         add_root_and_flush_write_cache(&bank.parent().unwrap());
         assert_capitalization_diff(
             &bank,
-            || bank.add_builtin_account("mock_program", &program_id, false),
+            || bank.add_builtin_account("mock_program", &program_id),
             |old, new| {
                 assert_eq!(old, new);
                 pass == 1
@@ -6811,11 +6810,11 @@ fn test_add_builtin_account() {
 
         let bank = Arc::new(new_from_parent(bank));
         add_root_and_flush_write_cache(&bank.parent().unwrap());
-        // When replacing builtin_program, name must change to disambiguate from repeated
-        // invocations.
+        // No builtin replacement should happen if the program id is already assigned to a
+        // builtin.
         assert_capitalization_diff(
             &bank,
-            || bank.add_builtin_account("mock_program v2", &program_id, true),
+            || bank.add_builtin_account("mock_program v2", &program_id),
             |old, new| {
                 assert_eq!(old, new);
                 pass == 2
@@ -6825,30 +6824,8 @@ fn test_add_builtin_account() {
             continue;
         }
 
-        assert_eq!(
-            bank.get_account_modified_slot(&program_id).unwrap().1,
-            bank.slot()
-        );
-
-        let bank = Arc::new(new_from_parent(bank));
-        add_root_and_flush_write_cache(&bank.parent().unwrap());
-        assert_capitalization_diff(
-            &bank,
-            || bank.add_builtin_account("mock_program v2", &program_id, true),
-            |old, new| {
-                assert_eq!(old, new);
-                pass == 3
-            },
-        );
-        if pass == 3 {
-            continue;
-        }
-
-        // replacing with same name shouldn't update account
-        assert_eq!(
-            bank.get_account_modified_slot(&program_id).unwrap().1,
-            bank.parent_slot()
-        );
+        // No replacement should have happened
+        assert_eq!(bank.get_account_modified_slot(&program_id).unwrap().1, slot);
     }
 }
 
@@ -6866,7 +6843,7 @@ fn test_add_builtin_account_inherited_cap_while_replacing() {
         let bank = Bank::new_for_tests(&genesis_config);
         let program_id = solana_sdk::pubkey::new_rand();
 
-        bank.add_builtin_account("mock_program", &program_id, false);
+        bank.add_builtin_account("mock_program", &program_id);
         if pass == 0 {
             add_root_and_flush_write_cache(&bank);
             assert_eq!(bank.capitalization(), bank.calculate_capitalization(true));
@@ -6887,7 +6864,7 @@ fn test_add_builtin_account_inherited_cap_while_replacing() {
             continue;
         }
 
-        bank.add_builtin_account("mock_program v2", &program_id, true);
+        bank.add_builtin_account("mock_program v2", &program_id);
         add_root_and_flush_write_cache(&bank);
         assert_eq!(bank.capitalization(), bank.calculate_capitalization(true));
     }
@@ -6914,7 +6891,7 @@ fn test_add_builtin_account_squatted_while_not_replacing() {
             continue;
         }
 
-        bank.add_builtin_account("mock_program", &program_id, false);
+        bank.add_builtin_account("mock_program", &program_id);
         add_root_and_flush_write_cache(&bank);
         assert_eq!(bank.capitalization(), bank.calculate_capitalization(true));
     }
@@ -6937,25 +6914,7 @@ fn test_add_builtin_account_after_frozen() {
     );
     bank.freeze();
 
-    bank.add_builtin_account("mock_program", &program_id, false);
-}
-
-#[test]
-#[should_panic(
-    expected = "There is no account to replace with builtin program (mock_program, \
-                CiXgo2KHKSDmDnV1F6B69eWFgNAPiSBjjYvfB4cvRNre)."
-)]
-fn test_add_builtin_account_replace_none() {
-    let slot = 123;
-    let program_id = Pubkey::from_str("CiXgo2KHKSDmDnV1F6B69eWFgNAPiSBjjYvfB4cvRNre").unwrap();
-
-    let bank = Bank::new_from_parent(
-        create_simple_test_arc_bank(100_000).0,
-        &Pubkey::default(),
-        slot,
-    );
-
-    bank.add_builtin_account("mock_program", &program_id, true);
+    bank.add_builtin_account("mock_program", &program_id);
 }
 
 #[test]
@@ -7141,7 +7100,7 @@ fn test_bank_load_program() {
     programdata_account.set_rent_epoch(1);
     bank.store_account_and_update_capitalization(&key1, &program_account);
     bank.store_account_and_update_capitalization(&programdata_key, &programdata_account);
-    let program = bank.load_program(&key1, false, bank.epoch());
+    let program = bank.load_program(&key1, false, bank.epoch()).unwrap();
     assert_matches!(program.program, LoadedProgramType::LegacyV1(_));
     assert_eq!(
         program.account_size,
@@ -7166,6 +7125,26 @@ fn test_bpf_loader_upgradeable_deploy_with_max_len() {
         &bpf_loader_upgradeable::id(),
     );
     let upgrade_authority_keypair = Keypair::new();
+
+    // Invoke not yet deployed program
+    let instruction = Instruction::new_with_bytes(program_keypair.pubkey(), &[], Vec::new());
+    let invocation_message = Message::new(&[instruction], Some(&mint_keypair.pubkey()));
+    let binding = mint_keypair.insecure_clone();
+    let transaction = Transaction::new(
+        &[&binding],
+        invocation_message.clone(),
+        bank.last_blockhash(),
+    );
+    assert_eq!(
+        bank.process_transaction(&transaction),
+        Err(TransactionError::ProgramAccountNotFound),
+    );
+    {
+        // Make sure it is not in the cache because the account owner is not a loader
+        let program_cache = bank.transaction_processor.program_cache.read().unwrap();
+        let slot_versions = program_cache.get_slot_versions_for_tests(&program_keypair.pubkey());
+        assert!(slot_versions.is_empty());
+    }
 
     // Load program file
     let mut file = File::open("../programs/bpf_loader/test_elfs/out/noop_aligned.so")
@@ -7214,6 +7193,28 @@ fn test_bpf_loader_upgradeable_deploy_with_max_len() {
         &bpf_loader_upgradeable::id(),
     );
 
+    // Test buffer invocation
+    bank.store_account(&buffer_address, &buffer_account);
+    let instruction = Instruction::new_with_bytes(buffer_address, &[], Vec::new());
+    let message = Message::new(&[instruction], Some(&mint_keypair.pubkey()));
+    let transaction = Transaction::new(&[&binding], message, bank.last_blockhash());
+    assert_eq!(
+        bank.process_transaction(&transaction),
+        Err(TransactionError::InstructionError(
+            0,
+            InstructionError::InvalidAccountData,
+        )),
+    );
+    {
+        let program_cache = bank.transaction_processor.program_cache.read().unwrap();
+        let slot_versions = program_cache.get_slot_versions_for_tests(&buffer_address);
+        assert_eq!(slot_versions.len(), 1);
+        assert!(matches!(
+            slot_versions[0].program,
+            LoadedProgramType::Closed,
+        ));
+    }
+
     // Test successful deploy
     let payer_base_balance = LAMPORTS_PER_SOL;
     let deploy_fees = {
@@ -7231,7 +7232,6 @@ fn test_bpf_loader_upgradeable_deploy_with_max_len() {
             &system_program::id(),
         ),
     );
-    bank.store_account(&buffer_address, &buffer_account);
     bank.store_account(&program_keypair.pubkey(), &AccountSharedData::default());
     bank.store_account(&programdata_address, &AccountSharedData::default());
     let message = Message::new(
@@ -7296,30 +7296,15 @@ fn test_bpf_loader_upgradeable_deploy_with_max_len() {
         assert_eq!(*elf.get(i).unwrap(), *byte);
     }
 
-    let loaded_program = bank.load_program(&program_keypair.pubkey(), false, bank.epoch());
+    // Advance the bank so that the program becomes effective
+    goto_end_of_slot(bank.clone());
+    let bank = bank_client
+        .advance_slot(1, bank_forks.as_ref(), &mint_keypair.pubkey())
+        .unwrap();
 
-    // Invoke deployed program
-    mock_process_instruction(
-        &bpf_loader_upgradeable::id(),
-        vec![0, 1],
-        &[],
-        vec![
-            (programdata_address, post_programdata_account),
-            (program_keypair.pubkey(), post_program_account),
-        ],
-        Vec::new(),
-        Ok(()),
-        solana_bpf_loader_program::Entrypoint::vm,
-        |invoke_context| {
-            invoke_context
-                .programs_modified_by_tx
-                .set_slot_for_tests(bank.slot() + DELAY_VISIBILITY_SLOT_OFFSET);
-            invoke_context
-                .programs_modified_by_tx
-                .replenish(program_keypair.pubkey(), loaded_program.clone());
-        },
-        |_invoke_context| {},
-    );
+    // Invoke the deployed program
+    let transaction = Transaction::new(&[&binding], invocation_message, bank.last_blockhash());
+    assert!(bank.process_transaction(&transaction).is_ok());
 
     // Test initialized program account
     bank.clear_signatures();

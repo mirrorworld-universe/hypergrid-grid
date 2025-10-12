@@ -132,9 +132,9 @@ resolver = "2"
 
 [workspace.package]
 version = "2.0.0"
-authors = ["Solana Labs Maintainers <maintainers@solanalabs.com>"]
-repository = "https://github.com/solana-labs/solana"
-homepage = "https://solanalabs.com/"
+authors = ["Anza Maintainers <maintainers@anza.xyz>"]
+repository = "https://github.com/anza-xyz/agave"
+homepage = "https://anza.xyz/"
 license = "Apache-2.0"
 edition = "2021"
 
@@ -175,7 +175,7 @@ bzip2 = "0.4.4"
 caps = "0.5.5"
 cargo_metadata = "0.15.4"
 cc = "1.0.83"
-chrono = { version = "0.4.34", default-features = false }
+chrono = { version = "0.4.37", default-features = false }
 chrono-humanize = "0.2.3"
 clap = "2.33.1"
 console = "0.15.8"
@@ -187,7 +187,7 @@ criterion = "0.5.1"
 criterion-stats = "0.3.0"
 crossbeam-channel = "0.5.12"
 csv = "1.3.0"
-ctrlc = "3.4.2"
+ctrlc = "3.4.4"
 curve25519-dalek = "3.2.1"
 dashmap = "5.5.3"
 derivation-path = { version = "0.2.0", default-features = false }

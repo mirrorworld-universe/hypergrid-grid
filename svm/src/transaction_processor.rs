@@ -5,6 +5,7 @@ use {
         },
         account_overrides::AccountOverrides,
         message_processor::MessageProcessor,
+        runtime_config::RuntimeConfig,
         transaction_account_state_info::TransactionAccountStateInfo,
         transaction_error_metrics::TransactionErrorMetrics,
         transaction_results::{
@@ -20,10 +21,9 @@ use {
         loaded_programs::{
             ForkGraph, LoadProgramMetrics, LoadedProgram, LoadedProgramMatchCriteria,
             LoadedProgramType, LoadedProgramsForTxBatch, ProgramCache, ProgramRuntimeEnvironment,
-            ProgramRuntimeEnvironments, DELAY_VISIBILITY_SLOT_OFFSET,
+            DELAY_VISIBILITY_SLOT_OFFSET,
         },
         log_collector::LogCollector,
-        runtime_config::RuntimeConfig,
         sysvar_cache::SysvarCache,
         timings::{ExecuteDetailsTimings, ExecuteTimingType, ExecuteTimings},
     },
@@ -49,14 +49,14 @@ use {
     },
     std::{
         cell::RefCell,
-        collections::{hash_map::Entry, HashMap},
+        collections::{hash_map::Entry, HashMap, HashSet},
         fmt::{Debug, Formatter},
         rc::Rc,
         sync::{atomic::Ordering, Arc, RwLock},
     },
 };
 // Sonic:
-use {log::*, solana_sdk::program_utils::limited_deserialize, std::collections::HashSet};
+use {log::*, solana_sdk::program_utils::limited_deserialize};
 
 /// A list of log messages emitted during a transaction
 pub type TransactionLogMessages = Vec<String>;
@@ -110,6 +110,8 @@ pub trait TransactionProcessingCallback {
     fn get_program_match_criteria(&self, _program: &Pubkey) -> LoadedProgramMatchCriteria {
         LoadedProgramMatchCriteria::NoCriteria
     }
+
+    fn add_builtin_account(&self, _name: &str, _program_id: &Pubkey) {}
 }
 
 // Sonic: decouple
@@ -121,8 +123,7 @@ pub trait AccountsDb {
 
 #[derive(Debug)]
 enum ProgramAccountLoadResult {
-    AccountNotFound,
-    InvalidAccountData(ProgramRuntimeEnvironment),
+    InvalidAccountData,
     ProgramOfLoaderV1orV2(AccountSharedData),
     ProgramOfLoaderV3(AccountSharedData, AccountSharedData, Slot),
     ProgramOfLoaderV4(AccountSharedData, Slot),
@@ -152,6 +153,9 @@ pub struct TransactionBatchProcessor<FG: ForkGraph, A> {
 
     /// Programs required for transaction batch processing
     pub program_cache: Arc<RwLock<ProgramCache<FG>>>,
+
+    /// Builtin program ids
+    pub builtin_program_ids: RwLock<HashSet<Pubkey>>,
 
     //Sonic: TODO: add to debug
     pub accounts_db: Arc<A>,
@@ -185,6 +189,7 @@ impl<FG: ForkGraph, A: AccountsDb> Default for TransactionBatchProcessor<FG, A> 
                 Slot::default(),
                 Epoch::default(),
             ))),
+            builtin_program_ids: RwLock::new(HashSet::new()),
             // Sonic: lets reinit it, by default
             accounts_db: Arc::new(A::default_for_testing()),
             genesis_accounts_pubkeys: Default::default(),
@@ -200,6 +205,7 @@ impl<FG: ForkGraph, A: AccountsDb> TransactionBatchProcessor<FG, A> {
         fee_structure: FeeStructure,
         runtime_config: Arc<RuntimeConfig>,
         program_cache: Arc<RwLock<ProgramCache<FG>>>,
+        builtin_program_ids: HashSet<Pubkey>,
         // Sonic:
         accounts_db: Arc<A>,
         genesis_accounts_pubkeys: Arc<HashSet<Pubkey>>,
@@ -212,6 +218,7 @@ impl<FG: ForkGraph, A: AccountsDb> TransactionBatchProcessor<FG, A> {
             runtime_config,
             sysvar_cache: RwLock::<SysvarCache>::default(),
             program_cache,
+            builtin_program_ids: RwLock::new(builtin_program_ids),
             // Sonic:
             accounts_db,
             genesis_accounts_pubkeys,
@@ -220,7 +227,7 @@ impl<FG: ForkGraph, A: AccountsDb> TransactionBatchProcessor<FG, A> {
 
     /// Main entrypoint to the SVM.
     #[allow(clippy::too_many_arguments)]
-    pub fn load_and_execute_sanitized_transactions<'a, CB: TransactionProcessingCallback>(
+    pub fn load_and_execute_sanitized_transactions<CB: TransactionProcessingCallback>(
         &self,
         callbacks: &CB,
         sanitized_txs: &[SanitizedTransaction],
@@ -229,7 +236,6 @@ impl<FG: ForkGraph, A: AccountsDb> TransactionBatchProcessor<FG, A> {
         recording_config: ExecutionRecordingConfig,
         timings: &mut ExecuteTimings,
         account_overrides: Option<&AccountOverrides>,
-        builtin_programs: impl Iterator<Item = &'a Pubkey>,
         log_messages_bytes_limit: Option<usize>,
         limit_to_load_programs: bool,
     ) -> LoadAndExecuteSanitizedTransactionsOutput {
@@ -241,7 +247,7 @@ impl<FG: ForkGraph, A: AccountsDb> TransactionBatchProcessor<FG, A> {
             PROGRAM_OWNERS,
         );
         let native_loader = native_loader::id();
-        for builtin_program in builtin_programs {
+        for builtin_program in self.builtin_program_ids.read().unwrap().iter() {
             program_accounts_map.insert(*builtin_program, (&native_loader, 0));
         }
 
@@ -511,15 +517,18 @@ impl<FG: ForkGraph, A: AccountsDb> TransactionBatchProcessor<FG, A> {
             });
     }
 
-    /// Load program with a specific pubkey from program cache, and
-    /// update the program's access slot as a side-effect.
+    /// Loads the program with the given pubkey.
+    ///
+    /// If the account doesn't exist it returns `None`. If the account does exist, it must be a program
+    /// account (belong to one of the program loaders). Returns `Some(InvalidAccountData)` if the program
+    /// account is `Closed`, contains invalid data or any of the programdata accounts are invalid.
     pub fn load_program_with_pubkey<CB: TransactionProcessingCallback>(
         &self,
         callbacks: &CB,
         pubkey: &Pubkey,
         reload: bool,
         effective_epoch: Epoch,
-    ) -> Arc<LoadedProgram> {
+    ) -> Option<Arc<LoadedProgram>> {
         let program_cache = self.program_cache.read().unwrap();
         let environments = program_cache.get_environments_for_epoch(effective_epoch);
         let mut load_program_metrics = LoadProgramMetrics {
@@ -527,85 +536,80 @@ impl<FG: ForkGraph, A: AccountsDb> TransactionBatchProcessor<FG, A> {
             ..LoadProgramMetrics::default()
         };
 
-        let mut loaded_program =
-            match self.load_program_accounts(callbacks, pubkey, environments) {
-                ProgramAccountLoadResult::AccountNotFound => Ok(LoadedProgram::new_tombstone(
-                    self.slot,
-                    LoadedProgramType::Closed,
-                )),
+        let mut loaded_program = match self.load_program_accounts(callbacks, pubkey)? {
+            ProgramAccountLoadResult::InvalidAccountData => Ok(LoadedProgram::new_tombstone(
+                self.slot,
+                LoadedProgramType::Closed,
+            )),
 
-                ProgramAccountLoadResult::InvalidAccountData(env) => Err((self.slot, env)),
+            ProgramAccountLoadResult::ProgramOfLoaderV1orV2(program_account) => {
+                Self::load_program_from_bytes(
+                    &mut load_program_metrics,
+                    program_account.data(),
+                    program_account.owner(),
+                    program_account.data().len(),
+                    0,
+                    environments.program_runtime_v1.clone(),
+                    reload,
+                )
+                .map_err(|_| (0, environments.program_runtime_v1.clone()))
+            }
 
-                ProgramAccountLoadResult::ProgramOfLoaderV1orV2(program_account) => {
+            ProgramAccountLoadResult::ProgramOfLoaderV3(
+                program_account,
+                programdata_account,
+                slot,
+            ) => programdata_account
+                .data()
+                .get(UpgradeableLoaderState::size_of_programdata_metadata()..)
+                .ok_or(Box::new(InstructionError::InvalidAccountData).into())
+                .and_then(|programdata| {
+                    //Sonic: if program account is remote, set slot to 0.
+                    let mut dep_slot = slot;
+                    if program_account.remote {
+                        dep_slot = 0;
+                    }
+
                     Self::load_program_from_bytes(
                         &mut load_program_metrics,
-                        program_account.data(),
+                        programdata,
                         program_account.owner(),
-                        program_account.data().len(),
-                        0,
+                        program_account
+                            .data()
+                            .len()
+                            .saturating_add(programdata_account.data().len()),
+                        dep_slot,
                         environments.program_runtime_v1.clone(),
                         reload,
                     )
-                    .map_err(|_| (0, environments.program_runtime_v1.clone()))
-                }
+                })
+                .map_err(|_| (slot, environments.program_runtime_v1.clone())),
 
-                ProgramAccountLoadResult::ProgramOfLoaderV3(
-                    program_account,
-                    programdata_account,
-                    slot,
-                ) => programdata_account
-                    .data()
-                    .get(UpgradeableLoaderState::size_of_programdata_metadata()..)
-                    .ok_or(Box::new(InstructionError::InvalidAccountData).into())
-                    .and_then(|programdata| {
-                        //Sonic: if program account is remote, set slot to 0.
-                        let mut dep_slot = slot;
-                        if program_account.remote {
-                            dep_slot = 0;
-                        }
-
-                        Self::load_program_from_bytes(
-                            &mut load_program_metrics,
-                            programdata,
-                            program_account.owner(),
-                            program_account
-                                .data()
-                                .len()
-                                .saturating_add(programdata_account.data().len()),
-                            dep_slot,
-                            environments.program_runtime_v1.clone(),
-                            reload,
-                        )
-                    })
-                    .map_err(|_| (slot, environments.program_runtime_v1.clone())),
-
-                ProgramAccountLoadResult::ProgramOfLoaderV4(program_account, slot) => {
-                    program_account
-                        .data()
-                        .get(LoaderV4State::program_data_offset()..)
-                        .ok_or(Box::new(InstructionError::InvalidAccountData).into())
-                        .and_then(|elf_bytes| {
-                            //Sonic: if program account is remote, set slot to 0.
-                            let mut dep_slot = slot;
-                            if program_account.remote {
-                                dep_slot = 0;
-                            }
-                            Self::load_program_from_bytes(
-                                &mut load_program_metrics,
-                                elf_bytes,
-                                &loader_v4::id(),
-                                program_account.data().len(),
-                                dep_slot,
-                                environments.program_runtime_v2.clone(),
-                                reload,
-                            )
-                        })
-                        .map_err(|_| (slot, environments.program_runtime_v2.clone()))
-                }
-            }
-            .unwrap_or_else(|(slot, env)| {
-                LoadedProgram::new_tombstone(slot, LoadedProgramType::FailedVerification(env))
-            });
+            ProgramAccountLoadResult::ProgramOfLoaderV4(program_account, slot) => program_account
+                .data()
+                .get(LoaderV4State::program_data_offset()..)
+                .ok_or(Box::new(InstructionError::InvalidAccountData).into())
+                .and_then(|elf_bytes| {
+                    //Sonic: if program account is remote, set slot to 0.
+                    let mut dep_slot = slot;
+                    if program_account.remote {
+                        dep_slot = 0;
+                    }
+                    Self::load_program_from_bytes(
+                        &mut load_program_metrics,
+                        elf_bytes,
+                        &loader_v4::id(),
+                        program_account.data().len(),
+                        dep_slot,
+                        environments.program_runtime_v2.clone(),
+                        reload,
+                    )
+                })
+                .map_err(|_| (slot, environments.program_runtime_v2.clone())),
+        }
+        .unwrap_or_else(|(slot, env)| {
+            LoadedProgram::new_tombstone(slot, LoadedProgramType::FailedVerification(env))
+        });
 
         let mut timings = ExecuteDetailsTimings::default();
         load_program_metrics.submit_datapoint(&mut timings);
@@ -625,7 +629,7 @@ impl<FG: ForkGraph, A: AccountsDb> TransactionBatchProcessor<FG, A> {
                 .max(self.epoch_schedule.get_first_slot_in_epoch(effective_epoch));
         }
         loaded_program.update_access_slot(self.slot);
-        Arc::new(loaded_program)
+        Some(Arc::new(loaded_program))
     }
 
     fn replenish_program_cache<CB: TransactionProcessingCallback>(
@@ -690,7 +694,9 @@ impl<FG: ForkGraph, A: AccountsDb> TransactionBatchProcessor<FG, A> {
 
             if let Some((key, count)) = program_to_load {
                 // Load, verify and compile one program.
-                let program = self.load_program_with_pubkey(callback, &key, false, self.epoch);
+                let program = self
+                    .load_program_with_pubkey(callback, &key, false, self.epoch)
+                    .expect("called load_program_with_pubkey() with nonexistent account");
                 program.tx_usage_counter.store(count, Ordering::Relaxed);
                 program_to_store = Some((key, program));
             } else if missing_programs.is_empty() {
@@ -1007,56 +1013,48 @@ impl<FG: ForkGraph, A: AccountsDb> TransactionBatchProcessor<FG, A> {
         &self,
         callbacks: &CB,
         pubkey: &Pubkey,
-        environments: &ProgramRuntimeEnvironments,
-    ) -> ProgramAccountLoadResult {
-        let program_account = match callbacks.get_account_shared_data(pubkey) {
-            None => return ProgramAccountLoadResult::AccountNotFound,
-            Some(account) => account,
-        };
-
-        debug_assert!(solana_bpf_loader_program::check_loader_id(
-            program_account.owner()
-        ));
+    ) -> Option<ProgramAccountLoadResult> {
+        let program_account = callbacks.get_account_shared_data(pubkey)?;
 
         if loader_v4::check_id(program_account.owner()) {
-            return solana_loader_v4_program::get_state(program_account.data())
-                .ok()
-                .and_then(|state| {
-                    (!matches!(state.status, LoaderV4Status::Retracted)).then_some(state.slot)
-                })
-                .map(|slot| ProgramAccountLoadResult::ProgramOfLoaderV4(program_account, slot))
-                .unwrap_or(ProgramAccountLoadResult::InvalidAccountData(
-                    environments.program_runtime_v2.clone(),
-                ));
+            return Some(
+                solana_loader_v4_program::get_state(program_account.data())
+                    .ok()
+                    .and_then(|state| {
+                        (!matches!(state.status, LoaderV4Status::Retracted)).then_some(state.slot)
+                    })
+                    .map(|slot| ProgramAccountLoadResult::ProgramOfLoaderV4(program_account, slot))
+                    .unwrap_or(ProgramAccountLoadResult::InvalidAccountData),
+            );
         }
 
         if !bpf_loader_upgradeable::check_id(program_account.owner()) {
-            return ProgramAccountLoadResult::ProgramOfLoaderV1orV2(program_account);
+            return Some(ProgramAccountLoadResult::ProgramOfLoaderV1orV2(
+                program_account,
+            ));
         }
 
         if let Ok(UpgradeableLoaderState::Program {
             programdata_address,
         }) = program_account.state()
         {
-            let programdata_account = match callbacks.get_account_shared_data(&programdata_address)
+            if let Some(programdata_account) =
+                callbacks.get_account_shared_data(&programdata_address)
             {
-                None => return ProgramAccountLoadResult::AccountNotFound,
-                Some(account) => account,
-            };
-
-            if let Ok(UpgradeableLoaderState::ProgramData {
-                slot,
-                upgrade_authority_address: _,
-            }) = programdata_account.state()
-            {
-                return ProgramAccountLoadResult::ProgramOfLoaderV3(
-                    program_account,
-                    programdata_account,
+                if let Ok(UpgradeableLoaderState::ProgramData {
                     slot,
-                );
+                    upgrade_authority_address: _,
+                }) = programdata_account.state()
+                {
+                    return Some(ProgramAccountLoadResult::ProgramOfLoaderV3(
+                        program_account,
+                        programdata_account,
+                        slot,
+                    ));
+                }
             }
         }
-        ProgramAccountLoadResult::InvalidAccountData(environments.program_runtime_v1.clone())
+        Some(ProgramAccountLoadResult::InvalidAccountData)
     }
 
     /// Extract the InnerInstructionsList from a TransactionContext
@@ -1131,6 +1129,24 @@ impl<FG: ForkGraph, A: AccountsDb> TransactionBatchProcessor<FG, A> {
     pub fn get_sysvar_cache_for_tests(&self) -> SysvarCache {
         self.sysvar_cache.read().unwrap().clone()
     }
+
+    /// Add a built-in program
+    pub fn add_builtin<CB: TransactionProcessingCallback>(
+        &self,
+        callbacks: &CB,
+        program_id: Pubkey,
+        name: &str,
+        builtin: LoadedProgram,
+    ) {
+        debug!("Adding program {} under {:?}", name, program_id);
+        callbacks.add_builtin_account(name, &program_id);
+        self.builtin_program_ids.write().unwrap().insert(program_id);
+        self.program_cache
+            .write()
+            .unwrap()
+            .assign_program(program_id, Arc::new(builtin));
+        debug!("Added program {} under {:?}", name, program_id);
+    }
 }
 
 #[cfg(test)]
@@ -1138,7 +1154,8 @@ mod tests {
     use {
         super::*,
         solana_program_runtime::{
-            loaded_programs::BlockRelation, solana_rbpf::program::BuiltinProgram,
+            loaded_programs::{BlockRelation, ProgramRuntimeEnvironments},
+            solana_rbpf::program::BuiltinProgram,
         },
         solana_sdk::{
             account::{create_account_shared_data_for_test, WritableAccount},
@@ -1255,12 +1272,10 @@ mod tests {
     fn test_load_program_accounts_account_not_found() {
         let mut mock_bank = MockBankCallback::default();
         let key = Pubkey::new_unique();
-        let environment = ProgramRuntimeEnvironments::default();
         let batch_processor = TransactionBatchProcessor::<TestForkGraph>::default();
 
-        let result = batch_processor.load_program_accounts(&mock_bank, &key, &environment);
-
-        assert!(matches!(result, ProgramAccountLoadResult::AccountNotFound));
+        let result = batch_processor.load_program_accounts(&mock_bank, &key);
+        assert!(result.is_none());
 
         let mut account_data = AccountSharedData::default();
         account_data.set_owner(bpf_loader_upgradeable::id());
@@ -1272,17 +1287,20 @@ mod tests {
             .account_shared_data
             .insert(key, account_data.clone());
 
-        let result = batch_processor.load_program_accounts(&mock_bank, &key, &environment);
-        assert!(matches!(result, ProgramAccountLoadResult::AccountNotFound));
+        let result = batch_processor.load_program_accounts(&mock_bank, &key);
+        assert!(matches!(
+            result,
+            Some(ProgramAccountLoadResult::InvalidAccountData)
+        ));
 
         account_data.set_data(Vec::new());
         mock_bank.account_shared_data.insert(key, account_data);
 
-        let result = batch_processor.load_program_accounts(&mock_bank, &key, &environment);
+        let result = batch_processor.load_program_accounts(&mock_bank, &key);
 
         assert!(matches!(
             result,
-            ProgramAccountLoadResult::InvalidAccountData(_)
+            Some(ProgramAccountLoadResult::InvalidAccountData)
         ));
     }
 
@@ -1292,26 +1310,25 @@ mod tests {
         let mut mock_bank = MockBankCallback::default();
         let mut account_data = AccountSharedData::default();
         account_data.set_owner(loader_v4::id());
-        let environment = ProgramRuntimeEnvironments::default();
         let batch_processor = TransactionBatchProcessor::<TestForkGraph>::default();
         mock_bank
             .account_shared_data
             .insert(key, account_data.clone());
 
-        let result = batch_processor.load_program_accounts(&mock_bank, &key, &environment);
+        let result = batch_processor.load_program_accounts(&mock_bank, &key);
         assert!(matches!(
             result,
-            ProgramAccountLoadResult::InvalidAccountData(_)
+            Some(ProgramAccountLoadResult::InvalidAccountData)
         ));
 
         account_data.set_data(vec![0; 64]);
         mock_bank
             .account_shared_data
             .insert(key, account_data.clone());
-        let result = batch_processor.load_program_accounts(&mock_bank, &key, &environment);
+        let result = batch_processor.load_program_accounts(&mock_bank, &key);
         assert!(matches!(
             result,
-            ProgramAccountLoadResult::InvalidAccountData(_)
+            Some(ProgramAccountLoadResult::InvalidAccountData)
         ));
 
         let loader_data = LoaderV4State {
@@ -1329,10 +1346,10 @@ mod tests {
             .account_shared_data
             .insert(key, account_data.clone());
 
-        let result = batch_processor.load_program_accounts(&mock_bank, &key, &environment);
+        let result = batch_processor.load_program_accounts(&mock_bank, &key);
 
         match result {
-            ProgramAccountLoadResult::ProgramOfLoaderV4(data, slot) => {
+            Some(ProgramAccountLoadResult::ProgramOfLoaderV4(data, slot)) => {
                 assert_eq!(data, account_data);
                 assert_eq!(slot, 25);
             }
@@ -1347,15 +1364,14 @@ mod tests {
         let mut mock_bank = MockBankCallback::default();
         let mut account_data = AccountSharedData::default();
         account_data.set_owner(bpf_loader::id());
-        let environment = ProgramRuntimeEnvironments::default();
         let batch_processor = TransactionBatchProcessor::<TestForkGraph>::default();
         mock_bank
             .account_shared_data
             .insert(key, account_data.clone());
 
-        let result = batch_processor.load_program_accounts(&mock_bank, &key, &environment);
+        let result = batch_processor.load_program_accounts(&mock_bank, &key);
         match result {
-            ProgramAccountLoadResult::ProgramOfLoaderV1orV2(data) => {
+            Some(ProgramAccountLoadResult::ProgramOfLoaderV1orV2(data)) => {
                 assert_eq!(data, account_data);
             }
             _ => panic!("Invalid result"),
@@ -1367,7 +1383,6 @@ mod tests {
         let key1 = Pubkey::new_unique();
         let key2 = Pubkey::new_unique();
         let mut mock_bank = MockBankCallback::default();
-        let environment = ProgramRuntimeEnvironments::default();
         let batch_processor = TransactionBatchProcessor::<TestForkGraph>::default();
 
         let mut account_data = AccountSharedData::default();
@@ -1391,10 +1406,10 @@ mod tests {
             .account_shared_data
             .insert(key2, account_data2.clone());
 
-        let result = batch_processor.load_program_accounts(&mock_bank, &key1, &environment);
+        let result = batch_processor.load_program_accounts(&mock_bank, &key1);
 
         match result {
-            ProgramAccountLoadResult::ProgramOfLoaderV3(data1, data2, slot) => {
+            Some(ProgramAccountLoadResult::ProgramOfLoaderV3(data1, data2, slot)) => {
                 assert_eq!(data1, account_data);
                 assert_eq!(data2, account_data2);
                 assert_eq!(slot, 25);
@@ -1459,9 +1474,7 @@ mod tests {
         let batch_processor = TransactionBatchProcessor::<TestForkGraph>::default();
 
         let result = batch_processor.load_program_with_pubkey(&mock_bank, &key, false, 50);
-
-        let loaded_program = LoadedProgram::new_tombstone(0, LoadedProgramType::Closed);
-        assert_eq!(result, Arc::new(loaded_program));
+        assert!(result.is_none());
     }
 
     #[test]
@@ -1489,7 +1502,7 @@ mod tests {
                     .program_runtime_v1,
             ),
         );
-        assert_eq!(result, Arc::new(loaded_program));
+        assert_eq!(result.unwrap(), Arc::new(loaded_program));
     }
 
     #[test]
@@ -1517,7 +1530,7 @@ mod tests {
                     .program_runtime_v1,
             ),
         );
-        assert_eq!(result, Arc::new(loaded_program));
+        assert_eq!(result.unwrap(), Arc::new(loaded_program));
 
         let buffer = load_test_program();
         account_data.set_data(buffer);
@@ -1539,7 +1552,7 @@ mod tests {
             false,
         );
 
-        assert_eq!(result, Arc::new(expected.unwrap()));
+        assert_eq!(result.unwrap(), Arc::new(expected.unwrap()));
     }
 
     #[test]
@@ -1584,7 +1597,7 @@ mod tests {
                     .program_runtime_v1,
             ),
         );
-        assert_eq!(result, Arc::new(loaded_program));
+        assert_eq!(result.unwrap(), Arc::new(loaded_program));
 
         let mut buffer = load_test_program();
         let mut header = bincode::serialize(&state).unwrap();
@@ -1619,7 +1632,7 @@ mod tests {
             environments.program_runtime_v1.clone(),
             false,
         );
-        assert_eq!(result, Arc::new(expected.unwrap()));
+        assert_eq!(result.unwrap(), Arc::new(expected.unwrap()));
     }
 
     #[test]
@@ -1658,7 +1671,7 @@ mod tests {
                     .program_runtime_v1,
             ),
         );
-        assert_eq!(result, Arc::new(loaded_program));
+        assert_eq!(result.unwrap(), Arc::new(loaded_program));
 
         let mut header = account_data.data().to_vec();
         let mut complement =
@@ -1691,7 +1704,7 @@ mod tests {
             environments.program_runtime_v1.clone(),
             false,
         );
-        assert_eq!(result, Arc::new(expected.unwrap()));
+        assert_eq!(result.unwrap(), Arc::new(expected.unwrap()));
     }
 
     #[test]
@@ -1714,7 +1727,7 @@ mod tests {
         let result = batch_processor.load_program_with_pubkey(&mock_bank, &key, false, 20);
 
         let slot = batch_processor.epoch_schedule.get_first_slot_in_epoch(20);
-        assert_eq!(result.effective_slot, slot);
+        assert_eq!(result.unwrap().effective_slot, slot);
     }
 
     #[test]
@@ -1994,46 +2007,50 @@ mod tests {
     }
 
     #[test]
+    #[should_panic = "called load_program_with_pubkey() with nonexistent account"]
+    fn test_replenish_program_cache_with_nonexistent_accounts() {
+        let mock_bank = MockBankCallback::default();
+        let batch_processor = TransactionBatchProcessor::<TestForkGraph>::default();
+        batch_processor.program_cache.write().unwrap().fork_graph =
+            Some(Arc::new(RwLock::new(TestForkGraph {})));
+        let key = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+
+        let mut account_maps: HashMap<Pubkey, (&Pubkey, u64)> = HashMap::new();
+        account_maps.insert(key, (&owner, 4));
+
+        batch_processor.replenish_program_cache(&mock_bank, &account_maps, true);
+    }
+
+    #[test]
     fn test_replenish_program_cache() {
-        // Case 1
         let mut mock_bank = MockBankCallback::default();
         let batch_processor = TransactionBatchProcessor::<TestForkGraph>::default();
         batch_processor.program_cache.write().unwrap().fork_graph =
             Some(Arc::new(RwLock::new(TestForkGraph {})));
-        let key1 = Pubkey::new_unique();
-        let key2 = Pubkey::new_unique();
+        let key = Pubkey::new_unique();
         let owner = Pubkey::new_unique();
 
         let mut account_data = AccountSharedData::default();
         account_data.set_owner(bpf_loader::id());
-        mock_bank.account_shared_data.insert(key2, account_data);
+        mock_bank.account_shared_data.insert(key, account_data);
 
         let mut account_maps: HashMap<Pubkey, (&Pubkey, u64)> = HashMap::new();
-        account_maps.insert(key1, (&owner, 2));
+        account_maps.insert(key, (&owner, 4));
 
-        account_maps.insert(key2, (&owner, 4));
-        let result = batch_processor.replenish_program_cache(&mock_bank, &account_maps, false);
-
-        let program1 = result.find(&key1).unwrap();
-        assert!(matches!(program1.program, LoadedProgramType::Closed));
-        assert!(!result.hit_max_limit);
-        let program2 = result.find(&key2).unwrap();
-        assert!(matches!(
-            program2.program,
-            LoadedProgramType::FailedVerification(_)
-        ));
-
-        // Case 2
-        let result = batch_processor.replenish_program_cache(&mock_bank, &account_maps, true);
-
-        let program1 = result.find(&key1).unwrap();
-        assert!(matches!(program1.program, LoadedProgramType::Closed));
-        assert!(!result.hit_max_limit);
-        let program2 = result.find(&key2).unwrap();
-        assert!(matches!(
-            program2.program,
-            LoadedProgramType::FailedVerification(_)
-        ));
+        for limit_to_load_programs in [false, true] {
+            let result = batch_processor.replenish_program_cache(
+                &mock_bank,
+                &account_maps,
+                limit_to_load_programs,
+            );
+            assert!(!result.hit_max_limit);
+            let program = result.find(&key).unwrap();
+            assert!(matches!(
+                program.program,
+                LoadedProgramType::FailedVerification(_)
+            ));
+        }
     }
 
     #[test]

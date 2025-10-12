@@ -17,8 +17,7 @@ use {
     solana_bpf_loader_program::serialization::serialize_parameters,
     solana_program_runtime::{
         compute_budget::ComputeBudget, ic_msg, invoke_context::BuiltinFunctionWithContext,
-        loaded_programs::LoadedProgram, runtime_config::RuntimeConfig, stable_log,
-        timings::ExecuteTimings,
+        loaded_programs::LoadedProgram, stable_log, timings::ExecuteTimings,
     },
     solana_runtime::{
         accounts_background_service::{AbsRequestSender, SnapshotRequestKind},
@@ -26,6 +25,7 @@ use {
         bank_forks::BankForks,
         commitment::BlockCommitmentCache,
         genesis_utils::{create_genesis_config_with_leader_ex, GenesisConfigInfo},
+        runtime_config::RuntimeConfig,
     },
     solana_sdk::{
         account::{create_account_shared_data_for_test, Account, AccountSharedData},
@@ -806,7 +806,7 @@ impl ProgramTest {
         debug!("Payer address: {}", mint_keypair.pubkey());
         debug!("Genesis config: {}", genesis_config);
 
-        let mut bank = Bank::new_with_paths(
+        let bank = Bank::new_with_paths(
             &genesis_config,
             Arc::new(RuntimeConfig {
                 compute_budget: self.compute_max_units.map(|max_units| ComputeBudget {
@@ -837,7 +837,8 @@ impl ProgramTest {
         let mut builtin_programs = Vec::new();
         std::mem::swap(&mut self.builtin_programs, &mut builtin_programs);
         for (program_id, name, builtin) in builtin_programs.into_iter() {
-            bank.add_builtin(program_id, name, builtin);
+            bank.get_transaction_processor()
+                .add_builtin(&bank, program_id, name, builtin);
         }
 
         for (address, account) in self.accounts.iter() {

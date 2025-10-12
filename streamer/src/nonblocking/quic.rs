@@ -1,7 +1,8 @@
 use {
     crate::{
         nonblocking::stream_throttle::{
-            ConnectionStreamCounter, StakedStreamLoadEMA, STREAM_STOP_CODE_THROTTLING,
+            ConnectionStreamCounter, StakedStreamLoadEMA, MAX_STREAMS_PER_MS,
+            STREAM_STOP_CODE_THROTTLING, STREAM_THROTTLING_INTERVAL_MS,
         },
         quic::{configure_server, QuicServerError, StreamStats},
         streamer::StakedNodes,
@@ -172,8 +173,8 @@ async fn run_server(
     let unstaked_connection_table: Arc<Mutex<ConnectionTable>> =
         Arc::new(Mutex::new(ConnectionTable::new()));
     let stream_load_ema = Arc::new(StakedStreamLoadEMA::new(
-        max_unstaked_connections > 0,
         stats.clone(),
+        max_unstaked_connections,
     ));
     let staked_connection_table: Arc<Mutex<ConnectionTable>> =
         Arc::new(Mutex::new(ConnectionTable::new()));
@@ -500,10 +501,16 @@ async fn setup_connection(
                         stats.clone(),
                     ),
                     |(pubkey, stake, total_stake, max_stake, min_stake)| {
-                        let peer_type = if stake > 0 {
-                            ConnectionPeerType::Staked(stake)
-                        } else {
+                        // The heuristic is that the stake should be large engouh to have 1 stream pass throuh within one throttle
+                        // interval during which we allow max (MAX_STREAMS_PER_MS * STREAM_THROTTLING_INTERVAL_MS) streams.
+                        let min_stake_ratio =
+                            1_f64 / (MAX_STREAMS_PER_MS * STREAM_THROTTLING_INTERVAL_MS) as f64;
+                        let stake_ratio = stake as f64 / total_stake as f64;
+                        let peer_type = if stake_ratio < min_stake_ratio {
+                            // If it is a staked connection with ultra low stake ratio, treat it as unstaked.
                             ConnectionPeerType::Unstaked
+                        } else {
+                            ConnectionPeerType::Staked(stake)
                         };
                         NewConnectionHandlerParams {
                             packet_sender,
@@ -649,7 +656,7 @@ async fn packet_batch_sender(
     trace!("enter packet_batch_sender");
     let mut batch_start_time = Instant::now();
     loop {
-        let mut packet_perf_measure: Vec<([u8; 64], std::time::Instant)> = Vec::default();
+        let mut packet_perf_measure: Vec<([u8; 64], Instant)> = Vec::default();
         let mut packet_batch = PacketBatch::with_capacity(PACKETS_PER_BATCH);
         let mut total_bytes: usize = 0;
 
@@ -669,7 +676,7 @@ async fn packet_batch_sender(
                 || (!packet_batch.is_empty() && elapsed >= coalesce)
             {
                 let len = packet_batch.len();
-                track_streamer_fetch_packet_performance(&mut packet_perf_measure, &stats);
+                track_streamer_fetch_packet_performance(&packet_perf_measure, &stats);
 
                 if let Err(e) = packet_sender.send(packet_batch) {
                     stats
@@ -733,8 +740,8 @@ async fn packet_batch_sender(
 }
 
 fn track_streamer_fetch_packet_performance(
-    packet_perf_measure: &mut [([u8; 64], Instant)],
-    stats: &Arc<StreamStats>,
+    packet_perf_measure: &[([u8; 64], Instant)],
+    stats: &StreamStats,
 ) {
     if packet_perf_measure.is_empty() {
         return;
@@ -742,8 +749,9 @@ fn track_streamer_fetch_packet_performance(
     let mut measure = Measure::start("track_perf");
     let mut process_sampled_packets_us_hist = stats.process_sampled_packets_us_hist.lock().unwrap();
 
-    for (signature, start_time) in packet_perf_measure.iter() {
-        let duration = Instant::now().duration_since(*start_time);
+    let now = Instant::now();
+    for (signature, start_time) in packet_perf_measure {
+        let duration = now.duration_since(*start_time);
         debug!(
             "QUIC streamer fetch stage took {duration:?} for transaction {:?}",
             Signature::from(*signature)
@@ -752,6 +760,8 @@ fn track_streamer_fetch_packet_performance(
             .increment(duration.as_micros() as u64)
             .unwrap();
     }
+
+    drop(process_sampled_packets_us_hist);
     measure.stop();
     stats
         .perf_track_overhead_us
@@ -795,6 +805,18 @@ async fn handle_connection(
                         >= max_streams_per_throttling_interval
                     {
                         stats.throttled_streams.fetch_add(1, Ordering::Relaxed);
+                        match params.peer_type {
+                            ConnectionPeerType::Unstaked => {
+                                stats
+                                    .throttled_unstaked_streams
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
+                            ConnectionPeerType::Staked(_) => {
+                                stats
+                                    .throttled_staked_streams
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
                         let _ = stream.stop(VarInt::from_u32(STREAM_STOP_CODE_THROTTLING));
                         continue;
                     }
@@ -820,7 +842,7 @@ async fn handle_connection(
                         while !stream_exit.load(Ordering::Relaxed) {
                             if let Ok(chunk) = tokio::time::timeout(
                                 exit_check_interval,
-                                stream.read_chunk(PACKET_DATA_SIZE, false),
+                                stream.read_chunk(PACKET_DATA_SIZE, true),
                             )
                             .await
                             {
@@ -909,6 +931,7 @@ async fn handle_chunk(
                 if packet_accum.is_none() {
                     let mut meta = Meta::default();
                     meta.set_socket_addr(remote_addr);
+                    meta.set_from_staked_node(matches!(peer_type, ConnectionPeerType::Staked(_)));
                     *packet_accum = Some(PacketAccumulator {
                         meta,
                         chunks: Vec::new(),
@@ -962,6 +985,19 @@ async fn handle_chunk(
                         stats
                             .total_chunks_sent_for_batching
                             .fetch_add(chunks_sent, Ordering::Relaxed);
+
+                        match peer_type {
+                            ConnectionPeerType::Unstaked => {
+                                stats
+                                    .total_unstaked_packets_sent_for_batching
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
+                            ConnectionPeerType::Staked(_) => {
+                                stats
+                                    .total_staked_packets_sent_for_batching
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
 
                         trace!("sent {} byte packet for batching", bytes_sent);
                     }
