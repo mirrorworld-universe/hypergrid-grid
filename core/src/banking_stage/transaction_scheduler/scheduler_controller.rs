@@ -216,7 +216,7 @@ impl SchedulerController {
         let fee_check_results: Vec<_> = check_results
             .into_iter()
             .zip(transactions)
-            .map(|((result, _nonce, _lamports), tx)| {
+            .map(|(result, tx)| {
                 result?; // if there's already error do nothing
                 Consumer::check_fee_payer_unlocked(bank, tx.message(), &mut error_counters)
             })
@@ -381,7 +381,7 @@ impl SchedulerController {
                 &mut error_counters,
             );
 
-            for ((result, _nonce, _lamports), id) in check_results.into_iter().zip(chunk.iter()) {
+            for (result, id) in check_results.into_iter().zip(chunk.iter()) {
                 if result.is_err() {
                     saturating_add_assign!(num_dropped_on_age_and_status, 1);
                     self.container.remove_by_id(&id.id);
@@ -535,7 +535,7 @@ impl SchedulerController {
                 .zip(transactions)
                 .zip(fee_budget_limits_vec)
                 .zip(check_results)
-                .filter(|(_, check_result)| check_result.0.is_ok())
+                .filter(|(_, check_result)| check_result.is_ok())
             {
                 saturating_add_assign!(post_transaction_check_count, 1);
                 let transaction_id = self.transaction_id_generator.next();
@@ -653,9 +653,9 @@ mod tests {
         solana_poh::poh_recorder::{PohRecorder, Record, WorkingBankEntry},
         solana_runtime::bank::Bank,
         solana_sdk::{
-            compute_budget::ComputeBudgetInstruction, hash::Hash, message::Message,
-            poh_config::PohConfig, pubkey::Pubkey, signature::Keypair, signer::Signer,
-            system_instruction, system_transaction, transaction::Transaction,
+            compute_budget::ComputeBudgetInstruction, fee_calculator::FeeRateGovernor, hash::Hash,
+            message::Message, poh_config::PohConfig, pubkey::Pubkey, signature::Keypair,
+            signer::Signer, system_instruction, system_transaction, transaction::Transaction,
         },
         std::sync::{atomic::AtomicBool, Arc, RwLock},
         tempfile::TempDir,
@@ -682,10 +682,11 @@ mod tests {
 
     fn create_test_frame(num_threads: usize) -> (TestFrame, SchedulerController) {
         let GenesisConfigInfo {
-            genesis_config,
+            mut genesis_config,
             mint_keypair,
             ..
         } = create_slow_genesis_config(u64::MAX);
+        genesis_config.fee_rate_governor = FeeRateGovernor::new(5000, 0);
         let (bank, bank_forks) = Bank::new_no_wallclock_throttle_for_tests(&genesis_config);
 
         let ledger_path = get_tmp_ledger_path_auto_delete!();
