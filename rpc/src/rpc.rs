@@ -3747,7 +3747,11 @@ pub mod rpc_full {
                 min_context_slot,
             })?;
 
-            let transaction = sanitize_transaction(unsanitized_tx, preflight_bank)?;
+            let transaction = sanitize_transaction(
+                unsanitized_tx,
+                preflight_bank,
+                preflight_bank.get_reserved_account_keys(),
+            )?;
             let signature = *transaction.signature();
 
             let mut last_valid_block_height = preflight_bank
@@ -3879,7 +3883,8 @@ pub mod rpc_full {
                 });
             }
 
-            let transaction = sanitize_transaction(unsanitized_tx, bank)?;
+            let transaction =
+                sanitize_transaction(unsanitized_tx, bank, bank.get_reserved_account_keys())?;
             if sig_verify {
                 verify_transaction(&transaction, &bank.feature_set)?;
             }
@@ -4131,10 +4136,12 @@ pub mod rpc_full {
                 .map_err(|err| {
                     Error::invalid_params(format!("invalid transaction message: {err}"))
                 })?;
-            let sanitized_message = SanitizedMessage::try_new(sanitized_versioned_message, bank)
-                .map_err(|err| {
-                    Error::invalid_params(format!("invalid transaction message: {err}"))
-                })?;
+            let sanitized_message = SanitizedMessage::try_new(
+                sanitized_versioned_message,
+                bank,
+                bank.get_reserved_account_keys(),
+            )
+            .map_err(|err| Error::invalid_params(format!("invalid transaction message: {err}")))?;
             let fee = bank.get_fee_for_message(&sanitized_message);
             Ok(new_response(bank, fee))
         }
@@ -4713,9 +4720,16 @@ where
 fn sanitize_transaction(
     transaction: VersionedTransaction,
     address_loader: impl AddressLoader,
+    reserved_account_keys: &HashSet<Pubkey>,
 ) -> Result<SanitizedTransaction> {
-    SanitizedTransaction::try_create(transaction, MessageHash::Compute, None, address_loader)
-        .map_err(|err| Error::invalid_params(format!("invalid transaction: {err}")))
+    SanitizedTransaction::try_create(
+        transaction,
+        MessageHash::Compute,
+        None,
+        address_loader,
+        reserved_account_keys,
+    )
+    .map_err(|err| Error::invalid_params(format!("invalid transaction: {err}")))
 }
 
 pub fn create_validator_exit(exit: Arc<AtomicBool>) -> Arc<RwLock<Exit>> {
@@ -4861,6 +4875,7 @@ pub mod tests {
                 Message, MessageHeader, VersionedMessage,
             },
             nonce::{self, state::DurableNonce},
+            reserved_account_keys::ReservedAccountKeys,
             rpc_port,
             signature::{Keypair, Signer},
             slot_hashes::SlotHashes,
@@ -5177,11 +5192,11 @@ pub mod tests {
             self.bank_forks.write().unwrap().insert(new_bank);
 
             for root in roots.iter() {
-                self.bank_forks.write().unwrap().set_root(
-                    *root,
-                    &AbsRequestSender::default(),
-                    Some(0),
-                );
+                self.bank_forks
+                    .write()
+                    .unwrap()
+                    .set_root(*root, &AbsRequestSender::default(), Some(0))
+                    .unwrap();
                 let block_time = self
                     .bank_forks
                     .read()
@@ -9139,8 +9154,12 @@ pub mod tests {
                 .to_string(),
         );
         assert_eq!(
-            sanitize_transaction(unsanitary_versioned_tx, SimpleAddressLoader::Disabled)
-                .unwrap_err(),
+            sanitize_transaction(
+                unsanitary_versioned_tx,
+                SimpleAddressLoader::Disabled,
+                &ReservedAccountKeys::empty_key_set()
+            )
+            .unwrap_err(),
             expect58
         );
     }
@@ -9160,7 +9179,12 @@ pub mod tests {
         };
 
         assert_eq!(
-            sanitize_transaction(versioned_tx, SimpleAddressLoader::Disabled).unwrap_err(),
+            sanitize_transaction(
+                versioned_tx,
+                SimpleAddressLoader::Disabled,
+                &ReservedAccountKeys::empty_key_set()
+            )
+            .unwrap_err(),
             Error::invalid_params(
                 "invalid transaction: Transaction version is unsupported".to_string(),
             )
