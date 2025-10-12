@@ -5197,7 +5197,7 @@ dependencies = [
 name = "solana-accounts-db"
 version = "1.19.0"
 dependencies = [
- "ahash 0.8.7",
+ "ahash 0.8.8",
  "arrayref",
  "assert_matches",
  "bincode",
@@ -6631,7 +6631,7 @@ dependencies = [
 name = "solana-program-runtime"
 version = "1.19.0"
 dependencies = [
- "ahash 0.8.7",
+ "ahash 0.8.8",
  "assert_matches",
  "base64 0.21.7",
  "bincode",
@@ -7755,7 +7755,7 @@ dependencies = [
 
 [[package]]
 name = "sonic-account-migrater-program"
-version = "1.18.0"
+version = "1.19.0"
 dependencies = [
  "bincode",
  "bytemuck",
@@ -7774,7 +7774,7 @@ dependencies = [
 
 [[package]]
 name = "sonic-fee-settlement-program"
-version = "1.18.0"
+version = "1.19.0"
 dependencies = [
  "bincode",
  "bytemuck",
@@ -7793,9 +7793,9 @@ dependencies = [
 
 [[package]]
 name = "sonic-hypergrid"
-version = "1.18.0"
+version = "1.19.0"
 dependencies = [
- "ahash 0.8.7",
+ "ahash 0.8.8",
  "base64 0.21.7",
  "bs58",
  "dashmap",
@@ -7805,7 +7805,7 @@ dependencies = [
  "rustc_version 0.4.0",
  "serde",
  "serde_json",
- "serde_yaml 0.9.31",
+ "serde_yaml 0.9.32",
  "sha2 0.10.8",
  "solana-client",
  "solana-measure",

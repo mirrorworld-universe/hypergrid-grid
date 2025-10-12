@@ -2844,9 +2844,9 @@ impl AccountsDb {
             "Sonic restore_remote_accounts: {:?}",
             thread::current().id()
         );
-        let genesis_hash = genesis_config.hash();
         self.accounts_cache
-            .set_genesis_hash(genesis_hash.to_string());
+            .remote_loader
+            .set_genesis_hash(genesis_config.hash());
         let pubkey = sonic_account_migrater::migrated_accounts::id();
         let ancestors = Ancestors::default();
         let result = self.load(&ancestors, &pubkey, LoadHint::Unspecified);

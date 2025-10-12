@@ -13,9 +13,10 @@ use {
         clock::Slot,
         commitment_config::CommitmentConfig,
         genesis_config::ClusterType,
+        hash::Hash,
         pubkey::Pubkey,
     },
-    std::{collections::HashSet, env, fs::File, thread, time::Duration},
+    std::{collections::HashSet, env, fs::File, sync::RwLock, thread, time::Duration},
     thiserror::Error,
 };
 
@@ -81,6 +82,7 @@ pub struct RemoteAccountLoader {
     http_client: reqwest::blocking::Client,
     /// Cache of accounts loaded from the remote.
     account_cache: AccountCacheKeyMap,
+    genesis_hash: RwLock<Hash>,
     config: Config,
 }
 
@@ -97,14 +99,14 @@ impl Default for RemoteAccountLoader {
             default_config_path.to_str().unwrap().to_string()
         };
         let config_path = env::var("SONIC_CONFIG_FILE").unwrap_or(default_config_path);
-        Self::new(&config_path, cluster_type)
+        Self::new(&config_path, cluster_type, Hash::default())
     }
 }
 
 /// Remote account loader.
 impl RemoteAccountLoader {
     /// Create a new remote loader.
-    pub fn new(config_path: &str, cluster_type: ClusterType) -> Self {
+    pub fn new(config_path: &str, cluster_type: ClusterType, genesis_hash: Hash) -> Self {
         let mut config = Config::new(cluster_type);
         match Config::load(config_path) {
             Ok(setting) => {
@@ -127,8 +129,13 @@ impl RemoteAccountLoader {
                 .build()
                 .unwrap(),
             account_cache: AccountCacheKeyMap::default(),
+            genesis_hash: RwLock::new(genesis_hash),
             config,
         }
+    }
+
+    pub fn set_genesis_hash(&self, hash: Hash) {
+        *self.genesis_hash.write().unwrap() = hash;
     }
 
     /// Check if the account should be ignored.
@@ -186,20 +193,14 @@ impl RemoteAccountLoader {
             .collect()
     }
 
-    pub fn load_accounts(
-        &self,
-        genesis_hash: &str,
-        slot: Slot,
-        pubkeys: Vec<Pubkey>,
-        source: Option<Pubkey>,
-    ) {
+    pub fn load_accounts(&self, slot: Slot, pubkeys: Vec<Pubkey>, source: Option<Pubkey>) {
         info!(
             "Sonic AccountsCache::load_accounts_from_remote, {:?}",
             pubkeys
         );
         pubkeys.iter().for_each(|pubkey| {
             //Sonic: load from remote
-            self.load_account(genesis_hash, slot, pubkey, source);
+            self.load_account(slot, pubkey, source);
         });
     }
 
@@ -216,7 +217,6 @@ impl RemoteAccountLoader {
     /// Load the account from the RPC.
     pub fn load_account(
         &self,
-        genesis_hash: &str,
         slot: Slot,
         pubkey: &Pubkey,
         source: Option<Pubkey>,
@@ -236,7 +236,7 @@ impl RemoteAccountLoader {
         // println!("Thread {:?}: load_account: {:?} from {:?}, solt: {:?}",  thread::current().id(), pubkey, source.unwrap_or_default(), slot);
 
         //load the account from the local file first
-        let account = self.load_account_from_local_file(genesis_hash, slot, pubkey, source);
+        let account = self.load_account_from_local_file(slot, pubkey, source);
         if let Some(account) = account {
             //Sonic: insert the account to the cache
             self.account_cache.insert(*pubkey, (account.clone(), slot));
@@ -244,7 +244,7 @@ impl RemoteAccountLoader {
             //Sonic: check if programdata account exists
             if let Some(programdata_address) = Self::has_programdata_account(&account) {
                 //Sonic: load programdata account from remote
-                self.load_account(genesis_hash, slot, &programdata_address, source);
+                self.load_account(slot, &programdata_address, source);
             }
             return Some(account);
         }
@@ -258,21 +258,21 @@ impl RemoteAccountLoader {
         }
 
         let account = if let Some(source) = source {
-            self.load_account_via_hssn(pubkey, Some(source), genesis_hash, slot)
+            self.load_account_via_hssn(pubkey, Some(source), slot)
         } else {
-            self.load_account_via_oracle(pubkey, None, genesis_hash, slot)
+            self.load_account_via_oracle(pubkey, None, slot)
         }?;
 
         //Sonic: insert the account to the cache
         self.account_cache.insert(*pubkey, (account.clone(), slot));
 
         //Sonic: save the account to the local file
-        self.save_account_to_local_file(genesis_hash, slot, pubkey, source, account.clone());
+        self.save_account_to_local_file(slot, pubkey, source, account.clone());
 
         //Sonic: check if programdata account exists
         if let Some(programdata_address) = Self::has_programdata_account(&account) {
             //Sonic: load programdata account from remote
-            self.load_account(genesis_hash, slot, &programdata_address, source);
+            self.load_account(slot, &programdata_address, source);
         }
 
         Some(account)
@@ -280,7 +280,6 @@ impl RemoteAccountLoader {
 
     fn load_account_from_local_file(
         &self,
-        genesis_hash: &str,
         slot: Slot,
         pubkey: &Pubkey,
         source: Option<Pubkey>,
@@ -290,7 +289,7 @@ impl RemoteAccountLoader {
             self.config.accounts_path,
             pubkey,
             source.unwrap_or_default(),
-            genesis_hash,
+            self.genesis_hash.read().unwrap(),
             slot
         );
         info!("Sonic load_account_from_local_file: {}\n", path);
@@ -316,7 +315,6 @@ impl RemoteAccountLoader {
 
     fn save_account_to_local_file(
         &self,
-        genesis_hash: &str,
         slot: Slot,
         pubkey: &Pubkey,
         source: Option<Pubkey>,
@@ -327,7 +325,7 @@ impl RemoteAccountLoader {
             self.config.accounts_path,
             pubkey,
             source.unwrap_or_default(),
-            genesis_hash,
+            self.genesis_hash.read().unwrap(),
             slot
         );
         //make sure the directory exists
@@ -385,7 +383,6 @@ impl RemoteAccountLoader {
         &self,
         pubkey: &Pubkey,
         source: Option<Pubkey>,
-        genesis_hash: &str,
         slot: Slot,
     ) -> Option<AccountSharedData> {
         if Self::ignored_account(pubkey) {
@@ -393,8 +390,8 @@ impl RemoteAccountLoader {
             return None;
         }
 
-        let rpc_url = self.get_rpc_url_by_source(source, genesis_hash, slot);
-        if rpc_url.eq("") {
+        let rpc_url = self.get_rpc_url_by_source(source, slot);
+        if rpc_url.is_empty() {
             return None;
         }
 
@@ -403,16 +400,16 @@ impl RemoteAccountLoader {
             "Sonic Thread {:?}: load_account_via_oracle: {:?} at {} slot {:?} from {:?}",
             thread::current().id(),
             pubkey,
-            genesis_hash,
+            self.genesis_hash.read().unwrap(),
             slot,
-            rpc_url.clone()
+            rpc_url,
         );
 
         let url = format!("{}/solana/GetAccountInfo", self.config.oracle_url);
         let data = json!({
             "rpc": rpc_url,
             "address": pubkey.to_string(),
-            "version": format!("{:?}-{}-{}", source.unwrap_or_default(), genesis_hash, slot),
+            "version": format!("{:?}-{}-{}", source.unwrap_or_default(), self.genesis_hash.read().unwrap(), slot),
         });
         info!("Sonic load_account_from_oracle: {}\n", url);
         let resp = match self.http_client.post(&url).json(&data).send() {
@@ -443,7 +440,6 @@ impl RemoteAccountLoader {
         &self,
         pubkey: &Pubkey,
         source: Option<Pubkey>,
-        genesis_hash: &str,
         slot: Slot,
     ) -> Option<AccountSharedData> {
         if Self::ignored_account(pubkey) {
@@ -451,7 +447,7 @@ impl RemoteAccountLoader {
             return None;
         }
 
-        let rpc_url = self.get_rpc_url_by_source(source, genesis_hash, slot);
+        let rpc_url = self.get_rpc_url_by_source(source, slot);
         if rpc_url.eq("") {
             return None;
         }
@@ -461,9 +457,9 @@ impl RemoteAccountLoader {
             "Sonic Thread {:?}: load_account_via_rpc: {:?} at {} slot {:?} from {:?}",
             thread::current().id(),
             pubkey,
-            genesis_hash,
+            self.genesis_hash.read().unwrap(),
             slot,
-            rpc_url.clone()
+            rpc_url,
         );
 
         let rpc_client = RpcClient::new_with_timeout_and_commitment(
@@ -500,18 +496,16 @@ impl RemoteAccountLoader {
         }
     }
 
-    fn get_rpc_url_by_source(
-        &self,
-        source: Option<Pubkey>,
-        genesis_hash: &str,
-        slot: Slot,
-    ) -> String {
+    fn get_rpc_url_by_source(&self, source: Option<Pubkey>, slot: Slot) -> String {
         let Some(source) = source else {
             return self.config.baselayer_rpc_url.clone();
         };
         let path = format!(
             "{}/hypergrid_{:?}_{}_{:?}.json",
-            self.config.accounts_path, source, genesis_hash, slot
+            self.config.accounts_path,
+            source,
+            self.genesis_hash.read().unwrap(),
+            slot
         );
         info!("Sonic load hypergrid node from file: {}\n", path);
         let file = File::open(path);
@@ -532,23 +526,18 @@ impl RemoteAccountLoader {
             }
         }
 
-        self.load_hypergrid_node(source, genesis_hash, slot)
+        self.load_hypergrid_node(source, slot)
             .map(|node| node.rpc)
             .unwrap_or_default()
     }
 
-    fn load_hypergrid_node(
-        &self,
-        source: Pubkey,
-        genesis_hash: &str,
-        slot: Slot,
-    ) -> Option<HypergridNode> {
+    fn load_hypergrid_node(&self, source: Pubkey, slot: Slot) -> Option<HypergridNode> {
         // let url = format!("{}/hypergrid-ssn/hypergridssn/hypergrid_node/{}", config.hssn_rpc_url, source.to_string());
         let url = format!("{}/hssn/HypergridNode", self.config.oracle_url);
         let data = json!({
             "rpc": self.config.hssn_rpc_url,
             "address": source.to_string(),
-            "version": format!("{}-{}", genesis_hash, slot),
+            "version": format!("{}-{}", self.genesis_hash.read().unwrap(), slot),
         });
         info!("Sonic load_hypergrid_nodes: {}, {:?}\n", url, data);
         // println!("load_hypergrid_nodes: {}, {:?}\n", url, data);
@@ -575,7 +564,10 @@ impl RemoteAccountLoader {
         //sace the response to local file
         let path = format!(
             "{}/hypergrid_{:?}_{}_{:?}.json",
-            self.config.accounts_path, source, genesis_hash, slot
+            self.config.accounts_path,
+            source,
+            self.genesis_hash.read().unwrap(),
+            slot
         );
         let dir = std::path::Path::new(&path).parent().unwrap();
         if !dir.exists() {
@@ -605,7 +597,6 @@ impl RemoteAccountLoader {
         &self,
         pubkey: &Pubkey,
         source: Option<Pubkey>,
-        genesis_hash: &str,
         slot: Slot,
     ) -> Option<AccountSharedData> {
         if Self::ignored_account(pubkey) {
@@ -624,7 +615,7 @@ impl RemoteAccountLoader {
             self.config.hssn_rpc_url,
             pubkey,
             source.unwrap_or_default(),
-            genesis_hash,
+            self.genesis_hash.read().unwrap(),
             slot
         );
         info!("Sonic load_account_from_hssn: {}\n", url);
@@ -647,11 +638,11 @@ impl RemoteAccountLoader {
         }
 
         info!("Sonic load_account_from_hssn: not found: {:?}\n", pubkey);
-        let account = self.load_account_via_oracle(pubkey, source, genesis_hash, slot)?;
+        let account = self.load_account_via_oracle(pubkey, source, slot)?;
 
         if let Some(source) = source {
             // load the account from the source
-            let version = format!("{source}_{genesis_hash}_{slot}");
+            let version = format!("{source}_{}_{slot}", self.genesis_hash.read().unwrap());
 
             cosmos::run_load_solana_account(pubkey, &version, &source, false);
         }

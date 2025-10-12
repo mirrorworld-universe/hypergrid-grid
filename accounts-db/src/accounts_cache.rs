@@ -11,7 +11,6 @@ use {
     sonic_hypergrid::remote_loader::RemoteAccountLoader,
     std::{
         collections::BTreeSet,
-        fmt::Write,
         ops::Deref,
         sync::{
             atomic::{AtomicBool, AtomicU64, Ordering},
@@ -166,7 +165,6 @@ pub struct AccountsCache {
     max_flushed_root: AtomicU64,
     total_size: Arc<AtomicU64>,
     pub remote_loader: Arc<RemoteAccountLoader>, //Sonic: using RemoteAccountLoader
-    genesis_hash: RwLock<String>,
 }
 
 impl AccountsCache {
@@ -250,16 +248,6 @@ impl AccountsCache {
         self.remote_loader.has_account(pubkey)
     }
 
-    pub fn set_genesis_hash(&self, genesis_hash: String) {
-        info!("Sonic AccountsCache::set_genesis_hash, {:?}", genesis_hash);
-        // println!("AccountsCache::set_genesis_hash, {}", genesis_hash);
-        self.genesis_hash
-            .write()
-            .unwrap()
-            .write_str(genesis_hash.as_str())
-            .unwrap();
-    }
-
     //Sonic: load accounts from remote
     pub fn load_accounts_from_remote(
         &self,
@@ -267,16 +255,14 @@ impl AccountsCache {
         pubkeys: Vec<Pubkey>,
         source: Option<Pubkey>,
     ) {
-        let hash = self.genesis_hash.read().unwrap().to_string();
         info!(
-            "Sonic AccountsCache::load_accounts_from_remote, {:?}, {:}, {:?}",
-            pubkeys, hash, slot
+            "Sonic AccountsCache::load_accounts_from_remote, {:?}, {:?}",
+            pubkeys, slot
         );
 
         let remote_loader = Arc::clone(&self.remote_loader);
-        tokio::runtime::Handle::current().spawn_blocking(move || {
-            remote_loader.load_accounts(hash.as_str(), slot, pubkeys, source)
-        });
+        tokio::runtime::Handle::current()
+            .spawn_blocking(move || remote_loader.load_accounts(slot, pubkeys, source));
     }
 
     //Sonic: load accounts from remote

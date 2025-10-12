@@ -392,9 +392,9 @@ solana-zk-keygen = { path = "zk-keygen", version = "=1.19.0" }
 solana-zk-token-proof-program = { path = "programs/zk-token-proof", version = "=1.19.0" }
 solana-zk-token-sdk = { path = "zk-token-sdk", version = "=1.19.0" }
 solana_rbpf = "=0.8.0"
-sonic-hypergrid = { path = "hypergrid", version = "=1.18.0" }
-sonic-account-migrater-program = { path = "programs/sonic-account-migrater", version = "=1.18.0" }
-sonic-fee-settlement-program = { path = "programs/sonic-fee-settlement", version = "=1.18.0" }
+sonic-hypergrid = { path = "hypergrid", version = "=1.19.0" }
+sonic-account-migrater-program = { path = "programs/sonic-account-migrater", version = "=1.19.0" }
+sonic-fee-settlement-program = { path = "programs/sonic-fee-settlement", version = "=1.19.0" }
 spl-associated-token-account = "=2.3.1"
 spl-instruction-padding = "0.1"
 spl-memo = "=4.0.1"

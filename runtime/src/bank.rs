@@ -3809,7 +3809,8 @@ impl Bank {
             .accounts
             .accounts_db
             .accounts_cache
-            .set_genesis_hash(hash.to_string());
+            .remote_loader
+            .set_genesis_hash(hash);
 
         self.blockhash_queue
             .write()
