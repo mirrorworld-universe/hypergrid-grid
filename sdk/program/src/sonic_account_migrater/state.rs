@@ -1,12 +1,11 @@
 use {
     serde::{Deserialize, Serialize},
-    solana_frozen_abi_macro::{AbiEnumVisitor, AbiExample},
     solana_program::pubkey::Pubkey,
 };
 
 /// Program account states
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone, AbiExample, AbiEnumVisitor)]
-#[allow(clippy::large_enum_variant)]
+#[cfg_attr(feature = "frozen-abi", derive(AbiExample, AbiEnumVisitor))]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub enum MigratedAccountsState {
     /// Account is not initialized.
     Uninitialized,
@@ -14,7 +13,8 @@ pub enum MigratedAccountsState {
     MigratedAccounts(Vec<MigratedAccount>),
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone, AbiExample, AbiEnumVisitor)]
+#[cfg_attr(feature = "frozen-abi", derive(AbiExample, AbiEnumVisitor))]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub struct MigratedAccount {
     pub address: Pubkey,
     pub source: Option<Pubkey>,

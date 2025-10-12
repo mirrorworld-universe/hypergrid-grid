@@ -73,6 +73,7 @@ dependencies = [
  "log",
  "rustc_version 0.4.0",
  "serde",
+ "serde_derive",
  "serde_json",
  "sha2 0.10.8",
  "solana-clap-utils",
@@ -121,6 +122,7 @@ dependencies = [
  "scopeguard",
  "semver 1.0.22",
  "serde",
+ "serde_derive",
  "serde_yaml 0.8.26",
  "serde_yaml 0.9.34+deprecated",
  "solana-clap-utils",
@@ -156,6 +158,7 @@ dependencies = [
  "rayon",
  "regex",
  "serde",
+ "serde_derive",
  "serde_json",
  "signal-hook",
  "solana-account-decoder",
@@ -277,9 +280,9 @@ dependencies = [
 
 [[package]]
 name = "ahash"
-version = "0.7.6"
+version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fcb51a0695d8f838b1ee009b3fbf66bda078cd64590202a864a8f3e8c4315c47"
+checksum = "891477e0c6a8957309ee5c45a6368af3ae14bb510732d2684ffa19af310920f9"
 dependencies = [
  "getrandom 0.2.10",
  "once_cell",
@@ -2020,9 +2023,9 @@ dependencies = [
 
 [[package]]
 name = "either"
-version = "1.10.0"
+version = "1.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11157ac094ffbdde99aa67b23417ebdd801842852b500e395a45a9c0aac03e4a"
+checksum = "a47c1c47d2f5964e29c61246e81db715514cd532db6b5116a25ea3c03d6780a2"
 
 [[package]]
 name = "encode_unicode"
@@ -2544,7 +2547,7 @@ version = "0.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ab5ef0d4909ef3724cc8cce6ccc8572c5c817592e9285f5464f8e86f8bd3726e"
 dependencies = [
- "ahash 0.7.6",
+ "ahash 0.7.8",
 ]
 
 [[package]]
@@ -2553,7 +2556,7 @@ version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a9ee70c43aaf417c914396645a0fa852624801b24ebb7ae78fe8272889ac888"
 dependencies = [
- "ahash 0.7.6",
+ "ahash 0.7.8",
 ]
 
 [[package]]
@@ -4481,9 +4484,9 @@ dependencies = [
 
 [[package]]
 name = "rayon"
-version = "1.9.0"
+version = "1.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4963ed1bc86e4f3ee217022bd855b297cef07fb9eac5dfa1f788b220b49b3bd"
+checksum = "b418a60154510ca1a002a752ca9714984e21e4241e804d32555251faf8b78ffa"
 dependencies = [
  "either",
  "rayon-core",
@@ -5460,7 +5463,6 @@ dependencies = [
  "num-derive",
  "num-traits",
  "rustc_version 0.4.0",
- "serde",
  "solana-frozen-abi",
  "solana-frozen-abi-macro",
  "solana-program",
@@ -5526,6 +5528,7 @@ name = "solana-banks-interface"
 version = "2.0.0"
 dependencies = [
  "serde",
+ "serde_derive",
  "solana-sdk",
  "tarpc",
 ]
@@ -5713,6 +5716,7 @@ dependencies = [
  "clap 3.2.23",
  "itertools",
  "log",
+ "regex",
  "solana-logger",
 ]
 
@@ -6537,6 +6541,7 @@ dependencies = [
  "clap 3.2.23",
  "rand 0.8.5",
  "serde",
+ "serde_derive",
  "serde_json",
  "solana-logger",
 ]
@@ -6677,7 +6682,6 @@ dependencies = [
  "itertools",
  "js-sys",
  "lazy_static",
- "libc",
  "libsecp256k1",
  "light-poseidon",
  "log",
@@ -6702,7 +6706,6 @@ dependencies = [
  "static_assertions",
  "thiserror",
  "wasm-bindgen",
- "zeroize",
 ]
 
 [[package]]
@@ -7107,7 +7110,6 @@ version = "2.0.0"
 dependencies = [
  "anyhow",
  "assert_matches",
- "base64 0.22.0",
  "bincode",
  "bitflags 2.4.2",
  "borsh 1.5.0",
@@ -7130,8 +7132,6 @@ dependencies = [
  "libsecp256k1",
  "log",
  "memmap2",
- "num-derive",
- "num-traits",
  "num_enum",
  "pbkdf2 0.11.0",
  "qstring",
@@ -7294,6 +7294,7 @@ dependencies = [
  "async-channel",
  "bytes",
  "crossbeam-channel",
+ "dashmap",
  "futures-util",
  "histogram",
  "indexmap 2.2.5",
@@ -7331,6 +7332,7 @@ dependencies = [
  "rand 0.8.5",
  "rustc_version 0.4.0",
  "serde",
+ "serde_derive",
  "solana-bpf-loader-program",
  "solana-frozen-abi",
  "solana-frozen-abi-macro",
@@ -7418,6 +7420,7 @@ dependencies = [
  "indicatif",
  "pickledb",
  "serde",
+ "serde_derive",
  "solana-account-decoder",
  "solana-clap-utils",
  "solana-cli-config",
@@ -7729,6 +7732,7 @@ dependencies = [
  "num-traits",
  "rand 0.7.3",
  "serde",
+ "serde_derive",
  "serde_json",
  "sha3 0.9.1",
  "solana-program",
@@ -7783,6 +7787,7 @@ dependencies = [
  "num-traits",
  "rand 0.7.3",
  "serde",
+ "serde_derive",
  "serde_json",
  "sha3 0.9.1",
  "solana-program",

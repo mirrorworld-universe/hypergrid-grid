@@ -4,10 +4,7 @@ use {
         utils::{serialize_iter_as_map, serialize_iter_as_seq},
         *,
     },
-    crate::{
-        bank::partitioned_epoch_rewards::EpochRewardStatus,
-        stakes::{serde_stakes_enum_compat, StakesEnum},
-    },
+    crate::stakes::{serde_stakes_enum_compat, StakesEnum},
     solana_accounts_db::{accounts_hash::AccountsHash, ancestors::AncestorsForSerialization},
     solana_measure::measure::Measure,
     solana_sdk::{deserialize_utils::ignore_eof_error, stake::state::Delegation},
@@ -99,7 +96,6 @@ impl From<DeserializableVersionedBank> for BankFieldsToDeserialize {
             is_delta: dvb.is_delta,
             incremental_snapshot_persistence: None,
             epoch_accounts_hash: None,
-            epoch_reward_status: EpochRewardStatus::Inactive,
         }
     }
 }
@@ -109,7 +105,7 @@ impl From<DeserializableVersionedBank> for BankFieldsToDeserialize {
 #[derive(Serialize)]
 struct SerializableVersionedBank<'a> {
     blockhash_queue: &'a RwLock<BlockhashQueue>,
-    ancestors: &'a AncestorsForSerialization,
+    ancestors: AncestorsForSerialization,
     hash: Hash,
     parent_hash: Hash,
     parent_slot: Slot,
@@ -198,8 +194,7 @@ impl<'a> TypeContext<'a> for Context {
     where
         Self: std::marker::Sized,
     {
-        let ancestors = HashMap::from(&serializable_bank.bank.ancestors);
-        let fields = serializable_bank.bank.get_fields_to_serialize(&ancestors);
+        let fields = serializable_bank.bank.get_fields_to_serialize();
         let lamports_per_signature = fields.fee_rate_governor.lamports_per_signature;
         let bank_fields_to_serialize = (
             SerializableVersionedBank::from(fields),
@@ -230,8 +225,7 @@ impl<'a> TypeContext<'a> for Context {
     where
         Self: std::marker::Sized,
     {
-        let ancestors = HashMap::from(&serializable_bank.bank.ancestors);
-        let fields = serializable_bank.bank.get_fields_to_serialize(&ancestors);
+        let fields = serializable_bank.bank.get_fields_to_serialize();
         (
             SerializableVersionedBank::from(fields),
             SerializableAccountsDb::<'a, Self> {
@@ -338,9 +332,6 @@ impl<'a> TypeContext<'a> for Context {
         let epoch_accounts_hash = ignore_eof_error(deserialize_from(&mut stream))?;
         bank_fields.epoch_accounts_hash = epoch_accounts_hash;
 
-        let epoch_reward_status = ignore_eof_error(deserialize_from(&mut stream))?;
-        bank_fields.epoch_reward_status = epoch_reward_status;
-
         Ok((bank_fields, accounts_db_fields))
     }
 
@@ -377,7 +368,7 @@ impl<'a> TypeContext<'a> for Context {
 
         let bank = SerializableVersionedBank {
             blockhash_queue: &blockhash_queue,
-            ancestors: &rhs.ancestors,
+            ancestors: rhs.ancestors,
             hash: rhs.hash,
             parent_hash: rhs.parent_hash,
             parent_slot: rhs.parent_slot,

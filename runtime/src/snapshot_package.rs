@@ -8,7 +8,7 @@ use {
     log::*,
     solana_accounts_db::{
         accounts::Accounts,
-        accounts_db::{AccountStorageEntry, AccountsDb},
+        accounts_db::AccountStorageEntry,
         accounts_hash::{AccountsHash, AccountsHashKind},
         epoch_accounts_hash::EpochAccountsHash,
     },
@@ -54,8 +54,8 @@ impl AccountsPackage {
         package_kind: AccountsPackageKind,
         bank: &Bank,
         bank_snapshot_info: &BankSnapshotInfo,
-        full_snapshot_archives_dir: impl AsRef<Path>,
-        incremental_snapshot_archives_dir: impl AsRef<Path>,
+        full_snapshot_archives_dir: impl Into<PathBuf>,
+        incremental_snapshot_archives_dir: impl Into<PathBuf>,
         snapshot_storages: Vec<Arc<AccountStorageEntry>>,
         archive_format: ArchiveFormat,
         snapshot_version: SnapshotVersion,
@@ -81,10 +81,8 @@ impl AccountsPackage {
             bank_snapshot_dir: bank_snapshot_info.snapshot_dir.clone(),
             archive_format,
             snapshot_version,
-            full_snapshot_archives_dir: full_snapshot_archives_dir.as_ref().to_path_buf(),
-            incremental_snapshot_archives_dir: incremental_snapshot_archives_dir
-                .as_ref()
-                .to_path_buf(),
+            full_snapshot_archives_dir: full_snapshot_archives_dir.into(),
+            incremental_snapshot_archives_dir: incremental_snapshot_archives_dir.into(),
             epoch_accounts_hash: bank.get_epoch_accounts_hash_to_serialize(),
         };
         Self::_new(
@@ -160,7 +158,9 @@ impl AccountsPackage {
 
     /// Create a new Accounts Package where basically every field is defaulted.
     /// Only use for tests; many of the fields are invalid!
+    #[cfg(feature = "dev-context-only-utils")]
     pub fn default_for_tests() -> Self {
+        use solana_accounts_db::accounts_db::AccountsDb;
         let accounts_db = AccountsDb::default_for_tests();
         let accounts = Accounts::new(Arc::new(accounts_db));
         Self {

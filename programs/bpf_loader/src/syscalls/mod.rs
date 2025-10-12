@@ -765,8 +765,8 @@ declare_builtin_function!(
             invoke_context.get_check_aligned(),
         )?;
 
-        let mut bump_seed = [std::u8::MAX];
-        for _ in 0..std::u8::MAX {
+        let mut bump_seed = [u8::MAX];
+        for _ in 0..u8::MAX {
             {
                 let mut seeds_with_bump = seeds.to_vec();
                 seeds_with_bump.push(&bump_seed);
@@ -3402,13 +3402,6 @@ mod tests {
         src_rewards.total_rewards = 100;
         src_rewards.distributed_rewards = 10;
         src_rewards.active = true;
-
-        let mut sysvar_cache = SysvarCache::default();
-        sysvar_cache.set_clock(src_clock.clone());
-        sysvar_cache.set_epoch_schedule(src_epochschedule.clone());
-        sysvar_cache.set_fees(src_fees.clone());
-        sysvar_cache.set_rent(src_rent.clone());
-        sysvar_cache.set_epoch_rewards(src_rewards.clone());
 
         let transaction_accounts = vec![
             (

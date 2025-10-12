@@ -1,7 +1,6 @@
 // Sonic: Add log
 use log::*;
 use {
-    serde::{Deserialize, Serialize},
     solana_measure::measure::Measure,
     solana_program_runtime::{
         invoke_context::InvokeContext,
@@ -19,7 +18,7 @@ use {
     },
 };
 
-#[derive(Debug, Default, Clone, Deserialize, Serialize)]
+#[derive(Debug, Default, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct MessageProcessor {}
 
 #[cfg(RUSTC_WITH_SPECIALIZATION)]
@@ -185,7 +184,7 @@ mod tests {
         std::sync::Arc,
     };
 
-    #[derive(Debug, Serialize, Deserialize)]
+    #[derive(Debug, serde_derive::Serialize, serde_derive::Deserialize)]
     enum MockInstruction {
         NoopSuccess,
         NoopFail,
@@ -201,7 +200,7 @@ mod tests {
 
     #[test]
     fn test_process_message_readonly_handling() {
-        #[derive(Serialize, Deserialize)]
+        #[derive(serde_derive::Serialize, serde_derive::Deserialize)]
         enum MockSystemInstruction {
             Correct,
             TransferLamports { lamports: u64 },
@@ -422,7 +421,7 @@ mod tests {
 
     #[test]
     fn test_process_message_duplicate_accounts() {
-        #[derive(Serialize, Deserialize)]
+        #[derive(serde_derive::Serialize, serde_derive::Deserialize)]
         enum MockSystemInstruction {
             BorrowFail,
             MultiBorrowMut,

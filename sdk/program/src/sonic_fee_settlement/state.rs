@@ -1,12 +1,11 @@
 use {
     serde::{Deserialize, Serialize},
-    solana_frozen_abi_macro::{AbiEnumVisitor, AbiExample},
     solana_program::pubkey::Pubkey,
 };
 
 /// Program account states
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone, AbiExample, AbiEnumVisitor)]
-#[allow(clippy::large_enum_variant)]
+#[cfg_attr(feature = "frozen-abi", derive(AbiExample, AbiEnumVisitor))]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub enum SettlementState {
     /// Account is not initialized.
     Uninitialized,
@@ -14,7 +13,8 @@ pub enum SettlementState {
     FeeBillSettled(Vec<SettlementAccount>),
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone, AbiExample, AbiEnumVisitor)]
+#[cfg_attr(feature = "frozen-abi", derive(AbiExample, AbiEnumVisitor))]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub struct SettlementAccount {
     pub owner: Pubkey,
     pub account_type: SettlementAccountType,
@@ -23,7 +23,8 @@ pub struct SettlementAccount {
     pub withdrawed: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone, AbiExample, AbiEnumVisitor)]
+#[cfg_attr(feature = "frozen-abi", derive(AbiExample, AbiEnumVisitor))]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub enum SettlementAccountType {
     BurnAccount,
     HSSNAccount,

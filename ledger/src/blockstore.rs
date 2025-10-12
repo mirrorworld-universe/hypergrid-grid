@@ -2559,8 +2559,13 @@ impl Blockstore {
         slot: Slot,
         require_previous_blockhash: bool,
     ) -> Result<VersionedConfirmedBlock> {
-        self.get_complete_block_with_entries(slot, require_previous_blockhash, false)
-            .map(|result| result.block)
+        self.do_get_complete_block_with_entries(
+            slot,
+            require_previous_blockhash,
+            false,
+            /*allow_dead_slots:*/ false,
+        )
+        .map(|result| result.block)
     }
 
     pub fn get_rooted_block_with_entries(
@@ -2574,23 +2579,49 @@ impl Blockstore {
         let _lock = self.check_lowest_cleanup_slot(slot)?;
 
         if self.is_root(slot) {
-            return self.get_complete_block_with_entries(slot, require_previous_blockhash, true);
+            return self.do_get_complete_block_with_entries(
+                slot,
+                require_previous_blockhash,
+                true,
+                /*allow_dead_slots:*/ false,
+            );
         }
         Err(BlockstoreError::SlotNotRooted)
     }
 
-    fn get_complete_block_with_entries(
+    #[cfg(feature = "dev-context-only-utils")]
+    pub fn get_complete_block_with_entries(
         &self,
         slot: Slot,
         require_previous_blockhash: bool,
         populate_entries: bool,
+        allow_dead_slots: bool,
+    ) -> Result<VersionedConfirmedBlockWithEntries> {
+        self.do_get_complete_block_with_entries(
+            slot,
+            require_previous_blockhash,
+            populate_entries,
+            allow_dead_slots,
+        )
+    }
+
+    fn do_get_complete_block_with_entries(
+        &self,
+        slot: Slot,
+        require_previous_blockhash: bool,
+        populate_entries: bool,
+        allow_dead_slots: bool,
     ) -> Result<VersionedConfirmedBlockWithEntries> {
         let Some(slot_meta) = self.meta_cf.get(slot)? else {
-            info!("SlotMeta not found for slot {}", slot);
+            trace!("do_get_complete_block_with_entries() failed for {slot} (missing SlotMeta)");
             return Err(BlockstoreError::SlotUnavailable);
         };
         if slot_meta.is_full() {
-            let slot_entries = self.get_slot_entries(slot, 0)?;
+            let (slot_entries, _, _) = self.get_slot_entries_with_shred_info(
+                slot,
+                /*shred_start_index:*/ 0,
+                allow_dead_slots,
+            )?;
             if !slot_entries.is_empty() {
                 let blockhash = slot_entries
                     .last()
@@ -2630,8 +2661,13 @@ impl Blockstore {
                 let parent_slot_entries = slot_meta
                     .parent_slot
                     .and_then(|parent_slot| {
-                        self.get_slot_entries(parent_slot, /*shred_start_index:*/ 0)
-                            .ok()
+                        self.get_slot_entries_with_shred_info(
+                            parent_slot,
+                            /*shred_start_index:*/ 0,
+                            allow_dead_slots,
+                        )
+                        .ok()
+                        .map(|(entries, _, _)| entries)
                     })
                     .unwrap_or_default();
                 if parent_slot_entries.is_empty() && require_previous_blockhash {
@@ -2670,6 +2706,7 @@ impl Blockstore {
                 return Ok(VersionedConfirmedBlockWithEntries { block, entries });
             }
         }
+        trace!("do_get_complete_block_with_entries() failed for {slot} (slot not full)");
         Err(BlockstoreError::SlotUnavailable)
     }
 
@@ -3828,18 +3865,25 @@ impl Blockstore {
             .expect("fetch from DuplicateSlots column family failed")
     }
 
-    // `new_shred` is assumed to have slot and index equal to the given slot and index.
-    // Returns the existing shred if `new_shred` is not equal to the existing shred at the
-    // given slot and index as this implies the leader generated two different shreds with
-    // the same slot and index
-    pub fn is_shred_duplicate(&self, new_shred: &Shred) -> Option<Vec<u8>> {
-        let (slot, index, shred_type) = new_shred.id().unpack();
-        let existing_shred = match shred_type {
-            ShredType::Data => self.get_data_shred(slot, index as u64),
-            ShredType::Code => self.get_coding_shred(slot, index as u64),
+    /// Returns the shred already stored in blockstore if it has a different
+    /// payload than the given `shred` but the same (slot, index, shred-type).
+    /// This implies the leader generated two different shreds with the same
+    /// slot, index and shred-type.
+    /// The payload is modified so that it has the same retransmitter's
+    /// signature as the `shred` argument.
+    pub fn is_shred_duplicate(&self, shred: &Shred) -> Option<Vec<u8>> {
+        let (slot, index, shred_type) = shred.id().unpack();
+        let mut other = match shred_type {
+            ShredType::Data => self.get_data_shred(slot, u64::from(index)),
+            ShredType::Code => self.get_coding_shred(slot, u64::from(index)),
         }
         .expect("fetch from DuplicateSlots column family failed")?;
-        (existing_shred != *new_shred.payload()).then_some(existing_shred)
+        if let Ok(signature) = shred.retransmitter_signature() {
+            if let Err(err) = shred::layout::set_retransmitter_signature(&mut other, &signature) {
+                error!("set retransmitter signature failed: {err:?}");
+            }
+        }
+        (&other != shred.payload()).then_some(other)
     }
 
     pub fn has_duplicate_shreds_in_slot(&self, slot: Slot) -> bool {
@@ -5345,7 +5389,7 @@ pub mod tests {
                     let meta = blockstore.meta(num_slots + 1).unwrap().unwrap();
                     assert_eq!(meta.consumed, 1);
                     assert_eq!(meta.received, 1);
-                    assert_eq!(meta.last_index, std::u64::MAX);
+                    assert_eq!(meta.last_index, u64::MAX);
                     assert_eq!(meta.parent_slot, num_slots);
                     assert!(meta.next_slots.is_empty());
 
@@ -6730,10 +6774,7 @@ pub mod tests {
             let (mut shred, entry) =
                 make_slot_entries(slot, parent_slot, 1, /*merkle_variant:*/ false);
             num_shreds_per_slot = shred.len() as u64;
-            shred
-                .iter_mut()
-                .enumerate()
-                .for_each(|(_, shred)| shred.set_index(0));
+            shred.iter_mut().for_each(|shred| shred.set_index(0));
             shreds.extend(shred);
             entries.extend(entry);
         }
@@ -10497,7 +10538,7 @@ pub mod tests {
             .map(|i| Reward {
                 pubkey: solana_sdk::pubkey::new_rand().to_string(),
                 lamports: 42 + i,
-                post_balance: std::u64::MAX,
+                post_balance: u64::MAX,
                 reward_type: Some(RewardType::Fee),
                 commission: None,
             })
@@ -10819,7 +10860,7 @@ pub mod tests {
         let even_smaller_last_shred_duplicate = {
             let mut payload = shreds[smaller_last_shred_index - 1].payload().clone();
             // Flip a byte to create a duplicate shred
-            payload[0] = std::u8::MAX - payload[0];
+            payload[0] = u8::MAX - payload[0];
             let mut shred = Shred::new_from_serialized_shred(payload).unwrap();
             shred.set_last_in_slot();
             shred

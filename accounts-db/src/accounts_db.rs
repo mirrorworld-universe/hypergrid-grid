@@ -33,7 +33,7 @@ use {
         accounts_cache::{AccountsCache, CachedAccount, SlotCache},
         accounts_file::{
             AccountsFile, AccountsFileError, AccountsFileProvider, MatchAccountOwnerError,
-            ALIGN_BOUNDARY_OFFSET,
+            StorageAccess, ALIGN_BOUNDARY_OFFSET,
         },
         accounts_hash::{
             AccountHash, AccountsDeltaHash, AccountsHash, AccountsHashKind, AccountsHasher,
@@ -507,6 +507,7 @@ pub const ACCOUNTS_DB_CONFIG_FOR_TESTING: AccountsDbConfig = AccountsDbConfig {
     create_ancient_storage: CreateAncientStorage::Pack,
     test_partitioned_epoch_rewards: TestPartitionedEpochRewards::CompareResults,
     test_skip_rewrites_but_include_in_bank_hash: false,
+    storage_access: StorageAccess::Mmap,
 };
 pub const ACCOUNTS_DB_CONFIG_FOR_BENCHMARKS: AccountsDbConfig = AccountsDbConfig {
     index: Some(ACCOUNTS_INDEX_CONFIG_FOR_BENCHMARKS),
@@ -521,6 +522,7 @@ pub const ACCOUNTS_DB_CONFIG_FOR_BENCHMARKS: AccountsDbConfig = AccountsDbConfig
     create_ancient_storage: CreateAncientStorage::Pack,
     test_partitioned_epoch_rewards: TestPartitionedEpochRewards::None,
     test_skip_rewrites_but_include_in_bank_hash: false,
+    storage_access: StorageAccess::Mmap,
 };
 
 pub type BinnedHashData = Vec<Vec<CalculateHashIntermediate>>;
@@ -610,6 +612,7 @@ pub struct AccountsDbConfig {
     /// how to create ancient storages
     pub create_ancient_storage: CreateAncientStorage,
     pub test_partitioned_epoch_rewards: TestPartitionedEpochRewards,
+    pub storage_access: StorageAccess,
 }
 
 #[cfg(not(test))]
@@ -2361,8 +2364,8 @@ impl AccountsDb {
 
     // The default high and low watermark sizes for the accounts read cache.
     // If the cache size exceeds MAX_SIZE_HI, it'll evict entries until the size is <= MAX_SIZE_LO.
-    const DEFAULT_MAX_READ_ONLY_CACHE_DATA_SIZE_LO: usize = 400_000_000;
-    const DEFAULT_MAX_READ_ONLY_CACHE_DATA_SIZE_HI: usize = 400_000_000;
+    const DEFAULT_MAX_READ_ONLY_CACHE_DATA_SIZE_LO: usize = 400 * 1024 * 1024;
+    const DEFAULT_MAX_READ_ONLY_CACHE_DATA_SIZE_HI: usize = 410 * 1024 * 1024;
 
     pub fn default_for_tests() -> Self {
         Self::default_with_accounts_index(AccountInfoAccountsIndex::default_for_tests(), None, None)
@@ -4510,8 +4513,12 @@ impl AccountsDb {
                     .fetch_add(1, Ordering::Relaxed);
                 return true;
             }
-            // this slot is ancient and can become the 'current' ancient for other slots to be squashed into
-            *current_ancient = CurrentAncientAccountsFile::new(slot, Arc::clone(storage));
+            if storage.accounts.can_append() {
+                // this slot is ancient and can become the 'current' ancient for other slots to be squashed into
+                *current_ancient = CurrentAncientAccountsFile::new(slot, Arc::clone(storage));
+            } else {
+                *current_ancient = CurrentAncientAccountsFile::default();
+            }
             return false; // we're done with this slot - this slot IS the ancient append vec
         }
 
@@ -6623,7 +6630,7 @@ impl AccountsDb {
     fn report_store_stats(&self) {
         let mut total_count = 0;
         let mut newest_slot = 0;
-        let mut oldest_slot = std::u64::MAX;
+        let mut oldest_slot = u64::MAX;
         let mut total_bytes = 0;
         let mut total_alive_bytes = 0;
         for (slot, store) in self.storage.iter() {
@@ -13329,7 +13336,7 @@ pub mod tests {
     #[should_panic(expected = "overflow is detected while summing capitalization")]
     fn test_checked_sum_for_capitalization_overflow() {
         assert_eq!(
-            AccountsDb::checked_sum_for_capitalization(vec![1, u64::max_value()].into_iter()),
+            AccountsDb::checked_sum_for_capitalization(vec![1, u64::MAX].into_iter()),
             3
         );
     }
@@ -16962,8 +16969,8 @@ pub mod tests {
         let ideal_av_size = ancient_append_vecs::get_ancient_append_vec_capacity();
         let fat_account_size = (1.5 * ideal_av_size as f64) as u64;
 
-        // Prepare 4 appendvec to combine [small, big, small, small]
-        let account_data_sizes = vec![100, fat_account_size, 100, 100];
+        // Prepare 3 append vecs to combine [small, big, small]
+        let account_data_sizes = vec![100, fat_account_size, 100];
         let (db, slot1) = create_db_with_storages_and_index_with_customized_account_size_per_slot(
             true,
             num_normal_slots + 1,
@@ -16974,11 +16981,11 @@ pub mod tests {
 
         // Adjust alive_ratio for slot2 to test it is shrinkable and is a
         // candidate for squashing into the previous ancient append vec.
-        // However, due to the fact that this appendvec is `oversized`, it can't
+        // However, due to the fact that this append vec is `oversized`, it can't
         // be squashed into the ancient append vec at previous slot (exceeds the
-        // size limit). Therefore, a new "oversized" ancient append vec are
+        // size limit). Therefore, a new "oversized" ancient append vec is
         // created at slot2 as the overflow. This is where the "min_bytes" in
-        // `fn create_ancient_append_vec` used for.
+        // `fn create_ancient_append_vec` is used.
         let slot2 = slot1 + 1;
         let storage2 = db.storage.get_slot_storage_entry(slot2).unwrap();
         let original_cap_slot2 = storage2.accounts.capacity();
@@ -16986,7 +16993,7 @@ pub mod tests {
             .accounts
             .set_current_len_for_tests(original_cap_slot2 as usize);
 
-        // Combine appendvec into ancient append vec.
+        // Combine append vec into ancient append vec.
         let slots_to_combine: Vec<Slot> = (slot1..slot1 + (num_normal_slots + 1) as Slot).collect();
         db.combine_ancient_slots(slots_to_combine, CAN_RANDOMLY_SHRINK_FALSE);
 
@@ -17006,8 +17013,8 @@ pub mod tests {
         assert_eq!(created_accounts.stored_accounts.len(), 1);
         assert_eq!(after_stored_accounts.len(), 1);
 
-        // slot2, even after shrinking, it is still oversized. Therefore, there
-        // exists as an ancient append vec at slot2.
+        // slot2, even after shrinking, is still oversized. Therefore, slot 2
+        // exists as an ancient append vec.
         let storage2_after = db.storage.get_slot_storage_entry(slot2).unwrap();
         assert!(is_ancient(&storage2_after.accounts));
         assert!(storage2_after.capacity() > ideal_av_size);
@@ -17342,7 +17349,7 @@ pub mod tests {
         if num_slots == 0 {
             return;
         }
-        assert!(account_data_sizes.len() == num_slots + 1);
+        assert!(account_data_sizes.len() == num_slots);
         let local_tf = (tf.is_none()).then(|| {
             crate::append_vec::test_utils::get_append_vec_path("create_storages_and_update_index")
         });
