@@ -73,12 +73,9 @@ impl Processor {
             ic_msg!(invoke_context, "data account is alread initialized.");
             return Err(InstructionError::InvalidAccountData);
         } else {
-            let accouts: HashMap<Pubkey, MigratedAccount> = HashMap::new();
-            let state = MigratedAccountsState::MigratedAccounts(
-                accouts.values().cloned().collect::<Vec<MigratedAccount>>(),
-            );
             let serialized_data =
-                bincode::serialize(&state).map_err(|_| InstructionError::GenericError)?;
+                bincode::serialize(&MigratedAccountsState::MigratedAccounts(vec![]))
+                    .map_err(|_| InstructionError::GenericError)?;
             data_account.set_data_from_slice(&serialized_data)?;
         }
 
@@ -134,41 +131,42 @@ impl Processor {
             return Err(InstructionError::NotEnoughAccountKeys);
         }
 
-        let mut accouts: HashMap<Pubkey, MigratedAccount> = HashMap::new();
         let mut data_account = instruction_context
             .try_borrow_instruction_account(transaction_context, data_account_index)?;
-        if let MigratedAccountsState::MigratedAccounts(accounts2) = data_account.get_state()? {
-            accounts2.iter().for_each(|account| {
-                accouts.insert(account.address, account.clone());
-            });
-        } else {
+        let MigratedAccountsState::MigratedAccounts(migrated_accounts) =
+            data_account.get_state()?
+        else {
             ic_msg!(invoke_context, "data account is not initialized.");
             return Err(InstructionError::InvalidAccountData);
-        }
+        };
 
         let clock = invoke_context.get_sysvar_cache().get_clock()?;
         let slot = clock.slot;
 
-        for address in addresses.iter() {
-            ic_msg!(
-                invoke_context,
-                "Account {:?} is migrated at slot {:?} from remote.",
+        let new_migrated_accounts = addresses
+            .iter()
+            .copied()
+            .inspect(|address| {
+                ic_msg!(
+                    invoke_context,
+                    "Account {:?} is migrated at slot {:?} from remote.",
+                    address,
+                    slot
+                );
+            })
+            .map(|address| MigratedAccount {
                 address,
-                slot
-            );
-            accouts.insert(
-                *address,
-                MigratedAccount {
-                    address: *address,
-                    source: None,
-                    slot,
-                },
-            );
-        }
+                slot,
+                source: None,
+            });
 
-        let state = MigratedAccountsState::MigratedAccounts(
-            accouts.values().cloned().collect::<Vec<MigratedAccount>>(),
-        );
+        let accounts = migrated_accounts
+            .into_iter()
+            .chain(new_migrated_accounts)
+            .map(|a| (a.address, a))
+            .collect::<HashMap<_, _>>();
+
+        let state = MigratedAccountsState::MigratedAccounts(accounts.values().cloned().collect());
         let serialized_data =
             bincode::serialize(&state).map_err(|_| InstructionError::GenericError)?;
         data_account.set_data_from_slice(&serialized_data)?;
