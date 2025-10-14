@@ -33,8 +33,6 @@
 //! It offers a high-level API that signs transactions
 //! on behalf of the caller, and a low-level API for when they have
 //! already been signed and verified.
-#[allow(deprecated)]
-use solana_sdk::recent_blockhashes_account;
 use {
     crate::{
         bank::{
@@ -97,9 +95,7 @@ use {
     solana_measure::{measure, measure::Measure, measure_us},
     solana_perf::perf_libs,
     solana_program_runtime::{
-        invoke_context::BuiltinFunctionWithContext,
-        loaded_programs::{ProgramCacheEntry, ProgramCacheEntryOwner, ProgramCacheEntryType},
-        timings::{ExecuteTimingType, ExecuteTimings},
+        invoke_context::BuiltinFunctionWithContext, loaded_programs::ProgramCacheEntry,
     },
     solana_sdk::{
         account::{
@@ -165,6 +161,7 @@ use {
             TransactionLoadResult,
         },
         account_overrides::AccountOverrides,
+        account_saver::collect_accounts_to_store,
         nonce_info::NoncePartial,
         transaction_error_metrics::TransactionErrorMetrics,
         transaction_processing_callback::TransactionProcessingCallback,
@@ -177,6 +174,7 @@ use {
             TransactionLoadedAccountsStats, TransactionResults,
         },
     },
+    solana_timings::{ExecuteTimingType, ExecuteTimings},
     solana_vote::vote_account::{VoteAccount, VoteAccountsHashMap},
     solana_vote_program::vote_state::VoteState,
     std::{
@@ -192,7 +190,7 @@ use {
                 AtomicBool, AtomicI64, AtomicU64, AtomicUsize,
                 Ordering::{AcqRel, Acquire, Relaxed},
             },
-            Arc, LockResult, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard,
+            Arc, LockResult, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak,
         },
         thread::Builder,
         time::{Duration, Instant},
@@ -228,6 +226,7 @@ pub mod epoch_accounts_hash_utils;
 mod fee_distribution;
 mod metrics;
 pub(crate) mod partitioned_epoch_rewards;
+mod recent_blockhashes_account;
 mod serde_snapshot;
 mod sysvar_cache;
 pub(crate) mod tests;
@@ -273,7 +272,6 @@ impl AddAssign for SquashTiming {
     }
 }
 
-#[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct CollectorFeeDetails {
     transaction_fee: u64,
@@ -313,22 +311,6 @@ pub struct BankRc {
     pub(crate) parent: RwLock<Option<Arc<Bank>>>,
 
     pub(crate) bank_id_generator: Arc<AtomicU64>,
-}
-
-#[cfg(all(RUSTC_WITH_SPECIALIZATION, feature = "frozen-abi"))]
-use solana_frozen_abi::abi_example::AbiExample;
-
-#[cfg(all(RUSTC_WITH_SPECIALIZATION, feature = "frozen-abi"))]
-impl AbiExample for BankRc {
-    fn example() -> Self {
-        BankRc {
-            // Set parent to None to cut the recursion into another Bank
-            parent: RwLock::new(None),
-            // AbiExample for Accounts is specially implemented to contain a storage example
-            accounts: AbiExample::example(),
-            bank_id_generator: Arc::new(AtomicU64::new(0)),
-        }
-    }
 }
 
 impl BankRc {
@@ -382,7 +364,6 @@ impl TransactionBalancesSet {
 }
 pub type TransactionBalances = Vec<Vec<u64>>;
 
-#[cfg_attr(feature = "frozen-abi", derive(AbiExample, AbiEnumVisitor))]
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub enum TransactionLogCollectorFilter {
     All,
@@ -397,14 +378,12 @@ impl Default for TransactionLogCollectorFilter {
     }
 }
 
-#[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Debug, Default)]
 pub struct TransactionLogCollectorConfig {
     pub mentioned_addresses: HashSet<Pubkey>,
     pub filter: TransactionLogCollectorFilter,
 }
 
-#[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TransactionLogInfo {
     pub signature: Signature,
@@ -413,7 +392,6 @@ pub struct TransactionLogInfo {
     pub log_messages: TransactionLogMessages,
 }
 
-#[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Default, Debug)]
 pub struct TransactionLogCollector {
     // All the logs collected for from this Bank.  Exact contents depend on the
@@ -699,17 +677,7 @@ pub trait DropCallback: fmt::Debug {
 #[derive(Debug, Default)]
 pub struct OptionalDropCallback(Option<Box<dyn DropCallback + Send + Sync>>);
 
-#[cfg(all(RUSTC_WITH_SPECIALIZATION, feature = "frozen-abi"))]
-impl AbiExample for OptionalDropCallback {
-    fn example() -> Self {
-        Self(None)
-    }
-}
-
 /// Manager for the state of all accounts and programs after processing its entries.
-/// AbiExample is needed even without Serialize/Deserialize; actual (de-)serialization
-/// are implemented elsewhere for versioning
-#[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Debug)]
 pub struct Bank {
     /// References to accounts, parent and signature status
@@ -1040,6 +1008,7 @@ impl Bank {
         accounts_update_notifier: Option<AccountsUpdateNotifier>,
         #[allow(unused)] collector_id_for_tests: Option<Pubkey>,
         exit: Arc<AtomicBool>,
+        #[allow(unused)] genesis_hash: Option<Hash>,
     ) -> Self {
         let accounts_db = AccountsDb::new_with_config(
             paths,
@@ -1061,7 +1030,7 @@ impl Bank {
         #[cfg(not(feature = "dev-context-only-utils"))]
         bank.process_genesis_config(genesis_config);
         #[cfg(feature = "dev-context-only-utils")]
-        bank.process_genesis_config(genesis_config, collector_id_for_tests);
+        bank.process_genesis_config(genesis_config, collector_id_for_tests, genesis_hash);
 
         bank.finish_init(
             genesis_config,
@@ -1320,7 +1289,6 @@ impl Bank {
             new.update_slot_hashes();
             new.update_stake_history(Some(parent.epoch()));
             new.update_clock(Some(parent.epoch()));
-            new.update_fees();
             new.update_last_restart_slot()
         });
 
@@ -1374,7 +1342,7 @@ impl Bank {
         new
     }
 
-    pub fn set_fork_graph_in_program_cache(&self, fork_graph: Arc<RwLock<BankForks>>) {
+    pub fn set_fork_graph_in_program_cache(&self, fork_graph: Weak<RwLock<BankForks>>) {
         self.transaction_processor
             .program_cache
             .write()
@@ -2059,21 +2027,6 @@ impl Bank {
             }
             self.epoch_stakes
                 .insert(leader_schedule_epoch, new_epoch_stakes);
-        }
-    }
-
-    #[allow(deprecated)]
-    fn update_fees(&self) {
-        if !self
-            .feature_set
-            .is_active(&feature_set::disable_fees_sysvar::id())
-        {
-            self.update_sysvar_account(&sysvar::fees::id(), |account| {
-                create_account(
-                    &sysvar::fees::Fees::new(&self.fee_rate_governor.create_fee_calculator()),
-                    self.inherit_specially_retained_account_fields(account),
-                )
-            });
         }
     }
 
@@ -2950,6 +2903,7 @@ impl Bank {
         &mut self,
         genesis_config: &GenesisConfig,
         #[cfg(feature = "dev-context-only-utils")] collector_id_for_tests: Option<Pubkey>,
+        #[cfg(feature = "dev-context-only-utils")] genesis_hash: Option<Hash>,
     ) {
         // Bootstrap validator collects fees until `new_from_parent` is called.
         self.fee_rate_governor = genesis_config.fee_rate_governor.clone();
@@ -2963,9 +2917,6 @@ impl Bank {
             self.capitalization.fetch_add(account.lamports(), Relaxed);
             self.accounts_data_size_initial += account.data().len() as u64;
         }
-        // updating sysvars (the fees sysvar in this case) now depends on feature activations in
-        // genesis_config.accounts above
-        self.update_fees();
 
         for (pubkey, account) in genesis_config.rewards_pools.iter() {
             assert!(
@@ -2986,19 +2937,23 @@ impl Bank {
         self.collector_id =
             collector_id.expect("genesis processing failed because no staked nodes exist");
 
+        #[cfg(not(feature = "dev-context-only-utils"))]
+        let genesis_hash = genesis_config.hash();
+        #[cfg(feature = "dev-context-only-utils")]
+        let genesis_hash = genesis_hash.unwrap_or(genesis_config.hash());
+
         //Sonic: set genesis hash to accounts cache
-        let hash = genesis_config.hash();
         self.rc
             .accounts
             .accounts_db
             .accounts_cache
             .remote_loader
-            .set_genesis_hash(hash);
+            .set_genesis_hash(genesis_hash);
 
         self.blockhash_queue
             .write()
             .unwrap()
-            .genesis_hash(&hash, self.fee_rate_governor.lamports_per_signature);
+            .genesis_hash(&genesis_hash, self.fee_rate_governor.lamports_per_signature);
 
         self.hashes_per_tick = genesis_config.hashes_per_tick();
         self.ticks_per_slot = genesis_config.ticks_per_slot();
@@ -3110,11 +3065,6 @@ impl Bank {
         blockhash_queue.get_lamports_per_signature(hash)
     }
 
-    #[deprecated(since = "1.9.0", note = "Please use `get_fee_for_message` instead")]
-    pub fn get_fee_rate_governor(&self) -> &FeeRateGovernor {
-        &self.fee_rate_governor
-    }
-
     pub fn get_fee_for_message(&self, message: &SanitizedMessage) -> Option<u64> {
         let lamports_per_signature = {
             let blockhash_queue = self.blockhash_queue.read().unwrap();
@@ -3166,19 +3116,6 @@ impl Bank {
             self.feature_set
                 .is_active(&remove_rounding_in_fee_calculation::id()),
         )
-    }
-
-    #[deprecated(
-        since = "1.6.11",
-        note = "Please use `get_blockhash_last_valid_block_height`"
-    )]
-    pub fn get_blockhash_last_valid_slot(&self, blockhash: &Hash) -> Option<Slot> {
-        let blockhash_queue = self.blockhash_queue.read().unwrap();
-        // This calculation will need to be updated to consider epoch boundaries if BlockhashQueue
-        // length is made variable by epoch
-        blockhash_queue
-            .get_hash_age(blockhash)
-            .map(|age| self.slot + MAX_PROCESSING_AGE as u64 - age)
     }
 
     pub fn get_blockhash_last_valid_block_height(&self, blockhash: &Hash) -> Option<Slot> {
@@ -3264,6 +3201,11 @@ impl Bank {
             &Hash::new_unique(),
             &BankWithScheduler::no_scheduler_available(),
         )
+    }
+
+    #[cfg(feature = "dev-context-only-utils")]
+    pub fn register_recent_blockhash_for_test(&self, hash: &Hash) {
+        self.register_recent_blockhash(hash, &BankWithScheduler::no_scheduler_available());
     }
 
     /// Tell the bank which Entry IDs exist on the ledger. This function assumes subsequent calls
@@ -4059,15 +4001,19 @@ impl Bank {
         }
 
         let mut write_time = Measure::start("write_time");
-        let durable_nonce = DurableNonce::from_blockhash(&last_blockhash);
-        self.rc.accounts.store_cached(
-            self.slot(),
-            sanitized_txs,
-            &execution_results,
-            loaded_txs,
-            &durable_nonce,
-            lamports_per_signature,
-        );
+        {
+            let durable_nonce = DurableNonce::from_blockhash(&last_blockhash);
+            let (accounts_to_store, transactions) = collect_accounts_to_store(
+                sanitized_txs,
+                &execution_results,
+                loaded_txs,
+                &durable_nonce,
+                lamports_per_signature,
+            );
+            self.rc
+                .accounts
+                .store_cached((self.slot(), accounts_to_store.as_slice()), &transactions);
+        }
         let rent_debits = self.collect_rent(&execution_results, loaded_txs);
 
         // Cached vote and stake accounts are synchronized with accounts-db
@@ -6308,24 +6254,6 @@ impl Bank {
         );
     }
 
-    /// Remove a built-in instruction processor
-    pub fn remove_builtin(&mut self, program_id: Pubkey, name: &str) {
-        debug!("Removing program {}", program_id);
-        // Don't remove the account since the bank expects the account state to
-        // be idempotent
-        self.transaction_processor.add_builtin(
-            self,
-            program_id,
-            name,
-            ProgramCacheEntry::new_tombstone(
-                self.slot,
-                ProgramCacheEntryOwner::NativeLoader,
-                ProgramCacheEntryType::Closed,
-            ),
-        );
-        debug!("Removed program {}", program_id);
-    }
-
     pub fn add_precompile(&mut self, program_id: &Pubkey) {
         debug!("Adding precompiled program {}", program_id);
         self.add_precompiled_account(program_id);
@@ -6969,6 +6897,7 @@ impl Bank {
             None,
             Some(Pubkey::new_unique()),
             Arc::default(),
+            None,
         )
     }
 
@@ -6992,6 +6921,7 @@ impl Bank {
             None,
             Some(Pubkey::new_unique()),
             Arc::default(),
+            None,
         )
     }
 

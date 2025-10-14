@@ -2,10 +2,7 @@
 use log::*;
 use {
     solana_measure::measure::Measure,
-    solana_program_runtime::{
-        invoke_context::InvokeContext,
-        timings::{ExecuteDetailsTimings, ExecuteTimings},
-    },
+    solana_program_runtime::invoke_context::InvokeContext,
     solana_sdk::{
         account::WritableAccount,
         message::SanitizedMessage,
@@ -16,6 +13,7 @@ use {
         transaction::TransactionError,
         transaction_context::{IndexOfAccount, InstructionAccount},
     },
+    solana_timings::{ExecuteDetailsTimings, ExecuteTimings},
 };
 
 #[derive(Debug, Default, Clone, serde_derive::Deserialize, serde_derive::Serialize)]

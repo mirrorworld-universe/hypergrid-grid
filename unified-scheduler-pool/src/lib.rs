@@ -1,8 +1,3 @@
-//! NOTE: While the unified scheduler is fully functional and moderately performant even with
-//! mainnet-beta, it has known resource-exhaustion related security issues for replaying
-//! specially-crafted blocks produced by malicious leaders. Thus, this experimental and
-//! nondefault functionality is exempt from the bug bounty program for now.
-//!
 //! Transaction scheduling code.
 //!
 //! This crate implements 3 solana-runtime traits (`InstalledScheduler`, `UninstalledScheduler` and
@@ -25,7 +20,6 @@ use {
     solana_ledger::blockstore_processor::{
         execute_batch, TransactionBatchWithIndexes, TransactionStatusSender,
     },
-    solana_program_runtime::timings::ExecuteTimings,
     solana_runtime::{
         bank::Bank,
         installed_scheduler_pool::{
@@ -41,6 +35,7 @@ use {
         pubkey::Pubkey,
         transaction::{Result, SanitizedTransaction, TransactionError},
     },
+    solana_timings::ExecuteTimings,
     solana_unified_scheduler_logic::{SchedulingStateMachine, Task, UsageQueue},
     std::{
         fmt::Debug,
@@ -766,23 +761,6 @@ struct ThreadManager<S: SpawnableScheduler<TH>, TH: TaskHandler> {
     handler_threads: Vec<JoinHandle<()>>,
 }
 
-impl<TH: TaskHandler> PooledScheduler<TH> {
-    fn do_spawn(
-        pool: Arc<SchedulerPool<Self, TH>>,
-        initial_context: SchedulingContext,
-        result_with_timings: ResultWithTimings,
-    ) -> Self {
-        Self::from_inner(
-            PooledSchedulerInner::<Self, TH> {
-                thread_manager: ThreadManager::new(pool),
-                usage_queue_loader: UsageQueueLoader::default(),
-            },
-            initial_context,
-            result_with_timings,
-        )
-    }
-}
-
 struct HandlerPanicked;
 type HandlerResult = std::result::Result<Box<ExecutedTask>, HandlerPanicked>;
 
@@ -852,7 +830,15 @@ impl<S: SpawnableScheduler<TH>, TH: TaskHandler> ThreadManager<S, TH> {
         );
     }
 
-    fn start_threads(&mut self, context: &SchedulingContext) {
+    // This method must take same set of session-related arguments as start_session() to avoid
+    // unneeded channel operations to minimize overhead. Starting threads incurs a very high cost
+    // already... Also, pre-creating threads isn't desirable as well to avoid `Option`-ed types
+    // for type safety.
+    fn start_threads(
+        &mut self,
+        context: SchedulingContext,
+        mut result_with_timings: ResultWithTimings,
+    ) {
         // Firstly, setup bi-directional messaging between the scheduler and handlers to pass
         // around tasks, by creating 2 channels (one for to-be-handled tasks from the scheduler to
         // the handlers and the other for finished tasks from the handlers to the scheduler).
@@ -930,7 +916,7 @@ impl<S: SpawnableScheduler<TH>, TH: TaskHandler> ThreadManager<S, TH> {
         // prioritization further. Consequently, this also contributes to alleviate the known
         // heuristic's caveat for the first task of linearized runs, which is described above.
         let (mut runnable_task_sender, runnable_task_receiver) =
-            chained_channel::unbounded::<Task, SchedulingContext>(context.clone());
+            chained_channel::unbounded::<Task, SchedulingContext>(context);
         // Create two handler-to-scheduler channels to prioritize the finishing of blocked tasks,
         // because it is more likely that a blocked task will have more blocked tasks behind it,
         // which should be scheduled while minimizing the delay to clear buffered linearized runs
@@ -949,7 +935,7 @@ impl<S: SpawnableScheduler<TH>, TH: TaskHandler> ThreadManager<S, TH> {
         // 4. the handler thread processes the dispatched task.
         // 5. the handler thread reply back to the scheduler thread as an executed task.
         // 6. the scheduler thread post-processes the executed task.
-        let scheduler_main_loop = || {
+        let scheduler_main_loop = {
             let handler_count = self.pool.handler_count;
             let session_result_sender = self.session_result_sender.clone();
             // Taking new_task_receiver here is important to ensure there's a single receiver. In
@@ -1013,29 +999,14 @@ impl<S: SpawnableScheduler<TH>, TH: TaskHandler> ThreadManager<S, TH> {
                 let mut state_machine = unsafe {
                     SchedulingStateMachine::exclusively_initialize_current_thread_for_scheduling()
                 };
-                let mut result_with_timings = initialized_result_with_timings();
 
+                // The following loop maintains and updates ResultWithTimings as its
+                // externally-provided mutable state for each session in this way:
+                //
+                // 1. Initial result_with_timing is propagated implicitly by the moved variable.
+                // 2. Subsequent result_with_timings are propagated explicitly from
+                //    the new_task_receiver.recv() invocation located at the end of loop.
                 'nonaborted_main_loop: loop {
-                    match new_task_receiver.recv() {
-                        Ok(NewTaskPayload::OpenSubchannel((
-                            new_context,
-                            new_result_with_timings,
-                        ))) => {
-                            // signal about new SchedulingContext to handler threads
-                            runnable_task_sender
-                                .send_chained_channel(new_context, handler_count)
-                                .unwrap();
-                            result_with_timings = new_result_with_timings;
-                        }
-                        Ok(_) => {
-                            unreachable!();
-                        }
-                        Err(_) => {
-                            // This unusual condition must be triggered by ThreadManager::drop();
-                            break 'nonaborted_main_loop;
-                        }
-                    }
-
                     let mut is_finished = false;
                     while !is_finished {
                         // ALL recv selectors are eager-evaluated ALWAYS by current crossbeam impl,
@@ -1086,9 +1057,8 @@ impl<S: SpawnableScheduler<TH>, TH: TaskHandler> ThreadManager<S, TH> {
                                     Ok(NewTaskPayload::CloseSubchannel) => {
                                         session_ending = true;
                                     }
-                                    Ok(NewTaskPayload::OpenSubchannel(_context_and_result_with_timings)) => {
-                                        unreachable!();
-                                    }
+                                    Ok(NewTaskPayload::OpenSubchannel(_context_and_result_with_timings)) =>
+                                        unreachable!(),
                                     Err(RecvError) => {
                                         // Mostly likely is that this scheduler is dropped for pruned blocks of
                                         // abandoned forks...
@@ -1111,15 +1081,36 @@ impl<S: SpawnableScheduler<TH>, TH: TaskHandler> ThreadManager<S, TH> {
                         is_finished = session_ending && state_machine.has_no_active_task();
                     }
 
-                    if session_ending {
-                        state_machine.reinitialize();
-                        session_result_sender
-                            .send(std::mem::replace(
-                                &mut result_with_timings,
-                                initialized_result_with_timings(),
-                            ))
-                            .expect("always outlived receiver");
-                        session_ending = false;
+                    // Finalize the current session after asserting it's explicitly requested so.
+                    assert!(session_ending);
+                    // Send result first because this is blocking the replay code-path.
+                    session_result_sender
+                        .send(result_with_timings)
+                        .expect("always outlived receiver");
+                    state_machine.reinitialize();
+                    session_ending = false;
+
+                    // Prepare for the new session.
+                    match new_task_receiver.recv() {
+                        Ok(NewTaskPayload::OpenSubchannel((
+                            new_context,
+                            new_result_with_timings,
+                        ))) => {
+                            // We just received subsequent (= not initial) session and about to
+                            // enter into the preceding `while(!is_finished) {...}` loop again.
+                            // Before that, propagate new SchedulingContext to handler threads
+                            runnable_task_sender
+                                .send_chained_channel(new_context, handler_count)
+                                .unwrap();
+                            result_with_timings = new_result_with_timings;
+                        }
+                        Err(_) => {
+                            // This unusual condition must be triggered by ThreadManager::drop().
+                            // Initialize result_with_timings with a harmless value...
+                            result_with_timings = initialized_result_with_timings();
+                            break 'nonaborted_main_loop;
+                        }
+                        Ok(_) => unreachable!(),
                     }
                 }
 
@@ -1152,6 +1143,14 @@ impl<S: SpawnableScheduler<TH>, TH: TaskHandler> ThreadManager<S, TH> {
             let finished_blocked_task_sender = finished_blocked_task_sender.clone();
             let finished_idle_task_sender = finished_idle_task_sender.clone();
 
+            // The following loop maintains and updates SchedulingContext as its
+            // externally-provided state for each session in this way:
+            //
+            // 1. Initial context is propagated implicitly by the moved runnable_task_receiver,
+            //    which is clone()-d just above for this particular thread.
+            // 2. Subsequent contexts are propagated explicitly inside `.after_select()` as part of
+            //    `select_biased!`, which are sent from `.send_chained_channel()` in the scheduler
+            //    thread for all-but-initial sessions.
             move || loop {
                 let (task, sender) = select_biased! {
                     recv(runnable_task_receiver.for_select()) -> message => {
@@ -1206,7 +1205,7 @@ impl<S: SpawnableScheduler<TH>, TH: TaskHandler> ThreadManager<S, TH> {
         self.scheduler_thread = Some(
             thread::Builder::new()
                 .name("solScheduler".to_owned())
-                .spawn_tracked(scheduler_main_loop())
+                .spawn_tracked(scheduler_main_loop)
                 .unwrap(),
         );
 
@@ -1327,13 +1326,14 @@ impl<S: SpawnableScheduler<TH>, TH: TaskHandler> ThreadManager<S, TH> {
 
     fn start_session(
         &mut self,
-        context: &SchedulingContext,
+        context: SchedulingContext,
         result_with_timings: ResultWithTimings,
     ) {
+        assert!(!self.are_threads_joined());
         assert_matches!(self.session_result_with_timings, None);
         self.new_task_sender
             .send(NewTaskPayload::OpenSubchannel((
-                context.clone(),
+                context,
                 result_with_timings,
             )))
             .expect("no new session after aborted");
@@ -1353,7 +1353,7 @@ pub trait SpawnableScheduler<TH: TaskHandler>: InstalledScheduler {
 
     fn spawn(
         pool: Arc<SchedulerPool<Self, TH>>,
-        initial_context: SchedulingContext,
+        context: SchedulingContext,
         result_with_timings: ResultWithTimings,
     ) -> Self
     where
@@ -1379,21 +1379,23 @@ impl<TH: TaskHandler> SpawnableScheduler<TH> for PooledScheduler<TH> {
     ) -> Self {
         inner
             .thread_manager
-            .start_session(&context, result_with_timings);
+            .start_session(context.clone(), result_with_timings);
         Self { inner, context }
     }
 
     fn spawn(
         pool: Arc<SchedulerPool<Self, TH>>,
-        initial_context: SchedulingContext,
+        context: SchedulingContext,
         result_with_timings: ResultWithTimings,
     ) -> Self {
-        let mut scheduler = Self::do_spawn(pool, initial_context, result_with_timings);
-        scheduler
-            .inner
+        let mut inner = Self::Inner {
+            thread_manager: ThreadManager::new(pool),
+            usage_queue_loader: UsageQueueLoader::default(),
+        };
+        inner
             .thread_manager
-            .start_threads(&scheduler.context);
-        scheduler
+            .start_threads(context.clone(), result_with_timings);
+        Self { inner, context }
     }
 }
 
@@ -1460,7 +1462,6 @@ mod tests {
         super::*,
         crate::sleepless_testing,
         assert_matches::assert_matches,
-        solana_program_runtime::timings::ExecuteTimingType,
         solana_runtime::{
             bank::Bank,
             bank_forks::BankForks,
@@ -1475,7 +1476,11 @@ mod tests {
             system_transaction,
             transaction::{SanitizedTransaction, TransactionError},
         },
-        std::{sync::Arc, thread::JoinHandle},
+        solana_timings::ExecuteTimingType,
+        std::{
+            sync::{Arc, RwLock},
+            thread::JoinHandle,
+        },
     };
 
     #[derive(Debug)]
@@ -1754,7 +1759,7 @@ mod tests {
             ..
         } = create_genesis_config(10_000);
         let bank = Bank::new_for_tests(&genesis_config);
-        let bank = setup_dummy_fork_graph(bank);
+        let (bank, _bank_forks) = setup_dummy_fork_graph(bank);
 
         let context = SchedulingContext::new(bank.clone());
 
@@ -1822,7 +1827,7 @@ mod tests {
 
         let GenesisConfigInfo { genesis_config, .. } = create_genesis_config(10_000);
         let bank = Bank::new_for_tests(&genesis_config);
-        let bank = setup_dummy_fork_graph(bank);
+        let (bank, _bank_forks) = setup_dummy_fork_graph(bank);
 
         let context = SchedulingContext::new(bank.clone());
 
@@ -1874,7 +1879,7 @@ mod tests {
             ..
         } = create_genesis_config(10_000);
         let bank = Bank::new_for_tests(&genesis_config);
-        let bank = setup_dummy_fork_graph(bank);
+        let (bank, _bank_forks) = setup_dummy_fork_graph(bank);
 
         let context = SchedulingContext::new(bank.clone());
 
@@ -1955,7 +1960,7 @@ mod tests {
         ));
 
         let bank = Bank::new_for_tests(&genesis_config);
-        let bank = setup_dummy_fork_graph(bank);
+        let (bank, _bank_forks) = setup_dummy_fork_graph(bank);
         let ignored_prioritization_fee_cache = Arc::new(PrioritizationFeeCache::new(0u64));
         let pool = SchedulerPool::<PooledScheduler<FaultyHandler>, _>::new(
             None,
@@ -2048,7 +2053,7 @@ mod tests {
         } = create_genesis_config(10_000);
 
         let bank = Bank::new_for_tests(&genesis_config);
-        let bank = setup_dummy_fork_graph(bank);
+        let (bank, _bank_forks) = setup_dummy_fork_graph(bank);
         let ignored_prioritization_fee_cache = Arc::new(PrioritizationFeeCache::new(0u64));
         let pool = SchedulerPool::<PooledScheduler<CountingHandler>, _>::new(
             None,
@@ -2195,12 +2200,12 @@ mod tests {
         assert!(!child_bank.has_installed_scheduler());
     }
 
-    fn setup_dummy_fork_graph(bank: Bank) -> Arc<Bank> {
+    fn setup_dummy_fork_graph(bank: Bank) -> (Arc<Bank>, Arc<RwLock<BankForks>>) {
         let slot = bank.slot();
         let bank_fork = BankForks::new_rw_arc(bank);
         let bank = bank_fork.read().unwrap().get(slot).unwrap();
-        bank.set_fork_graph_in_program_cache(bank_fork);
-        bank
+        bank.set_fork_graph_in_program_cache(Arc::downgrade(&bank_fork));
+        (bank, bank_fork)
     }
 
     #[test]
@@ -2219,7 +2224,7 @@ mod tests {
             genesis_config.hash(),
         ));
         let bank = Bank::new_for_tests(&genesis_config);
-        let bank = setup_dummy_fork_graph(bank);
+        let (bank, _bank_forks) = setup_dummy_fork_graph(bank);
         let ignored_prioritization_fee_cache = Arc::new(PrioritizationFeeCache::new(0u64));
         let pool =
             DefaultSchedulerPool::new_dyn(None, None, None, None, ignored_prioritization_fee_cache);
@@ -2253,7 +2258,7 @@ mod tests {
             ..
         } = create_genesis_config(10_000);
         let bank = Bank::new_for_tests(&genesis_config);
-        let bank = setup_dummy_fork_graph(bank);
+        let (bank, _bank_forks) = setup_dummy_fork_graph(bank);
 
         let ignored_prioritization_fee_cache = Arc::new(PrioritizationFeeCache::new(0u64));
         let pool_raw = DefaultSchedulerPool::do_new(
@@ -2382,7 +2387,7 @@ mod tests {
         let GenesisConfigInfo { genesis_config, .. } = create_genesis_config(10_000);
 
         let bank = Bank::new_for_tests(&genesis_config);
-        let bank = setup_dummy_fork_graph(bank);
+        let (bank, _bank_forks) = setup_dummy_fork_graph(bank);
 
         // Use 2 transactions with different timings to deliberately cover the two code paths of
         // notifying panics in the handler threads, taken conditionally depending on whether the
@@ -2464,7 +2469,7 @@ mod tests {
         } = create_genesis_config(10_000);
 
         let bank = Bank::new_for_tests(&genesis_config);
-        let bank = setup_dummy_fork_graph(bank);
+        let (bank, _bank_forks) = setup_dummy_fork_graph(bank);
         let ignored_prioritization_fee_cache = Arc::new(PrioritizationFeeCache::new(0u64));
         let pool = SchedulerPool::<PooledScheduler<CountingFaultyHandler>, _>::new(
             None,
@@ -2556,7 +2561,7 @@ mod tests {
         ));
 
         let bank = Bank::new_for_tests(&genesis_config);
-        let bank = setup_dummy_fork_graph(bank);
+        let (bank, _bank_forks) = setup_dummy_fork_graph(bank);
         let ignored_prioritization_fee_cache = Arc::new(PrioritizationFeeCache::new(0u64));
         let pool = SchedulerPool::<PooledScheduler<StallingHandler>, _>::new_dyn(
             None,
@@ -2617,7 +2622,7 @@ mod tests {
 
         // Create two banks for two contexts
         let bank0 = Bank::new_for_tests(&genesis_config);
-        let bank0 = setup_dummy_fork_graph(bank0);
+        let bank0 = setup_dummy_fork_graph(bank0).0;
         let bank1 = Arc::new(Bank::new_from_parent(
             bank0.clone(),
             &Pubkey::default(),
@@ -2775,13 +2780,13 @@ mod tests {
 
         fn spawn(
             pool: Arc<SchedulerPool<Self, DefaultTaskHandler>>,
-            initial_context: SchedulingContext,
+            context: SchedulingContext,
             _result_with_timings: ResultWithTimings,
         ) -> Self {
             AsyncScheduler::<TRIGGER_RACE_CONDITION>(
                 Mutex::new(initialized_result_with_timings()),
                 Mutex::new(vec![]),
-                initial_context,
+                context,
                 pool,
             )
         }
@@ -2815,7 +2820,7 @@ mod tests {
                 slot.checked_add(1).unwrap(),
             );
         }
-        let bank = setup_dummy_fork_graph(bank);
+        let (bank, _bank_forks) = setup_dummy_fork_graph(bank);
         let context = SchedulingContext::new(bank.clone());
 
         let ignored_prioritization_fee_cache = Arc::new(PrioritizationFeeCache::new(0u64));
@@ -2886,7 +2891,7 @@ mod tests {
             ..
         } = create_genesis_config(10_000);
         let bank = Bank::new_for_tests(&genesis_config);
-        let bank = &setup_dummy_fork_graph(bank);
+        let (bank, _bank_forks) = &setup_dummy_fork_graph(bank);
 
         let mut tx = system_transaction::transfer(
             mint_keypair,

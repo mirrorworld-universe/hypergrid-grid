@@ -19,6 +19,7 @@ serde = { workspace = true, features = ["derive"] }
 solana-frozen-abi = { workspace = true }
 solana-frozen-abi-macro = { workspace = true }
 solana-program = { workspace = true }
+solana-log-collector.workspace = true
 thiserror = { workspace = true }
 
 [target.'cfg(not(target_os = "solana"))'.dependencies]

@@ -8,7 +8,7 @@ use {
     itertools::izip,
     log::*,
     solana_accounts_db::utils::create_accounts_run_and_snapshot_dirs,
-    solana_client::{connection_cache::ConnectionCache, rpc_client::RpcClient},
+    solana_client::connection_cache::ConnectionCache,
     solana_core::{
         consensus::tower_storage::FileTowerStorage,
         validator::{Validator, ValidatorConfig, ValidatorStartProgress},
@@ -19,6 +19,7 @@ use {
         gossip_service::discover_cluster,
     },
     solana_ledger::{create_new_tmp_ledger, shred::Shred},
+    solana_rpc_client::rpc_client::RpcClient,
     solana_runtime::{
         genesis_utils::{
             create_genesis_config_with_vote_accounts_and_cluster_type, GenesisConfigInfo,
@@ -336,7 +337,9 @@ impl LocalCluster {
             socket_addr_space,
             DEFAULT_TPU_USE_QUIC,
             DEFAULT_TPU_CONNECTION_POOL_SIZE,
-            DEFAULT_TPU_ENABLE_UDP,
+            // We are turning tpu_enable_udp to true in order to prevent concurrent local cluster tests
+            // to use the same QUIC ports due to SO_REUSEPORT.
+            true,
             32, // max connections per IpAddr per minute
             Arc::new(RwLock::new(None)),
         )

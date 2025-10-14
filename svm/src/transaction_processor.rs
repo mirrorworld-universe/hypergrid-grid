@@ -1,5 +1,3 @@
-#[cfg(feature = "dev-context-only-utils")]
-use qualifier_attr::qualifiers;
 use {
     crate::{
         account_loader::{
@@ -24,16 +22,15 @@ use {
         compute_budget_processor::process_compute_budget_instructions,
     },
     solana_loader_v4_program::create_program_runtime_environment_v2,
+    solana_log_collector::LogCollector,
     solana_measure::{measure, measure::Measure},
     solana_program_runtime::{
         invoke_context::{EnvironmentConfig, InvokeContext},
         loaded_programs::{
             ForkGraph, ProgramCache, ProgramCacheEntry, ProgramCacheForTxBatch,
-            ProgramCacheMatchCriteria, ProgramRuntimeEnvironments,
+            ProgramCacheMatchCriteria,
         },
-        log_collector::LogCollector,
         sysvar_cache::SysvarCache,
-        timings::{ExecuteTimingType, ExecuteTimings},
     },
     solana_sdk::{
         account::{AccountSharedData, ReadableAccount, PROGRAM_OWNERS},
@@ -53,6 +50,7 @@ use {
         transaction::{self, SanitizedTransaction, TransactionError},
         transaction_context::{ExecutionRecord, TransactionContext},
     },
+    solana_timings::{ExecuteTimingType, ExecuteTimings},
     solana_type_overrides::sync::{atomic::Ordering, Arc, RwLock, RwLockReadGuard},
     solana_vote::vote_account::VoteAccountsHashMap,
     std::{
@@ -244,8 +242,11 @@ impl<FG: ForkGraph, A: AccountsDb> TransactionBatchProcessor<FG, A> {
 
     /// Returns the current environments depending on the given epoch
     /// Returns None if the call could result in a deadlock
-    #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
-    pub fn get_environments_for_epoch(&self, epoch: Epoch) -> Option<ProgramRuntimeEnvironments> {
+    #[cfg(feature = "dev-context-only-utils")]
+    pub fn get_environments_for_epoch(
+        &self,
+        epoch: Epoch,
+    ) -> Option<solana_program_runtime::loaded_programs::ProgramRuntimeEnvironments> {
         self.program_cache
             .try_read()
             .ok()
@@ -1470,8 +1471,9 @@ mod tests {
     fn test_replenish_program_cache_with_nonexistent_accounts() {
         let mock_bank = MockBankCallback::default();
         let batch_processor = TransactionBatchProcessor::<TestForkGraph>::default();
+        let fork_graph = Arc::new(RwLock::new(TestForkGraph {}));
         batch_processor.program_cache.write().unwrap().fork_graph =
-            Some(Arc::new(RwLock::new(TestForkGraph {})));
+            Some(Arc::downgrade(&fork_graph));
         let key = Pubkey::new_unique();
 
         let mut account_maps: HashMap<Pubkey, u64> = HashMap::new();
@@ -1484,8 +1486,9 @@ mod tests {
     fn test_replenish_program_cache() {
         let mock_bank = MockBankCallback::default();
         let batch_processor = TransactionBatchProcessor::<TestForkGraph>::default();
+        let fork_graph = Arc::new(RwLock::new(TestForkGraph {}));
         batch_processor.program_cache.write().unwrap().fork_graph =
-            Some(Arc::new(RwLock::new(TestForkGraph {})));
+            Some(Arc::downgrade(&fork_graph));
         let key = Pubkey::new_unique();
 
         let mut account_data = AccountSharedData::default();
@@ -1965,8 +1968,9 @@ mod tests {
     fn test_add_builtin() {
         let mock_bank = MockBankCallback::default();
         let batch_processor = TransactionBatchProcessor::<TestForkGraph>::default();
+        let fork_graph = Arc::new(RwLock::new(TestForkGraph {}));
         batch_processor.program_cache.write().unwrap().fork_graph =
-            Some(Arc::new(RwLock::new(TestForkGraph {})));
+            Some(Arc::downgrade(&fork_graph));
 
         let key = Pubkey::new_unique();
         let name = "a_builtin_name";
@@ -2008,8 +2012,9 @@ mod tests {
     fn fast_concur_test() {
         let mut mock_bank = MockBankCallback::default();
         let batch_processor = TransactionBatchProcessor::<TestForkGraph>::new(5, 5, HashSet::new());
+        let fork_graph = Arc::new(RwLock::new(TestForkGraph {}));
         batch_processor.program_cache.write().unwrap().fork_graph =
-            Some(Arc::new(RwLock::new(TestForkGraph {})));
+            Some(Arc::downgrade(&fork_graph));
 
         let programs = vec![
             deploy_program("hello-solana".to_string(), &mut mock_bank),

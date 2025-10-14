@@ -2,18 +2,18 @@ use {
     super::packet_filter::PacketFilterFailure,
     solana_perf::packet::Packet,
     solana_runtime::compute_budget_details::{ComputeBudgetDetails, GetComputeBudgetDetails},
+    solana_sanitize::SanitizeError,
     solana_sdk::{
         hash::Hash,
         message::Message,
         pubkey::Pubkey,
-        sanitize::SanitizeError,
-        short_vec::decode_shortu16_len,
         signature::Signature,
         transaction::{
             AddressLoader, SanitizedTransaction, SanitizedVersionedTransaction,
             VersionedTransaction,
         },
     },
+    solana_short_vec::decode_shortu16_len,
     std::{cmp::Ordering, collections::HashSet, mem::size_of},
     thiserror::Error,
 };
