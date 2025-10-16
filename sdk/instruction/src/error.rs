@@ -1,8 +1,8 @@
+use core::fmt;
 #[cfg(feature = "frozen-abi")]
 use solana_frozen_abi_macro::{AbiEnumVisitor, AbiExample};
 #[cfg(feature = "std")]
 use {
-    core::fmt,
     num_traits::ToPrimitive,
     std::string::{String, ToString},
 };
@@ -429,6 +429,36 @@ where
                     Self::InvalidError
                 }
             }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum LamportsError {
+    /// arithmetic underflowed
+    ArithmeticUnderflow,
+    /// arithmetic overflowed
+    ArithmeticOverflow,
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for LamportsError {}
+
+impl fmt::Display for LamportsError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Self::ArithmeticUnderflow => f.write_str("Arithmetic underflowed"),
+            Self::ArithmeticOverflow => f.write_str("Arithmetic overflowed"),
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl From<LamportsError> for InstructionError {
+    fn from(error: LamportsError) -> Self {
+        match error {
+            LamportsError::ArithmeticOverflow => InstructionError::ArithmeticOverflow,
+            LamportsError::ArithmeticUnderflow => InstructionError::ArithmeticOverflow,
         }
     }
 }

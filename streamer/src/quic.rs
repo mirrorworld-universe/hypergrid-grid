@@ -153,7 +153,7 @@ pub(crate) fn configure_server(
     Ok((server_config, cert_chain_pem))
 }
 
-fn rt(name: String) -> Runtime {
+pub fn rt(name: String) -> Runtime {
     tokio::runtime::Builder::new_multi_thread()
         .thread_name(name)
         .enable_all()
@@ -245,6 +245,9 @@ pub struct StreamerStats {
     pub(crate) throttled_staked_streams: AtomicUsize,
     pub(crate) throttled_unstaked_streams: AtomicUsize,
     pub(crate) connection_rate_limiter_length: AtomicUsize,
+    // All connections in various states such as Incoming, Connecting, Connection
+    pub(crate) open_connections: AtomicUsize,
+    pub(crate) refused_connections_too_many_open_connections: AtomicUsize,
     pub(crate) outstanding_incoming_connection_attempts: AtomicUsize,
     pub(crate) total_incoming_connection_attempts: AtomicUsize,
     pub(crate) quic_endpoints_count: AtomicUsize,
@@ -591,6 +594,17 @@ impl StreamerStats {
             (
                 "quic_endpoints_count",
                 self.quic_endpoints_count.load(Ordering::Relaxed),
+                i64
+            ),
+            (
+                "open_connections",
+                self.open_connections.load(Ordering::Relaxed),
+                i64
+            ),
+            (
+                "refused_connections_too_many_open_connections",
+                self.refused_connections_too_many_open_connections
+                    .swap(0, Ordering::Relaxed),
                 i64
             ),
         );
