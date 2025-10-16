@@ -39,8 +39,6 @@ pub(crate) fn create_transaction_batch_processor<CB: TransactionProcessingCallba
     feature_set: &FeatureSet,
     compute_budget: &ComputeBudget,
     fork_graph: Arc<RwLock<PayTubeForkGraph>>,
-    // Sonic:
-    accounts_db: Arc<solana_accounts_db::accounts_db::AccountsDb>,
 ) -> TransactionBatchProcessor<PayTubeForkGraph> {
     // Create a new transaction batch processor.
     //
@@ -54,8 +52,8 @@ pub(crate) fn create_transaction_batch_processor<CB: TransactionProcessingCallba
     let processor = TransactionBatchProcessor::<PayTubeForkGraph>::new_uninitialized(
         /* slot */ 1,
         /* epoch */ 1,
-        // Sonic:
-        accounts_db,
+        // Sonic: let this compile. Check it later
+        Arc::new(solana_accounts_db::accounts_db::AccountsDb::default_for_tests()),
         Default::default(),
     );
 

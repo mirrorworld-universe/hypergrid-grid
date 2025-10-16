@@ -141,7 +141,6 @@ impl PayTubeChannel {
             &feature_set,
             &compute_budget,
             Arc::clone(&fork_graph),
-            todo!("Sonic: accounts_db"),
         );
 
         // The PayTube transaction processing runtime environment.
