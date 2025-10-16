@@ -19,13 +19,11 @@ use {
         account_storage::meta::StoredMetaWriteVersion,
         accounts::Accounts,
         accounts_db::{
-            stats::BankHashStats, AccountShrinkThreshold, AccountStorageEntry, AccountsDb,
-            AccountsDbConfig, AccountsFileId, AtomicAccountsFileId, DuplicatesLtHash,
-            IndexGenerationInfo,
+            stats::BankHashStats, AccountStorageEntry, AccountsDb, AccountsDbConfig,
+            AccountsFileId, AtomicAccountsFileId, DuplicatesLtHash, IndexGenerationInfo,
         },
         accounts_file::{AccountsFile, StorageAccess},
         accounts_hash::{AccountsDeltaHash, AccountsHash},
-        accounts_index::AccountSecondaryIndexes,
         accounts_update_notifier_interface::AccountsUpdateNotifier,
         ancestors::AncestorsForSerialization,
         blockhash_queue::BlockhashQueue,
@@ -549,7 +547,7 @@ pub(crate) fn fields_from_streams(
 /// This struct contains side-info while reconstructing the bank from streams
 #[derive(Debug)]
 pub struct BankFromStreamsInfo {
-    pub duplicates_lt_hash: Box<DuplicatesLtHash>,
+    pub duplicates_lt_hash: Option<Box<DuplicatesLtHash>>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -561,9 +559,7 @@ pub(crate) fn bank_from_streams<R>(
     runtime_config: &RuntimeConfig,
     debug_keys: Option<Arc<HashSet<Pubkey>>>,
     additional_builtins: Option<&[BuiltinPrototype]>,
-    account_secondary_indexes: AccountSecondaryIndexes,
     limit_load_slot_count_from_snapshot: Option<usize>,
-    shrink_ratio: AccountShrinkThreshold,
     verify_index: bool,
     accounts_db_config: Option<AccountsDbConfig>,
     accounts_update_notifier: Option<AccountsUpdateNotifier>,
@@ -582,9 +578,7 @@ where
         storage_and_next_append_vec_id,
         debug_keys,
         additional_builtins,
-        account_secondary_indexes,
         limit_load_slot_count_from_snapshot,
-        shrink_ratio,
         verify_index,
         accounts_db_config,
         accounts_update_notifier,
@@ -842,7 +836,7 @@ impl<'a> solana_frozen_abi::abi_example::TransparentAsHelper for SerializableAcc
 /// This struct contains side-info while reconstructing the bank from fields
 #[derive(Debug)]
 struct ReconstructedBankInfo {
-    duplicates_lt_hash: Box<DuplicatesLtHash>,
+    duplicates_lt_hash: Option<Box<DuplicatesLtHash>>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -855,9 +849,7 @@ fn reconstruct_bank_from_fields<E>(
     storage_and_next_append_vec_id: StorageAndNextAccountsFileId,
     debug_keys: Option<Arc<HashSet<Pubkey>>>,
     additional_builtins: Option<&[BuiltinPrototype]>,
-    account_secondary_indexes: AccountSecondaryIndexes,
     limit_load_slot_count_from_snapshot: Option<usize>,
-    shrink_ratio: AccountShrinkThreshold,
     verify_index: bool,
     accounts_db_config: Option<AccountsDbConfig>,
     accounts_update_notifier: Option<AccountsUpdateNotifier>,
@@ -879,9 +871,7 @@ where
         account_paths,
         storage_and_next_append_vec_id,
         genesis_config,
-        account_secondary_indexes,
         limit_load_slot_count_from_snapshot,
-        shrink_ratio,
         verify_index,
         accounts_db_config,
         accounts_update_notifier,
@@ -1037,7 +1027,7 @@ pub(crate) fn remap_and_reconstruct_single_storage(
 #[derive(Debug, Default, Clone)]
 pub struct ReconstructedAccountsDbInfo {
     pub accounts_data_len: u64,
-    pub duplicates_lt_hash: Box<DuplicatesLtHash>,
+    pub duplicates_lt_hash: Option<Box<DuplicatesLtHash>>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1046,9 +1036,7 @@ fn reconstruct_accountsdb_from_fields<E>(
     account_paths: &[PathBuf],
     storage_and_next_append_vec_id: StorageAndNextAccountsFileId,
     genesis_config: &GenesisConfig,
-    account_secondary_indexes: AccountSecondaryIndexes,
     limit_load_slot_count_from_snapshot: Option<usize>,
-    shrink_ratio: AccountShrinkThreshold,
     verify_index: bool,
     accounts_db_config: Option<AccountsDbConfig>,
     accounts_update_notifier: Option<AccountsUpdateNotifier>,
@@ -1062,9 +1050,6 @@ where
 {
     let mut accounts_db = AccountsDb::new_with_config(
         account_paths.to_vec(),
-        &genesis_config.cluster_type,
-        account_secondary_indexes,
-        shrink_ratio,
         accounts_db_config,
         accounts_update_notifier,
         exit,

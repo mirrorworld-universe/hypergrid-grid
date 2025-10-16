@@ -35,7 +35,9 @@ sha3 = { workspace = true }
 solana-account-info = { workspace = true, features = ["bincode"] }
 solana-atomic-u64 = { workspace = true }
 solana-bincode = { workspace = true }
+solana-borsh = { workspace = true, optional = true }
 solana-clock = { workspace = true, features = ["serde"] }
+solana-cpi = { workspace = true }
 solana-decode-error = { workspace = true }
 solana-epoch-schedule = { workspace = true, features = ["serde"] }
 solana-fee-calculator = { workspace = true, features = ["serde"] }
@@ -51,6 +53,7 @@ solana-instruction = { workspace = true, default-features = false, features = [
     "serde",
     "std",
 ] }
+solana-last-restart-slot = { workspace = true, features = ["serde"] }
 solana-msg = { workspace = true }
 solana-native-token = { workspace = true }
 solana-program-entrypoint = { workspace = true }
@@ -68,6 +71,7 @@ solana-serialize-utils = { workspace = true }
 solana-sha256-hasher = { workspace = true, features = ["sha2"] }
 solana-short-vec = { workspace = true }
 solana-slot-hashes = { workspace = true, features = ["serde"] }
+solana-slot-history = { workspace = true, features = ["serde"] }
 solana-stable-layout = { workspace = true }
 thiserror = { workspace = true }
 
@@ -126,6 +130,7 @@ default = ["borsh"]
 borsh = [
     "dep:borsh",
     "dep:borsh0-10",
+    "dep:solana-borsh",
     "solana-hash/borsh",
     "solana-instruction/borsh",
     "solana-program-error/borsh",

@@ -89,7 +89,7 @@ use {
         account::{Account, AccountSharedData, ReadableAccount},
         clock::{BankId, Epoch, Slot},
         epoch_schedule::EpochSchedule,
-        genesis_config::{ClusterType, GenesisConfig},
+        genesis_config::GenesisConfig,
         hash::Hash,
         pubkey::Pubkey,
         rent_collector::RentCollector,
@@ -103,7 +103,7 @@ use {
         fs,
         hash::{Hash as StdHash, Hasher as StdHasher},
         io::Result as IoResult,
-        num::Saturating,
+        num::{NonZeroUsize, Saturating},
         ops::{Range, RangeBounds},
         path::{Path, PathBuf},
         sync::{
@@ -146,6 +146,10 @@ const SHRINK_COLLECT_CHUNK_SIZE: usize = 50;
 /// additional storages from ancient slots can be added to the
 /// candidates for shrinking.
 const SHRINK_INSERT_ANCIENT_THRESHOLD: usize = 10;
+
+/// Default value for the number of ancient storages the ancient slot
+/// combining should converge to.
+pub const MAX_ANCIENT_SLOTS_DEFAULT: usize = 100_000;
 
 // Sonic:
 impl solana_svm::transaction_processor::AccountsDb for AccountsDb {
@@ -507,9 +511,11 @@ pub(crate) struct ShrinkCollect<'a, T: ShrinkCollectRefs<'a>> {
 
 pub const ACCOUNTS_DB_CONFIG_FOR_TESTING: AccountsDbConfig = AccountsDbConfig {
     index: Some(ACCOUNTS_INDEX_CONFIG_FOR_TESTING),
+    account_indexes: None,
     base_working_path: None,
     accounts_hash_cache_path: None,
     shrink_paths: None,
+    shrink_ratio: DEFAULT_ACCOUNTS_SHRINK_THRESHOLD_OPTION,
     read_cache_limit_bytes: None,
     write_cache_limit_bytes: None,
     ancient_append_vec_offset: None,
@@ -521,12 +527,17 @@ pub const ACCOUNTS_DB_CONFIG_FOR_TESTING: AccountsDbConfig = AccountsDbConfig {
     storage_access: StorageAccess::Mmap,
     scan_filter_for_shrinking: ScanFilter::OnlyAbnormalWithVerify,
     enable_experimental_accumulator_hash: false,
+    num_clean_threads: None,
+    num_foreground_threads: None,
+    num_hash_threads: None,
 };
 pub const ACCOUNTS_DB_CONFIG_FOR_BENCHMARKS: AccountsDbConfig = AccountsDbConfig {
     index: Some(ACCOUNTS_INDEX_CONFIG_FOR_BENCHMARKS),
+    account_indexes: None,
     base_working_path: None,
     accounts_hash_cache_path: None,
     shrink_paths: None,
+    shrink_ratio: DEFAULT_ACCOUNTS_SHRINK_THRESHOLD_OPTION,
     read_cache_limit_bytes: None,
     write_cache_limit_bytes: None,
     ancient_append_vec_offset: None,
@@ -538,6 +549,9 @@ pub const ACCOUNTS_DB_CONFIG_FOR_BENCHMARKS: AccountsDbConfig = AccountsDbConfig
     storage_access: StorageAccess::Mmap,
     scan_filter_for_shrinking: ScanFilter::OnlyAbnormalWithVerify,
     enable_experimental_accumulator_hash: false,
+    num_clean_threads: None,
+    num_foreground_threads: None,
+    num_hash_threads: None,
 };
 
 pub type BinnedHashData = Vec<Vec<CalculateHashIntermediate>>;
@@ -607,17 +621,34 @@ pub struct AccountsAddRootTiming {
     pub store_us: u64,
 }
 
-/// if negative, this many accounts older than # slots in epoch are still treated as modern (ie. non-ancient).
-/// Slots older than # slots in epoch - this # are then treated as ancient and subject to packing.
-const ANCIENT_APPEND_VEC_DEFAULT_OFFSET: Option<i64> = Some(-10_000);
+/// Slots older the "number of slots in an epoch minus this number"
+/// than max root are treated as ancient and subject to packing.
+/// |  older  |<-          slots in an epoch          ->| max root
+/// |  older  |<-    offset   ->|                       |
+/// |          ancient          |        modern         |
+///
+/// If this is negative, this many slots older than the number of
+/// slots in epoch are still treated as modern (ie. non-ancient).
+/// |  older  |<- abs(offset) ->|<- slots in an epoch ->| max root
+/// | ancient |                 modern                  |
+///
+/// Note that another constant MAX_ANCIENT_SLOTS_DEFAULT sets a
+/// threshold for combining ancient storages so that their overall
+/// number is under a certain limit, whereas this constant establishes
+/// the distance from the max root slot beyond which storages holding
+/// the account data for the slots are considered ancient by the
+/// shrinking algorithm.
+const ANCIENT_APPEND_VEC_DEFAULT_OFFSET: Option<i64> = Some(100_000);
 
 #[derive(Debug, Default, Clone)]
 pub struct AccountsDbConfig {
     pub index: Option<AccountsIndexConfig>,
+    pub account_indexes: Option<AccountSecondaryIndexes>,
     /// Base directory for various necessary files
     pub base_working_path: Option<PathBuf>,
     pub accounts_hash_cache_path: Option<PathBuf>,
     pub shrink_paths: Option<Vec<PathBuf>>,
+    pub shrink_ratio: AccountShrinkThreshold,
     /// The low and high watermark sizes for the read cache, in bytes.
     /// If None, defaults will be used.
     pub read_cache_limit_bytes: Option<(usize, usize)>,
@@ -634,6 +665,12 @@ pub struct AccountsDbConfig {
     pub storage_access: StorageAccess,
     pub scan_filter_for_shrinking: ScanFilter,
     pub enable_experimental_accumulator_hash: bool,
+    /// Number of threads for background cleaning operations (`thread_pool_clean')
+    pub num_clean_threads: Option<NonZeroUsize>,
+    /// Number of threads for foreground operations (`thread_pool`)
+    pub num_foreground_threads: Option<NonZeroUsize>,
+    /// Number of threads for background accounts hashing (`thread_pool_hash`)
+    pub num_hash_threads: Option<NonZeroUsize>,
 }
 
 #[cfg(not(test))]
@@ -675,7 +712,7 @@ pub struct IndexGenerationInfo {
     pub rent_paying_accounts_by_partition: RentPayingAccountsByPartition,
     /// The lt hash of the old/duplicate accounts identified during index generation.
     /// Will be used when verifying the accounts lt hash, after rebuilding a Bank.
-    pub duplicates_lt_hash: Box<DuplicatesLtHash>,
+    pub duplicates_lt_hash: Option<Box<DuplicatesLtHash>>,
 }
 
 #[derive(Debug, Default)]
@@ -1459,8 +1496,6 @@ pub struct AccountsDb {
 
     pub(crate) shrink_ancient_stats: ShrinkAncientStats,
 
-    pub cluster_type: Option<ClusterType>,
-
     pub account_indexes: AccountSecondaryIndexes,
 
     /// Set of unique keys per slot which is used
@@ -1744,14 +1779,24 @@ pub fn make_min_priority_thread_pool() -> ThreadPool {
         .unwrap()
 }
 
-pub fn make_hash_thread_pool() -> ThreadPool {
+/// Returns the default number of threads to use for background accounts hashing
+pub fn default_num_hash_threads() -> NonZeroUsize {
     // 1/8 of the number of cpus and up to 6 threads gives good balance for the system.
     let num_threads = (num_cpus::get() / 8).clamp(2, 6);
+    NonZeroUsize::new(num_threads).unwrap()
+}
+
+pub fn make_hash_thread_pool(num_threads: Option<NonZeroUsize>) -> ThreadPool {
+    let num_threads = num_threads.unwrap_or_else(default_num_hash_threads).get();
     rayon::ThreadPoolBuilder::new()
         .thread_name(|i| format!("solAcctHash{i:02}"))
         .num_threads(num_threads)
         .build()
         .unwrap()
+}
+
+pub fn default_num_foreground_threads() -> usize {
+    get_thread_count()
 }
 
 #[cfg(feature = "frozen-abi")]
@@ -1794,141 +1839,27 @@ impl AccountsDb {
     const DEFAULT_MAX_READ_ONLY_CACHE_DATA_SIZE_HI: usize = 410 * 1024 * 1024;
 
     pub fn default_for_tests() -> Self {
-        Self::default_with_accounts_index(AccountInfoAccountsIndex::default_for_tests(), None, None)
-    }
-
-    fn default_with_accounts_index(
-        accounts_index: AccountInfoAccountsIndex,
-        base_working_path: Option<PathBuf>,
-        accounts_hash_cache_path: Option<PathBuf>,
-    ) -> Self {
-        let num_threads = get_thread_count();
-
-        let (base_working_path, base_working_temp_dir) =
-            if let Some(base_working_path) = base_working_path {
-                (base_working_path, None)
-            } else {
-                let base_working_temp_dir = TempDir::new().unwrap();
-                let base_working_path = base_working_temp_dir.path().to_path_buf();
-                (base_working_path, Some(base_working_temp_dir))
-            };
-
-        let accounts_hash_cache_path = accounts_hash_cache_path.unwrap_or_else(|| {
-            let accounts_hash_cache_path =
-                base_working_path.join(Self::DEFAULT_ACCOUNTS_HASH_CACHE_DIR);
-            if !accounts_hash_cache_path.exists() {
-                fs::create_dir(&accounts_hash_cache_path).expect("create accounts hash cache dir");
-            }
-            accounts_hash_cache_path
-        });
-
-        let mut bank_hash_stats = HashMap::new();
-        bank_hash_stats.insert(0, BankHashStats::default());
-
-        // Increase the stack for accounts threads
-        // rayon needs a lot of stack
-        const ACCOUNTS_STACK_SIZE: usize = 8 * 1024 * 1024;
-
-        let default_accounts_db_config = AccountsDbConfig::default();
-
-        AccountsDb {
-            create_ancient_storage: CreateAncientStorage::default(),
-            verify_accounts_hash_in_bg: VerifyAccountsHashInBackground::default(),
-            active_stats: ActiveStats::default(),
-            skip_initial_hash_calc: false,
-            ancient_append_vec_offset: None,
-            accounts_index,
-            storage: AccountStorage::default(),
-            accounts_cache: AccountsCache::default(),
-            sender_bg_hasher: None,
-            read_only_accounts_cache: ReadOnlyAccountsCache::new(
-                Self::DEFAULT_MAX_READ_ONLY_CACHE_DATA_SIZE_LO,
-                Self::DEFAULT_MAX_READ_ONLY_CACHE_DATA_SIZE_HI,
-                Self::READ_ONLY_CACHE_MS_TO_SKIP_LRU_UPDATE,
-            ),
-            uncleaned_pubkeys: DashMap::new(),
-            next_id: AtomicAccountsFileId::new(0),
-            shrink_candidate_slots: Mutex::new(ShrinkCandidates::default()),
-            write_cache_limit_bytes: None,
-            write_version: AtomicU64::new(0),
-            paths: vec![],
-            base_working_path,
-            base_working_temp_dir,
-            accounts_hash_cache_path,
-            shrink_paths: Vec::default(),
-            temp_paths: None,
-            file_size: DEFAULT_FILE_SIZE,
-            thread_pool: rayon::ThreadPoolBuilder::new()
-                .num_threads(num_threads)
-                .thread_name(|i| format!("solAccounts{i:02}"))
-                .stack_size(ACCOUNTS_STACK_SIZE)
-                .build()
-                .unwrap(),
-            thread_pool_clean: make_min_priority_thread_pool(),
-            thread_pool_hash: make_hash_thread_pool(),
-            bank_hash_stats: Mutex::new(bank_hash_stats),
-            accounts_delta_hashes: Mutex::new(HashMap::new()),
-            accounts_hashes: Mutex::new(HashMap::new()),
-            incremental_accounts_hashes: Mutex::new(HashMap::new()),
-            external_purge_slots_stats: PurgeStats::default(),
-            clean_accounts_stats: CleanAccountsStats::default(),
-            shrink_stats: ShrinkStats::default(),
-            shrink_ancient_stats: ShrinkAncientStats::default(),
-            stats: AccountsStats::default(),
-            cluster_type: None,
-            account_indexes: AccountSecondaryIndexes::default(),
-            #[cfg(test)]
-            load_delay: u64::default(),
-            #[cfg(test)]
-            load_limit: AtomicU64::default(),
-            is_bank_drop_callback_enabled: AtomicBool::default(),
-            remove_unrooted_slots_synchronization: RemoveUnrootedSlotsSynchronization::default(),
-            shrink_ratio: AccountShrinkThreshold::default(),
-            dirty_stores: DashMap::default(),
-            zero_lamport_accounts_to_purge_after_full_snapshot: DashSet::default(),
-            accounts_update_notifier: None,
-            log_dead_slots: AtomicBool::new(true),
-            exhaustively_verify_refcounts: false,
-            accounts_file_provider: AccountsFileProvider::default(),
-            storage_access: StorageAccess::default(),
-            scan_filter_for_shrinking: ScanFilter::default(),
-            partitioned_epoch_rewards_config: PartitionedEpochRewardsConfig::default(),
-            epoch_accounts_hash_manager: EpochAccountsHashManager::new_invalid(),
-            test_skip_rewrites_but_include_in_bank_hash: false,
-            latest_full_snapshot_slot: SeqLock::new(None),
-            is_experimental_accumulator_hash_enabled: default_accounts_db_config
-                .enable_experimental_accumulator_hash
-                .into(),
-            best_ancient_slots_to_shrink: RwLock::default(),
-        }
+        Self::new_single_for_tests()
     }
 
     pub fn new_single_for_tests() -> Self {
-        AccountsDb::new_for_tests(Vec::new(), &ClusterType::Development)
+        AccountsDb::new_for_tests(Vec::new())
     }
 
     pub fn new_single_for_tests_with_provider(file_provider: AccountsFileProvider) -> Self {
-        AccountsDb::new_for_tests_with_provider(
-            Vec::new(),
-            &ClusterType::Development,
-            file_provider,
-        )
+        AccountsDb::new_for_tests_with_provider(Vec::new(), file_provider)
     }
 
-    pub fn new_for_tests(paths: Vec<PathBuf>, cluster_type: &ClusterType) -> Self {
-        Self::new_for_tests_with_provider(paths, cluster_type, AccountsFileProvider::default())
+    pub fn new_for_tests(paths: Vec<PathBuf>) -> Self {
+        Self::new_for_tests_with_provider(paths, AccountsFileProvider::default())
     }
 
     fn new_for_tests_with_provider(
         paths: Vec<PathBuf>,
-        cluster_type: &ClusterType,
         accounts_file_provider: AccountsFileProvider,
     ) -> Self {
         let mut db = AccountsDb::new_with_config(
             paths,
-            cluster_type,
-            AccountSecondaryIndexes::default(),
-            AccountShrinkThreshold::default(),
             Some(ACCOUNTS_DB_CONFIG_FOR_TESTING),
             None,
             Arc::default(),
@@ -1939,124 +1870,151 @@ impl AccountsDb {
 
     pub fn new_with_config(
         paths: Vec<PathBuf>,
-        cluster_type: &ClusterType,
-        account_indexes: AccountSecondaryIndexes,
-        shrink_ratio: AccountShrinkThreshold,
-        mut accounts_db_config: Option<AccountsDbConfig>,
+        accounts_db_config: Option<AccountsDbConfig>,
         accounts_update_notifier: Option<AccountsUpdateNotifier>,
         exit: Arc<AtomicBool>,
     ) -> Self {
-        let default_accounts_db_config = AccountsDbConfig::default();
+        let accounts_db_config = accounts_db_config.unwrap_or_default();
+        let accounts_index = AccountsIndex::new(accounts_db_config.index.clone(), exit);
 
-        let accounts_index = AccountsIndex::new(
-            accounts_db_config.as_mut().and_then(|x| x.index.take()),
-            exit,
-        );
-        let base_working_path = accounts_db_config
-            .as_ref()
-            .and_then(|x| x.base_working_path.clone());
-        let accounts_hash_cache_path = accounts_db_config
-            .as_ref()
-            .and_then(|config| config.accounts_hash_cache_path.clone());
-        let skip_initial_hash_calc = accounts_db_config
-            .as_ref()
-            .map(|config| config.skip_initial_hash_calc)
-            .unwrap_or_default();
+        let base_working_path = accounts_db_config.base_working_path.clone();
+        let (base_working_path, base_working_temp_dir) =
+            if let Some(base_working_path) = base_working_path {
+                (base_working_path, None)
+            } else {
+                let base_working_temp_dir = TempDir::new().unwrap();
+                let base_working_path = base_working_temp_dir.path().to_path_buf();
+                (base_working_path, Some(base_working_temp_dir))
+            };
 
-        let ancient_append_vec_offset = accounts_db_config
-            .as_ref()
-            .and_then(|config| config.ancient_append_vec_offset)
-            .or(ANCIENT_APPEND_VEC_DEFAULT_OFFSET);
+        let (paths, temp_paths) = if paths.is_empty() {
+            // Create a temporary set of accounts directories, used primarily
+            // for testing
+            let (temp_dirs, temp_paths) = get_temp_accounts_paths(DEFAULT_NUM_DIRS).unwrap();
+            (temp_paths, Some(temp_dirs))
+        } else {
+            (paths, None)
+        };
 
-        let exhaustively_verify_refcounts = accounts_db_config
-            .as_ref()
-            .map(|config| config.exhaustively_verify_refcounts)
-            .unwrap_or_default();
+        let shrink_paths = accounts_db_config
+            .shrink_paths
+            .clone()
+            .unwrap_or_else(|| paths.clone());
 
-        let create_ancient_storage = accounts_db_config
-            .as_ref()
-            .map(|config| config.create_ancient_storage)
-            .unwrap_or_default();
+        let accounts_hash_cache_path = accounts_db_config.accounts_hash_cache_path.clone();
+        let accounts_hash_cache_path = accounts_hash_cache_path.unwrap_or_else(|| {
+            let accounts_hash_cache_path =
+                base_working_path.join(Self::DEFAULT_ACCOUNTS_HASH_CACHE_DIR);
+            if !accounts_hash_cache_path.exists() {
+                fs::create_dir(&accounts_hash_cache_path).expect("create accounts hash cache dir");
+            }
+            accounts_hash_cache_path
+        });
 
-        let test_partitioned_epoch_rewards = accounts_db_config
-            .as_ref()
-            .map(|config| config.test_partitioned_epoch_rewards)
-            .unwrap_or_default();
-
-        let test_skip_rewrites_but_include_in_bank_hash = accounts_db_config
-            .as_ref()
-            .map(|config| config.test_skip_rewrites_but_include_in_bank_hash)
-            .unwrap_or_default();
-
+        let test_partitioned_epoch_rewards = accounts_db_config.test_partitioned_epoch_rewards;
         let partitioned_epoch_rewards_config: PartitionedEpochRewardsConfig =
             PartitionedEpochRewardsConfig::new(test_partitioned_epoch_rewards);
 
-        let read_cache_size = accounts_db_config
-            .as_ref()
-            .and_then(|config| config.read_cache_limit_bytes)
-            .unwrap_or((
-                Self::DEFAULT_MAX_READ_ONLY_CACHE_DATA_SIZE_LO,
-                Self::DEFAULT_MAX_READ_ONLY_CACHE_DATA_SIZE_HI,
-            ));
+        let read_cache_size = accounts_db_config.read_cache_limit_bytes.unwrap_or((
+            Self::DEFAULT_MAX_READ_ONLY_CACHE_DATA_SIZE_LO,
+            Self::DEFAULT_MAX_READ_ONLY_CACHE_DATA_SIZE_HI,
+        ));
 
-        let storage_access = accounts_db_config
-            .as_ref()
-            .map(|config| config.storage_access)
-            .unwrap_or_default();
+        let bank_hash_stats = Mutex::new(HashMap::from([(0, BankHashStats::default())]));
 
-        let scan_filter_for_shrinking = accounts_db_config
-            .as_ref()
-            .map(|config| config.scan_filter_for_shrinking)
-            .unwrap_or_default();
+        // Increase the stack for foreground threads
+        // rayon needs a lot of stack
+        const ACCOUNTS_STACK_SIZE: usize = 8 * 1024 * 1024;
+        let num_foreground_threads = accounts_db_config
+            .num_foreground_threads
+            .map(Into::into)
+            .unwrap_or_else(default_num_foreground_threads);
+        let thread_pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(num_foreground_threads)
+            .thread_name(|i| format!("solAccounts{i:02}"))
+            .stack_size(ACCOUNTS_STACK_SIZE)
+            .build()
+            .expect("new rayon threadpool");
 
-        let enable_experimental_accumulator_hash = accounts_db_config
-            .as_ref()
-            .map(|config| config.enable_experimental_accumulator_hash)
-            .unwrap_or(default_accounts_db_config.enable_experimental_accumulator_hash)
-            .into();
+        let num_clean_threads = accounts_db_config
+            .num_clean_threads
+            .map(Into::into)
+            .unwrap_or_else(quarter_thread_count);
+        let thread_pool_clean = rayon::ThreadPoolBuilder::new()
+            .thread_name(|i| format!("solAccountsLo{i:02}"))
+            .num_threads(num_clean_threads)
+            .build()
+            .expect("new rayon threadpool");
 
-        let paths_is_empty = paths.is_empty();
+        let thread_pool_hash = make_hash_thread_pool(accounts_db_config.num_hash_threads);
+
         let mut new = Self {
+            accounts_index,
             paths,
-            skip_initial_hash_calc,
-            ancient_append_vec_offset,
-            cluster_type: Some(*cluster_type),
-            account_indexes,
-            shrink_ratio,
+            base_working_path,
+            base_working_temp_dir,
+            accounts_hash_cache_path,
+            temp_paths,
+            shrink_paths,
+            skip_initial_hash_calc: accounts_db_config.skip_initial_hash_calc,
+            ancient_append_vec_offset: accounts_db_config
+                .ancient_append_vec_offset
+                .or(ANCIENT_APPEND_VEC_DEFAULT_OFFSET),
+            account_indexes: accounts_db_config.account_indexes.unwrap_or_default(),
+            shrink_ratio: accounts_db_config.shrink_ratio,
             accounts_update_notifier,
-            create_ancient_storage,
+            create_ancient_storage: accounts_db_config.create_ancient_storage,
             read_only_accounts_cache: ReadOnlyAccountsCache::new(
                 read_cache_size.0,
                 read_cache_size.1,
                 Self::READ_ONLY_CACHE_MS_TO_SKIP_LRU_UPDATE,
             ),
-            write_cache_limit_bytes: accounts_db_config
-                .as_ref()
-                .and_then(|x| x.write_cache_limit_bytes),
+            write_cache_limit_bytes: accounts_db_config.write_cache_limit_bytes,
             partitioned_epoch_rewards_config,
-            exhaustively_verify_refcounts,
-            test_skip_rewrites_but_include_in_bank_hash,
-            storage_access,
-            scan_filter_for_shrinking,
-            is_experimental_accumulator_hash_enabled: enable_experimental_accumulator_hash,
-            ..Self::default_with_accounts_index(
-                accounts_index,
-                base_working_path,
-                accounts_hash_cache_path,
-            )
+            exhaustively_verify_refcounts: accounts_db_config.exhaustively_verify_refcounts,
+            test_skip_rewrites_but_include_in_bank_hash: accounts_db_config
+                .test_skip_rewrites_but_include_in_bank_hash,
+            storage_access: accounts_db_config.storage_access,
+            scan_filter_for_shrinking: accounts_db_config.scan_filter_for_shrinking,
+            is_experimental_accumulator_hash_enabled: accounts_db_config
+                .enable_experimental_accumulator_hash
+                .into(),
+            bank_hash_stats,
+            thread_pool,
+            thread_pool_clean,
+            thread_pool_hash,
+            verify_accounts_hash_in_bg: VerifyAccountsHashInBackground::default(),
+            active_stats: ActiveStats::default(),
+            storage: AccountStorage::default(),
+            accounts_cache: AccountsCache::default(),
+            sender_bg_hasher: None,
+            uncleaned_pubkeys: DashMap::new(),
+            next_id: AtomicAccountsFileId::new(0),
+            shrink_candidate_slots: Mutex::new(ShrinkCandidates::default()),
+            write_version: AtomicU64::new(0),
+            file_size: DEFAULT_FILE_SIZE,
+            accounts_delta_hashes: Mutex::new(HashMap::new()),
+            accounts_hashes: Mutex::new(HashMap::new()),
+            incremental_accounts_hashes: Mutex::new(HashMap::new()),
+            external_purge_slots_stats: PurgeStats::default(),
+            clean_accounts_stats: CleanAccountsStats::default(),
+            shrink_stats: ShrinkStats::default(),
+            shrink_ancient_stats: ShrinkAncientStats::default(),
+            stats: AccountsStats::default(),
+            #[cfg(test)]
+            load_delay: u64::default(),
+            #[cfg(test)]
+            load_limit: AtomicU64::default(),
+            is_bank_drop_callback_enabled: AtomicBool::default(),
+            remove_unrooted_slots_synchronization: RemoveUnrootedSlotsSynchronization::default(),
+            dirty_stores: DashMap::default(),
+            zero_lamport_accounts_to_purge_after_full_snapshot: DashSet::default(),
+            log_dead_slots: AtomicBool::new(true),
+            accounts_file_provider: AccountsFileProvider::default(),
+            epoch_accounts_hash_manager: EpochAccountsHashManager::new_invalid(),
+            latest_full_snapshot_slot: SeqLock::new(None),
+            best_ancient_slots_to_shrink: RwLock::default(),
         };
-        if paths_is_empty {
-            // Create a temporary set of accounts directories, used primarily
-            // for testing
-            let (temp_dirs, paths) = get_temp_accounts_paths(DEFAULT_NUM_DIRS).unwrap();
-            new.accounts_update_notifier = None;
-            new.paths = paths;
-            new.temp_paths = Some(temp_dirs);
-        };
-        new.shrink_paths = accounts_db_config
-            .as_ref()
-            .and_then(|config| config.shrink_paths.clone())
-            .unwrap_or_else(|| new.paths.clone());
 
         new.start_background_hasher();
         {
@@ -3072,6 +3030,7 @@ impl AccountsDb {
         self.clean_accounts_stats.report();
         datapoint_info!(
             "clean_accounts",
+            ("max_clean_root", max_clean_root_inclusive, Option<i64>),
             ("total_us", measure_all.as_us(), i64),
             (
                 "collect_delta_keys_us",
@@ -7690,7 +7649,9 @@ impl AccountsDb {
         true
     }
 
-    fn is_candidate_for_shrink(&self, store: &AccountStorageEntry) -> bool {
+    /// Determines whether a given AccountStorageEntry instance is a
+    /// candidate for shrinking.
+    pub(crate) fn is_candidate_for_shrink(&self, store: &AccountStorageEntry) -> bool {
         // appended ancient append vecs should not be shrunk by the normal shrink codepath.
         // It is not possible to identify ancient append vecs when we pack, so no check for ancient when we are not appending.
         let total_bytes = if self.create_ancient_storage == CreateAncientStorage::Append
@@ -8916,8 +8877,10 @@ impl AccountsDb {
                 self.accounts_index
                     .add_uncleaned_roots(uncleaned_roots.into_iter());
                 accounts_data_len.fetch_sub(accounts_data_len_from_duplicates, Ordering::Relaxed);
-                let old_val = outer_duplicates_lt_hash.replace(duplicates_lt_hash);
-                assert!(old_val.is_none());
+                if self.is_experimental_accumulator_hash_enabled() {
+                    let old_val = outer_duplicates_lt_hash.replace(duplicates_lt_hash);
+                    assert!(old_val.is_none());
+                }
                 info!(
                     "accounts data len: {}",
                     accounts_data_len.load(Ordering::Relaxed)
@@ -8958,7 +8921,7 @@ impl AccountsDb {
             rent_paying_accounts_by_partition: rent_paying_accounts_by_partition
                 .into_inner()
                 .unwrap(),
-            duplicates_lt_hash: outer_duplicates_lt_hash.unwrap(),
+            duplicates_lt_hash: outer_duplicates_lt_hash,
         }
     }
 
@@ -9035,7 +8998,9 @@ impl AccountsDb {
                             );
                             accessor.check_and_get_loaded_account(|loaded_account| {
                                 let data_len = loaded_account.data_len();
-                                accounts_data_len_from_duplicates += data_len;
+                                if loaded_account.lamports() > 0 {
+                                    accounts_data_len_from_duplicates += data_len;
+                                }
                                 num_duplicate_accounts += 1;
                                 if let Some(lamports_to_top_off) = Self::stats_for_rent_payers(
                                     pubkey,
@@ -10606,7 +10571,7 @@ pub mod tests {
     #[test]
     fn test_account_one() {
         let (_accounts_dirs, paths) = get_temp_accounts_paths(1).unwrap();
-        let db = AccountsDb::new_for_tests(paths, &ClusterType::Development);
+        let db = AccountsDb::new_for_tests(paths);
         let mut pubkeys: Vec<Pubkey> = vec![];
         db.create_account(&mut pubkeys, 0, 1, 0, 0);
         let ancestors = vec![(0, 0)].into_iter().collect();
@@ -10621,7 +10586,7 @@ pub mod tests {
     #[test]
     fn test_account_many() {
         let (_accounts_dirs, paths) = get_temp_accounts_paths(2).unwrap();
-        let db = AccountsDb::new_for_tests(paths, &ClusterType::Development);
+        let db = AccountsDb::new_for_tests(paths);
         let mut pubkeys: Vec<Pubkey> = vec![];
         db.create_account(&mut pubkeys, 0, 100, 0, 0);
         db.check_accounts(&pubkeys, 0, 100, 1);
@@ -10643,7 +10608,7 @@ pub mod tests {
         let size = 4096;
         let accounts = AccountsDb {
             file_size: size,
-            ..AccountsDb::new_for_tests(paths, &ClusterType::Development)
+            ..AccountsDb::new_for_tests(paths)
         };
         let mut keys = vec![];
         for i in 0..9 {
@@ -15349,10 +15314,9 @@ pub mod tests {
         let slots_per_epoch = config.epoch_schedule.slots_per_epoch;
         assert_ne!(slot, 0);
         let offset = 10;
-        // no ancient append vecs, so always 0
         assert_eq!(
             db.get_oldest_non_ancient_slot_for_hash_calc_scan(slots_per_epoch + offset, &config),
-            expected(0)
+            expected(db.ancient_append_vec_offset.unwrap() as u64 + offset + 1)
         );
         // ancient append vecs enabled (but at 0 offset), so can be non-zero
         db.ancient_append_vec_offset = Some(0);
@@ -15866,9 +15830,6 @@ pub mod tests {
         ] {
             let db = AccountsDb::new_with_config(
                 Vec::new(),
-                &ClusterType::Development,
-                AccountSecondaryIndexes::default(),
-                AccountShrinkThreshold::default(),
                 Some(AccountsDbConfig {
                     ancient_append_vec_offset: Some(ancient_append_vec_offset as i64),
                     ..ACCOUNTS_DB_CONFIG_FOR_TESTING
@@ -15900,9 +15861,6 @@ pub mod tests {
         let ancient_append_vec_offset = 50_000;
         let db = AccountsDb::new_with_config(
             Vec::new(),
-            &ClusterType::Development,
-            AccountSecondaryIndexes::default(),
-            AccountShrinkThreshold::default(),
             Some(AccountsDbConfig {
                 ancient_append_vec_offset: Some(ancient_append_vec_offset),
                 ..ACCOUNTS_DB_CONFIG_FOR_TESTING
@@ -15955,9 +15913,6 @@ pub mod tests {
             for starting_slot_offset in [0, avoid_saturation] {
                 let db = AccountsDb::new_with_config(
                     Vec::new(),
-                    &ClusterType::Development,
-                    AccountSecondaryIndexes::default(),
-                    AccountShrinkThreshold::default(),
                     Some(AccountsDbConfig {
                         ancient_append_vec_offset: Some(ancient_append_vec_offset),
                         ..ACCOUNTS_DB_CONFIG_FOR_TESTING
@@ -16080,52 +16035,55 @@ pub mod tests {
         assert!(db
             .get_sorted_potential_ancient_slots(oldest_non_ancient_slot)
             .is_empty());
-        let root0 = 0;
-        db.add_root(root0);
-        let root1 = 1;
+        let root1 = MAX_ANCIENT_SLOTS_DEFAULT as u64 + ancient_append_vec_offset as u64 + 1;
         db.add_root(root1);
+        let root2 = root1 + 1;
+        db.add_root(root2);
         let oldest_non_ancient_slot = db.get_oldest_non_ancient_slot(&epoch_schedule);
         assert!(db
             .get_sorted_potential_ancient_slots(oldest_non_ancient_slot)
             .is_empty());
         let completed_slot = epoch_schedule.slots_per_epoch;
-        db.accounts_index.add_root(completed_slot);
+        db.accounts_index.add_root(AccountsDb::apply_offset_to_slot(
+            completed_slot,
+            ancient_append_vec_offset,
+        ));
         let oldest_non_ancient_slot = db.get_oldest_non_ancient_slot(&epoch_schedule);
         // get_sorted_potential_ancient_slots uses 'less than' as opposed to 'less or equal'
         // so, we need to get more than an epoch away to get the first valid root
         assert!(db
             .get_sorted_potential_ancient_slots(oldest_non_ancient_slot)
             .is_empty());
-        let completed_slot = epoch_schedule.slots_per_epoch + root0;
-        db.accounts_index.add_root(AccountsDb::apply_offset_to_slot(
-            completed_slot,
-            -ancient_append_vec_offset,
-        ));
-        let oldest_non_ancient_slot = db.get_oldest_non_ancient_slot(&epoch_schedule);
-        assert_eq!(
-            db.get_sorted_potential_ancient_slots(oldest_non_ancient_slot),
-            vec![root0]
-        );
         let completed_slot = epoch_schedule.slots_per_epoch + root1;
         db.accounts_index.add_root(AccountsDb::apply_offset_to_slot(
             completed_slot,
-            -ancient_append_vec_offset,
+            ancient_append_vec_offset,
         ));
         let oldest_non_ancient_slot = db.get_oldest_non_ancient_slot(&epoch_schedule);
         assert_eq!(
             db.get_sorted_potential_ancient_slots(oldest_non_ancient_slot),
-            vec![root0, root1]
+            vec![root1, root2]
+        );
+        let completed_slot = epoch_schedule.slots_per_epoch + root2;
+        db.accounts_index.add_root(AccountsDb::apply_offset_to_slot(
+            completed_slot,
+            ancient_append_vec_offset,
+        ));
+        let oldest_non_ancient_slot = db.get_oldest_non_ancient_slot(&epoch_schedule);
+        assert_eq!(
+            db.get_sorted_potential_ancient_slots(oldest_non_ancient_slot),
+            vec![root1, root2]
         );
         db.accounts_index
             .roots_tracker
             .write()
             .unwrap()
             .alive_roots
-            .remove(&root0);
+            .remove(&root1);
         let oldest_non_ancient_slot = db.get_oldest_non_ancient_slot(&epoch_schedule);
         assert_eq!(
             db.get_sorted_potential_ancient_slots(oldest_non_ancient_slot),
-            vec![root1]
+            vec![root2]
         );
     });
 
