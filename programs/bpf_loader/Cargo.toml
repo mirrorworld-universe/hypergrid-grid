@@ -21,6 +21,7 @@ solana-curve25519 = { workspace = true }
 solana-log-collector = { workspace = true }
 solana-measure = { workspace = true }
 solana-poseidon = { workspace = true }
+solana-program-memory = { workspace = true }
 solana-program-runtime = { workspace = true }
 solana-sdk = { workspace = true }
 solana-timings = { workspace = true }
@@ -47,4 +48,5 @@ targets = ["x86_64-unknown-linux-gnu"]
 shuttle-test = [
     "solana-type-overrides/shuttle-test",
     "solana-program-runtime/shuttle-test",
+    "solana_rbpf/shuttle-test"
 ]

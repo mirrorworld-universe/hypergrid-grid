@@ -417,10 +417,10 @@ impl<'a> InvokeContext<'a> {
         let instruction_accounts = duplicate_indicies
             .into_iter()
             .map(|duplicate_index| {
-                Ok(deduplicated_instruction_accounts
+                deduplicated_instruction_accounts
                     .get(duplicate_index)
-                    .ok_or(InstructionError::NotEnoughAccountKeys)?
-                    .clone())
+                    .cloned()
+                    .ok_or(InstructionError::NotEnoughAccountKeys)
             })
             .collect::<Result<Vec<InstructionAccount>, InstructionError>>()?;
 
@@ -475,6 +475,7 @@ impl<'a> InvokeContext<'a> {
         let process_executable_chain_time = Measure::start("process_executable_chain_time");
 
         let builtin_id = {
+            debug_assert!(instruction_context.get_number_of_program_accounts() <= 1);
             let borrowed_root_account = instruction_context
                 .try_borrow_program_account(self.transaction_context, 0)
                 .map_err(|_| InstructionError::UnsupportedProgramId)?;
@@ -767,9 +768,11 @@ pub fn mock_process_instruction<F: FnMut(&mut InvokeContext), G: FnMut(&mut Invo
             is_writable: account_meta.is_writable,
         });
     }
-    program_indices.insert(0, transaction_accounts.len() as IndexOfAccount);
-    let processor_account = AccountSharedData::new(0, 0, &native_loader::id());
-    transaction_accounts.push((*loader_id, processor_account));
+    if program_indices.is_empty() {
+        program_indices.insert(0, transaction_accounts.len() as IndexOfAccount);
+        let processor_account = AccountSharedData::new(0, 0, &native_loader::id());
+        transaction_accounts.push((*loader_id, processor_account));
+    }
     let pop_epoch_schedule_account = if !transaction_accounts
         .iter()
         .any(|(key, _)| *key == sysvar::epoch_schedule::id())
@@ -812,7 +815,7 @@ mod tests {
     use {
         super::*,
         serde::{Deserialize, Serialize},
-        solana_compute_budget::compute_budget_processor,
+        solana_compute_budget::compute_budget_limits,
         solana_sdk::{account::WritableAccount, instruction::Instruction, rent::Rent},
     };
 
@@ -1140,7 +1143,7 @@ mod tests {
 
         with_mock_invoke_context!(invoke_context, transaction_context, transaction_accounts);
         invoke_context.compute_budget = ComputeBudget::new(
-            compute_budget_processor::DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT as u64,
+            compute_budget_limits::DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT as u64,
         );
 
         invoke_context
@@ -1152,7 +1155,7 @@ mod tests {
         assert_eq!(
             *invoke_context.get_compute_budget(),
             ComputeBudget::new(
-                compute_budget_processor::DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT as u64
+                compute_budget_limits::DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT as u64
             )
         );
         invoke_context.pop().unwrap();

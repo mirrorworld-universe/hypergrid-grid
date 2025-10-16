@@ -28,6 +28,8 @@ solana-measure = { workspace = true }
 thiserror = { workspace = true }
 
 [features]
+default = ["frozen-abi"]
+frozen-abi = []
 dummy-for-ci-check = []
 
 [lib]

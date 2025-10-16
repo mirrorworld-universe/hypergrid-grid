@@ -43,8 +43,10 @@ impl AccountStorage {
     /// Callers to this function have 2 choices:
     /// 1. hold the account index read lock for the pubkey so that the account index entry cannot be changed prior to or during this call. (scans do this)
     /// 2. expect to be ready to start over and read the index again if this function returns None
+    ///
     /// Operations like shrinking or write cache flushing may have updated the index between when the caller read the index and called this function to
     /// load from the append vec specified in the index.
+    ///
     /// In practice, this fn will return the entry from the map in the very first lookup unless a shrink is in progress.
     /// The third lookup will only be called if a requesting thread exactly interposes itself between the 2 map manipulations in the drop of 'shrink_in_progress'.
     pub(crate) fn get_account_storage_entry(
@@ -61,7 +63,7 @@ impl AccountStorage {
         lookup_in_map()
             .or_else(|| {
                 self.shrink_in_progress_map.get(&slot).and_then(|entry| {
-                    (entry.value().append_vec_id() == store_id).then(|| Arc::clone(entry.value()))
+                    (entry.value().id() == store_id).then(|| Arc::clone(entry.value()))
                 })
             })
             .or_else(lookup_in_map)
@@ -151,7 +153,7 @@ impl AccountStorage {
             .insert(
                 slot,
                 AccountStorageReference {
-                    id: store.append_vec_id(),
+                    id: store.id(),
                     storage: store,
                 }
             )
@@ -248,11 +250,11 @@ impl<'a> Drop for ShrinkInProgress<'a> {
                     self.slot,
                     AccountStorageReference {
                         storage: Arc::clone(&self.new_store),
-                        id: self.new_store.append_vec_id()
+                        id: self.new_store.id()
                     }
                 )
                 .map(|store| store.id),
-            Some(self.old_store.append_vec_id())
+            Some(self.old_store.id())
         );
 
         // The new store can be removed from 'shrink_in_progress_map'
@@ -489,25 +491,19 @@ pub(crate) mod tests {
         );
         let shrinking_in_progress = storage.shrinking_in_progress(slot, sample.clone());
         assert!(storage.map.contains_key(&slot));
-        assert_eq!(
-            id_to_shrink,
-            storage.map.get(&slot).unwrap().storage.append_vec_id()
-        );
+        assert_eq!(id_to_shrink, storage.map.get(&slot).unwrap().storage.id());
         assert_eq!(
             (slot, id_shrunk),
             storage
                 .shrink_in_progress_map
                 .iter()
                 .next()
-                .map(|r| (*r.key(), r.value().append_vec_id()))
+                .map(|r| (*r.key(), r.value().id()))
                 .unwrap()
         );
         drop(shrinking_in_progress);
         assert!(storage.map.contains_key(&slot));
-        assert_eq!(
-            id_shrunk,
-            storage.map.get(&slot).unwrap().storage.append_vec_id()
-        );
+        assert_eq!(id_shrunk, storage.map.get(&slot).unwrap().storage.id());
         assert!(storage.shrink_in_progress_map.is_empty());
         storage.shrinking_in_progress(slot, sample);
     }
@@ -536,7 +532,7 @@ pub(crate) mod tests {
         // verify data structures during and after shrink and then with subsequent shrink call
         let storage = AccountStorage::default();
         let sample = storage.get_test_storage();
-        let id = sample.append_vec_id();
+        let id = sample.id();
         let missing_id = 9999;
         let slot = sample.slot();
         // id is missing since not in maps at all

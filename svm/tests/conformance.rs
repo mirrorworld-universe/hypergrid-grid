@@ -36,6 +36,7 @@ use {
         account_loader::CheckedTransactionDetails,
         program_loader,
         transaction_processing_callback::TransactionProcessingCallback,
+        transaction_processing_result::TransactionProcessingResultExtensions,
         transaction_processor::{
             ExecutionRecordingConfig, TransactionBatchProcessor, TransactionProcessingConfig,
             TransactionProcessingEnvironment,
@@ -197,7 +198,7 @@ fn run_fixture(fixture: InstrFixture, filename: OsString, execute_as_instr: bool
     let mut fee_payer = Pubkey::new_unique();
     let mut mock_bank = MockBankCallback::default();
     {
-        let mut account_data_map = mock_bank.account_shared_data.borrow_mut();
+        let mut account_data_map = mock_bank.account_shared_data.write().unwrap();
         for item in input.accounts {
             let pubkey = Pubkey::new_from_array(item.address.try_into().unwrap());
             let mut account_data = AccountSharedData::default();
@@ -311,17 +312,8 @@ fn run_fixture(fixture: InstrFixture, filename: OsString, execute_as_instr: bool
     );
 
     // Assert that the transaction has worked without errors.
-    if !result.execution_results[0].was_executed()
-        || result.execution_results[0]
-            .details()
-            .unwrap()
-            .status
-            .is_err()
-    {
-        if matches!(
-            result.execution_results[0].flattened_result(),
-            Err(TransactionError::InsufficientFundsForRent { .. })
-        ) {
+    if let Err(err) = result.processing_results[0].flattened_result() {
+        if matches!(err, TransactionError::InsufficientFundsForRent { .. }) {
             // This is a transaction error not an instruction error, so execute the instruction
             // instead.
             execute_fixture_as_instr(
@@ -344,9 +336,13 @@ fn run_fixture(fixture: InstrFixture, filename: OsString, execute_as_instr: bool
         return;
     }
 
-    let execution_details = result.execution_results[0].details().unwrap();
+    let executed_tx = result.processing_results[0]
+        .processed_transaction()
+        .unwrap();
+    let execution_details = &executed_tx.execution_details;
+    let loaded_accounts = &executed_tx.loaded_transaction.accounts;
     verify_accounts_and_data(
-        &result.loaded_transactions[0].as_ref().unwrap().accounts,
+        loaded_accounts,
         output,
         execution_details.executed_units,
         input.cu_avail,

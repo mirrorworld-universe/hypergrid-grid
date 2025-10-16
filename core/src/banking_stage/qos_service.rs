@@ -44,7 +44,7 @@ impl QosService {
         bank: &Bank,
         transactions: &[SanitizedTransaction],
         pre_results: impl Iterator<Item = transaction::Result<()>>,
-    ) -> (Vec<transaction::Result<TransactionCost>>, usize) {
+    ) -> (Vec<transaction::Result<TransactionCost>>, u64) {
         let transaction_costs =
             self.compute_transaction_costs(&bank.feature_set, transactions.iter(), pre_results);
         let (transactions_qos_cost_results, num_included) = self.select_transactions_per_cost(
@@ -56,7 +56,7 @@ impl QosService {
             transactions_qos_cost_results.iter(),
         ));
         let cost_model_throttled_transactions_count =
-            transactions.len().saturating_sub(num_included);
+            transactions.len().saturating_sub(num_included) as u64;
 
         (
             transactions_qos_cost_results,
@@ -598,7 +598,7 @@ mod tests {
             signature::{Keypair, Signer},
             system_transaction,
         },
-        solana_vote_program::vote_transaction,
+        solana_vote_program::{vote_state::TowerSync, vote_transaction},
         std::sync::Arc,
     };
 
@@ -612,9 +612,8 @@ mod tests {
             system_transaction::transfer(&keypair, &keypair.pubkey(), 1, Hash::default()),
         );
         let vote_tx = SanitizedTransaction::from_transaction_for_tests(
-            vote_transaction::new_vote_transaction(
-                vec![42],
-                Hash::default(),
+            vote_transaction::new_tower_sync_transaction(
+                TowerSync::from(vec![(42, 1)]),
                 Hash::default(),
                 &keypair,
                 &keypair,
@@ -656,9 +655,8 @@ mod tests {
             system_transaction::transfer(&keypair, &keypair.pubkey(), 1, Hash::default()),
         );
         let vote_tx = SanitizedTransaction::from_transaction_for_tests(
-            vote_transaction::new_vote_transaction(
-                vec![42],
-                Hash::default(),
+            vote_transaction::new_tower_sync_transaction(
+                TowerSync::from(vec![(42, 1)]),
                 Hash::default(),
                 &keypair,
                 &keypair,
@@ -707,10 +705,10 @@ mod tests {
         // calculate their costs, apply to cost_tracker
         let transaction_count = 5;
         let keypair = Keypair::new();
-        let loaded_accounts_data_size: usize = 1_000_000;
+        let loaded_accounts_data_size: u32 = 1_000_000;
         let transaction = solana_sdk::transaction::Transaction::new_unsigned(solana_sdk::message::Message::new(
             &[
-                solana_sdk::compute_budget::ComputeBudgetInstruction::set_loaded_accounts_data_size_limit(loaded_accounts_data_size as u32),
+                solana_sdk::compute_budget::ComputeBudgetInstruction::set_loaded_accounts_data_size_limit(loaded_accounts_data_size),
                 solana_sdk::system_instruction::transfer(&keypair.pubkey(), &solana_sdk::pubkey::Pubkey::new_unique(), 1),
             ],
             Some(&keypair.pubkey()),
@@ -720,7 +718,7 @@ mod tests {
             .map(|_| transfer_tx.clone())
             .collect();
         let execute_units_adjustment: u64 = 10;
-        let loaded_accounts_data_size_adjustment: usize = 32000;
+        let loaded_accounts_data_size_adjustment: u32 = 32000;
         let loaded_accounts_data_size_cost_adjustment =
             CostModel::calculate_loaded_accounts_data_size_cost(
                 loaded_accounts_data_size_adjustment,
@@ -827,10 +825,10 @@ mod tests {
         // calculate their costs, apply to cost_tracker
         let transaction_count = 5;
         let keypair = Keypair::new();
-        let loaded_accounts_data_size: usize = 1_000_000;
+        let loaded_accounts_data_size: u32 = 1_000_000;
         let transaction = solana_sdk::transaction::Transaction::new_unsigned(solana_sdk::message::Message::new(
             &[
-                solana_sdk::compute_budget::ComputeBudgetInstruction::set_loaded_accounts_data_size_limit(loaded_accounts_data_size as u32),
+                solana_sdk::compute_budget::ComputeBudgetInstruction::set_loaded_accounts_data_size_limit(loaded_accounts_data_size),
                 solana_sdk::system_instruction::transfer(&keypair.pubkey(), &solana_sdk::pubkey::Pubkey::new_unique(), 1),
             ],
             Some(&keypair.pubkey()),
@@ -840,7 +838,7 @@ mod tests {
             .map(|_| transfer_tx.clone())
             .collect();
         let execute_units_adjustment: u64 = 10;
-        let loaded_accounts_data_size_adjustment: usize = 32000;
+        let loaded_accounts_data_size_adjustment: u32 = 32000;
         let loaded_accounts_data_size_cost_adjustment =
             CostModel::calculate_loaded_accounts_data_size_cost(
                 loaded_accounts_data_size_adjustment,

@@ -253,7 +253,7 @@ async fn run_server(
     coalesce: Duration,
 ) {
     let rate_limiter = ConnectionRateLimiter::new(max_connections_per_ipaddr_per_min);
-    let mut overall_connection_rate_limiter =
+    let overall_connection_rate_limiter =
         TotalConnectionRateLimiter::new(TOTAL_CONNECTIONS_PER_SECOND);
 
     const WAIT_FOR_CONNECTION_TIMEOUT: Duration = Duration::from_secs(1);
@@ -340,9 +340,9 @@ async fn run_server(
             stats
                 .connection_rate_limiter_length
                 .store(rate_limiter.len(), Ordering::Relaxed);
-            info!("Got a connection {remote_address:?}");
+            debug!("Got a connection {remote_address:?}");
             if !rate_limiter.is_allowed(&remote_address.ip()) {
-                info!(
+                debug!(
                     "Reject connection from {:?} -- rate limiting exceeded",
                     remote_address
                 );
@@ -351,6 +351,7 @@ async fn run_server(
                     .fetch_add(1, Ordering::Relaxed);
                 continue;
             }
+
             stats
                 .outstanding_incoming_connection_attempts
                 .fetch_add(1, Ordering::Relaxed);
@@ -1439,158 +1440,22 @@ pub mod test {
     use {
         super::*,
         crate::{
-            nonblocking::quic::compute_max_allowed_uni_streams,
+            nonblocking::{
+                quic::compute_max_allowed_uni_streams,
+                testing_utilities::{
+                    get_client_config, make_client_endpoint, setup_quic_server,
+                    SpawnTestServerResult, TestServerConfig,
+                },
+            },
             quic::{MAX_STAKED_CONNECTIONS, MAX_UNSTAKED_CONNECTIONS},
-            tls_certificates::new_dummy_x509_certificate,
         },
         assert_matches::assert_matches,
         async_channel::unbounded as async_unbounded,
         crossbeam_channel::{unbounded, Receiver},
-        quinn::{ClientConfig, IdleTimeout, TransportConfig},
-        solana_sdk::{
-            net::DEFAULT_TPU_COALESCE,
-            quic::{QUIC_KEEP_ALIVE, QUIC_MAX_TIMEOUT},
-            signature::Keypair,
-            signer::Signer,
-        },
+        solana_sdk::{net::DEFAULT_TPU_COALESCE, signature::Keypair, signer::Signer},
         std::collections::HashMap,
         tokio::time::sleep,
     };
-
-    struct SkipServerVerification;
-
-    impl SkipServerVerification {
-        fn new() -> Arc<Self> {
-            Arc::new(Self)
-        }
-    }
-
-    impl rustls::client::ServerCertVerifier for SkipServerVerification {
-        fn verify_server_cert(
-            &self,
-            _end_entity: &rustls::Certificate,
-            _intermediates: &[rustls::Certificate],
-            _server_name: &rustls::ServerName,
-            _scts: &mut dyn Iterator<Item = &[u8]>,
-            _ocsp_response: &[u8],
-            _now: std::time::SystemTime,
-        ) -> Result<rustls::client::ServerCertVerified, rustls::Error> {
-            Ok(rustls::client::ServerCertVerified::assertion())
-        }
-    }
-
-    pub fn get_client_config(keypair: &Keypair) -> ClientConfig {
-        let (cert, key) = new_dummy_x509_certificate(keypair);
-
-        let mut crypto = rustls::ClientConfig::builder()
-            .with_safe_defaults()
-            .with_custom_certificate_verifier(SkipServerVerification::new())
-            .with_client_auth_cert(vec![cert], key)
-            .expect("Failed to use client certificate");
-
-        crypto.enable_early_data = true;
-        crypto.alpn_protocols = vec![ALPN_TPU_PROTOCOL_ID.to_vec()];
-
-        let mut config = ClientConfig::new(Arc::new(crypto));
-
-        let mut transport_config = TransportConfig::default();
-        let timeout = IdleTimeout::try_from(QUIC_MAX_TIMEOUT).unwrap();
-        transport_config.max_idle_timeout(Some(timeout));
-        transport_config.keep_alive_interval(Some(QUIC_KEEP_ALIVE));
-        config.transport_config(Arc::new(transport_config));
-
-        config
-    }
-
-    fn setup_quic_server(
-        option_staked_nodes: Option<StakedNodes>,
-        max_connections_per_peer: usize,
-    ) -> (
-        JoinHandle<()>,
-        Arc<AtomicBool>,
-        crossbeam_channel::Receiver<PacketBatch>,
-        SocketAddr,
-        Arc<StreamerStats>,
-    ) {
-        let sockets = {
-            #[cfg(not(target_os = "windows"))]
-            {
-                use std::{
-                    os::fd::{FromRawFd, IntoRawFd},
-                    str::FromStr as _,
-                };
-                (0..10)
-                    .map(|_| {
-                        let sock = socket2::Socket::new(
-                            socket2::Domain::IPV4,
-                            socket2::Type::DGRAM,
-                            Some(socket2::Protocol::UDP),
-                        )
-                        .unwrap();
-                        sock.set_reuse_port(true).unwrap();
-                        sock.bind(&SocketAddr::from_str("127.0.0.1:0").unwrap().into())
-                            .unwrap();
-                        unsafe { UdpSocket::from_raw_fd(sock.into_raw_fd()) }
-                    })
-                    .collect::<Vec<_>>()
-            }
-            #[cfg(target_os = "windows")]
-            {
-                vec![UdpSocket::bind("127.0.0.1:0").unwrap()]
-            }
-        };
-
-        let exit = Arc::new(AtomicBool::new(false));
-        let (sender, receiver) = unbounded();
-        let keypair = Keypair::new();
-        let server_address = sockets[0].local_addr().unwrap();
-        let staked_nodes = Arc::new(RwLock::new(option_staked_nodes.unwrap_or_default()));
-        let SpawnNonBlockingServerResult {
-            endpoints: _,
-            stats,
-            thread: t,
-            max_concurrent_connections: _,
-        } = spawn_server_multi(
-            "quic_streamer_test",
-            sockets,
-            &keypair,
-            sender,
-            exit.clone(),
-            max_connections_per_peer,
-            staked_nodes,
-            MAX_STAKED_CONNECTIONS,
-            MAX_UNSTAKED_CONNECTIONS,
-            DEFAULT_MAX_STREAMS_PER_MS,
-            DEFAULT_MAX_CONNECTIONS_PER_IPADDR_PER_MINUTE,
-            Duration::from_secs(2),
-            DEFAULT_TPU_COALESCE,
-        )
-        .unwrap();
-        (t, exit, receiver, server_address, stats)
-    }
-
-    pub async fn make_client_endpoint(
-        addr: &SocketAddr,
-        client_keypair: Option<&Keypair>,
-    ) -> Connection {
-        let client_socket = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let mut endpoint = quinn::Endpoint::new(
-            EndpointConfig::default(),
-            None,
-            client_socket,
-            Arc::new(TokioRuntime),
-        )
-        .unwrap();
-        let default_keypair = Keypair::new();
-        endpoint.set_default_client_config(get_client_config(
-            client_keypair.unwrap_or(&default_keypair),
-        ));
-        endpoint
-            .connect(*addr, "localhost")
-            .expect("Failed in connecting")
-            .await
-            .expect("Failed in waiting")
-    }
 
     pub async fn check_timeout(receiver: Receiver<PacketBatch>, server_address: SocketAddr) {
         let conn1 = make_client_endpoint(&server_address, None).await;
@@ -1739,18 +1604,31 @@ pub mod test {
 
     #[tokio::test]
     async fn test_quic_server_exit() {
-        let (t, exit, _receiver, _server_address, _stats) = setup_quic_server(None, 1);
+        let SpawnTestServerResult {
+            join_handle,
+            exit,
+            receiver: _,
+            server_address: _,
+            stats: _,
+        } = setup_quic_server(None, TestServerConfig::default());
         exit.store(true, Ordering::Relaxed);
-        t.await.unwrap();
+        join_handle.await.unwrap();
     }
 
     #[tokio::test]
     async fn test_quic_timeout() {
         solana_logger::setup();
-        let (t, exit, receiver, server_address, _stats) = setup_quic_server(None, 1);
+        let SpawnTestServerResult {
+            join_handle,
+            exit,
+            receiver,
+            server_address,
+            stats: _,
+        } = setup_quic_server(None, TestServerConfig::default());
+
         check_timeout(receiver, server_address).await;
         exit.store(true, Ordering::Relaxed);
-        t.await.unwrap();
+        join_handle.await.unwrap();
     }
 
     #[tokio::test]
@@ -1807,7 +1685,13 @@ pub mod test {
     #[tokio::test]
     async fn test_quic_stream_timeout() {
         solana_logger::setup();
-        let (t, exit, _receiver, server_address, stats) = setup_quic_server(None, 1);
+        let SpawnTestServerResult {
+            join_handle,
+            exit,
+            receiver: _,
+            server_address,
+            stats,
+        } = setup_quic_server(None, TestServerConfig::default());
 
         let conn1 = make_client_endpoint(&server_address, None).await;
         assert_eq!(stats.total_streams.load(Ordering::Relaxed), 0);
@@ -1831,22 +1715,41 @@ pub mod test {
         assert!(s1.finish().await.is_err());
 
         exit.store(true, Ordering::Relaxed);
-        t.await.unwrap();
+        join_handle.await.unwrap();
     }
 
     #[tokio::test]
     async fn test_quic_server_block_multiple_connections() {
         solana_logger::setup();
-        let (t, exit, _receiver, server_address, _stats) = setup_quic_server(None, 1);
+        let SpawnTestServerResult {
+            join_handle,
+            exit,
+            receiver: _,
+            server_address,
+            stats: _,
+        } = setup_quic_server(None, TestServerConfig::default());
         check_block_multiple_connections(server_address).await;
         exit.store(true, Ordering::Relaxed);
-        t.await.unwrap();
+        join_handle.await.unwrap();
     }
 
     #[tokio::test]
     async fn test_quic_server_multiple_connections_on_single_client_endpoint() {
         solana_logger::setup();
-        let (t, exit, _receiver, server_address, stats) = setup_quic_server(None, 2);
+
+        let SpawnTestServerResult {
+            join_handle,
+            exit,
+            receiver: _,
+            server_address,
+            stats,
+        } = setup_quic_server(
+            None,
+            TestServerConfig {
+                max_connections_per_peer: 2,
+                ..Default::default()
+            },
+        );
 
         let client_socket = UdpSocket::bind("127.0.0.1:0").unwrap();
         let mut endpoint = quinn::Endpoint::new(
@@ -1899,16 +1802,22 @@ pub mod test {
         assert_eq!(stats.connection_removed.load(Ordering::Relaxed), 2);
 
         exit.store(true, Ordering::Relaxed);
-        t.await.unwrap();
+        join_handle.await.unwrap();
     }
 
     #[tokio::test]
     async fn test_quic_server_multiple_writes() {
         solana_logger::setup();
-        let (t, exit, receiver, server_address, _stats) = setup_quic_server(None, 1);
+        let SpawnTestServerResult {
+            join_handle,
+            exit,
+            receiver,
+            server_address,
+            stats: _,
+        } = setup_quic_server(None, TestServerConfig::default());
         check_multiple_writes(receiver, server_address, None).await;
         exit.store(true, Ordering::Relaxed);
-        t.await.unwrap();
+        join_handle.await.unwrap();
     }
 
     #[tokio::test]
@@ -1921,10 +1830,16 @@ pub mod test {
             Arc::new(stakes),
             HashMap::<Pubkey, u64>::default(), // overrides
         );
-        let (t, exit, receiver, server_address, stats) = setup_quic_server(Some(staked_nodes), 1);
+        let SpawnTestServerResult {
+            join_handle,
+            exit,
+            receiver,
+            server_address,
+            stats,
+        } = setup_quic_server(Some(staked_nodes), TestServerConfig::default());
         check_multiple_writes(receiver, server_address, Some(&client_keypair)).await;
         exit.store(true, Ordering::Relaxed);
-        t.await.unwrap();
+        join_handle.await.unwrap();
         sleep(Duration::from_millis(100)).await;
         assert_eq!(
             stats
@@ -1947,10 +1862,16 @@ pub mod test {
             Arc::new(stakes),
             HashMap::<Pubkey, u64>::default(), // overrides
         );
-        let (t, exit, receiver, server_address, stats) = setup_quic_server(Some(staked_nodes), 1);
+        let SpawnTestServerResult {
+            join_handle,
+            exit,
+            receiver,
+            server_address,
+            stats,
+        } = setup_quic_server(Some(staked_nodes), TestServerConfig::default());
         check_multiple_writes(receiver, server_address, Some(&client_keypair)).await;
         exit.store(true, Ordering::Relaxed);
-        t.await.unwrap();
+        join_handle.await.unwrap();
         sleep(Duration::from_millis(100)).await;
         assert_eq!(
             stats
@@ -1965,10 +1886,16 @@ pub mod test {
     #[tokio::test]
     async fn test_quic_server_unstaked_connection_removal() {
         solana_logger::setup();
-        let (t, exit, receiver, server_address, stats) = setup_quic_server(None, 1);
+        let SpawnTestServerResult {
+            join_handle,
+            exit,
+            receiver,
+            server_address,
+            stats,
+        } = setup_quic_server(None, TestServerConfig::default());
         check_multiple_writes(receiver, server_address, None).await;
         exit.store(true, Ordering::Relaxed);
-        t.await.unwrap();
+        join_handle.await.unwrap();
         sleep(Duration::from_millis(100)).await;
         assert_eq!(
             stats
@@ -2358,5 +2285,54 @@ pub mod test {
         let ratio =
             compute_receive_window_ratio_for_staked_node(max_stake, min_stake, max_stake + 10);
         assert_eq!(ratio, max_ratio);
+    }
+
+    #[tokio::test]
+    async fn test_throttling_check_no_packet_drop() {
+        solana_logger::setup_with_default_filter();
+
+        let SpawnTestServerResult {
+            join_handle,
+            exit,
+            receiver,
+            server_address,
+            stats,
+        } = setup_quic_server(None, TestServerConfig::default());
+
+        let client_connection = make_client_endpoint(&server_address, None).await;
+
+        // unstaked connection can handle up to 100tps, so we should send in ~1s.
+        let expected_num_txs = 100;
+        let start_time = tokio::time::Instant::now();
+        for i in 0..expected_num_txs {
+            let mut send_stream = client_connection.open_uni().await.unwrap();
+            let data = format!("{i}").into_bytes();
+            send_stream.write_all(&data).await.unwrap();
+            send_stream.finish().await.unwrap();
+        }
+        let elapsed_sending: f64 = start_time.elapsed().as_secs_f64();
+        info!("Elapsed sending: {elapsed_sending}");
+
+        // check that delivered all of them
+        let start_time = tokio::time::Instant::now();
+        let mut num_txs_received = 0;
+        while num_txs_received < expected_num_txs && start_time.elapsed() < Duration::from_secs(2) {
+            if let Ok(packets) = receiver.try_recv() {
+                num_txs_received += packets.len();
+            } else {
+                sleep(Duration::from_millis(100)).await;
+            }
+        }
+        assert_eq!(expected_num_txs, num_txs_received);
+
+        // stop it
+        exit.store(true, Ordering::Relaxed);
+        join_handle.await.unwrap();
+
+        assert_eq!(
+            stats.total_new_streams.load(Ordering::Relaxed),
+            expected_num_txs
+        );
+        assert!(stats.throttled_unstaked_streams.load(Ordering::Relaxed) > 0);
     }
 }

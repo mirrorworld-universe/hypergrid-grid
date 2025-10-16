@@ -2,6 +2,7 @@
 //! an ancient append vec is:
 //! 1. a slot that is older than an epoch old
 //! 2. multiple 'slots' squashed into a single older (ie. ancient) slot for convenience and performance
+//!
 //! Otherwise, an ancient append vec is the same as any other append vec
 use {
     crate::{
@@ -444,6 +445,16 @@ impl AccountsDb {
             return;
         }
 
+        // for the accounts which are one ref and can be put anywhere, we want to put the accounts from the LARGEST storages at the end.
+        // This causes us to keep the accounts we're re-packing from already existing ancient storages together with other normal one ref accounts.
+        // The alternative could cause us to mix newly ancient slots produced by flush (containing accounts touched more recently) with previously
+        // packed ancient storages which over time contained enough dead accounts that the storage needed to be shrunk by being re-packed.
+        // The end result of this sort should cause older, colder accounts (previously packed into large storages and then re-packed/shrunk) to
+        // be re-packed together with other older/colder accounts.
+        accounts_to_combine
+            .accounts_to_combine
+            .sort_unstable_by(|a, b| a.capacity.cmp(&b.capacity));
+
         // pack the accounts with 1 ref or refs > 1 but the slot we're packing is the highest alive slot for the pubkey.
         // Note the `chain` below combining the 2 types of refs.
         let pack = PackedAncientStorage::pack(
@@ -707,8 +718,9 @@ impl AccountsDb {
     /// given all accounts per ancient slot, in slots that we want to combine together:
     /// 1. Look up each pubkey in the index
     /// 2. separate, by slot, into:
-    /// 2a. pubkeys with refcount = 1. This means this pubkey exists NOWHERE else in accounts db.
-    /// 2b. pubkeys with refcount > 1
+    ///    2a. pubkeys with refcount = 1. This means this pubkey exists NOWHERE else in accounts db.
+    ///    2b. pubkeys with refcount > 1
+    ///
     /// Note that the return value can contain fewer items than 'accounts_per_storage' if we find storages which won't be affected.
     /// 'accounts_per_storage' should be sorted by slot
     fn calc_accounts_to_combine<'a>(
@@ -2094,11 +2106,11 @@ pub mod tests {
             assert_eq!(
                 shrinks_in_progress
                     .iter()
-                    .map(|(_, shrink_in_progress)| shrink_in_progress.old_storage().append_vec_id())
+                    .map(|(_, shrink_in_progress)| shrink_in_progress.old_storage().id())
                     .collect::<Vec<_>>(),
                 storages
                     .iter()
-                    .map(|storage| storage.append_vec_id())
+                    .map(|storage| storage.id())
                     .collect::<Vec<_>>()
             );
             // assert that we wrote the 2_ref account to the newly shrunk append vec
@@ -2315,7 +2327,7 @@ pub mod tests {
 
                 let map = |info: &SlotInfo| {
                     (
-                        info.storage.append_vec_id(),
+                        info.storage.id(),
                         info.slot,
                         info.capacity,
                         info.alive_bytes,
@@ -2456,7 +2468,7 @@ pub mod tests {
     }
 
     fn assert_storage_info(info: &SlotInfo, storage: &AccountStorageEntry, should_shrink: bool) {
-        assert_eq!(storage.append_vec_id(), info.storage.append_vec_id());
+        assert_eq!(storage.id(), info.storage.id());
         assert_eq!(storage.slot(), info.slot);
         assert_eq!(storage.capacity(), info.capacity);
         assert_eq!(storage.alive_bytes(), info.alive_bytes as usize);
@@ -3288,8 +3300,8 @@ pub mod tests {
                             assert_eq!(1, one.len());
                             assert_eq!(target_slot, one.first().unwrap().0);
                             assert_eq!(
-                                one.first().unwrap().1.old_storage().append_vec_id(),
-                                storages[combine_into].append_vec_id()
+                                one.first().unwrap().1.old_storage().id(),
+                                storages[combine_into].id()
                             );
                             // make sure the single new append vec contains all the same accounts
                             let mut two = Vec::default();
@@ -3826,6 +3838,7 @@ pub mod tests {
                 unrefed_pubkeys: unrefed_pubkeys.iter().collect(),
 
                 // irrelevant fields
+                zero_lamport_single_ref_pubkeys: Vec::default(),
                 slot: 0,
                 capacity: 0,
                 alive_accounts: ShrinkCollectAliveSeparatedByRefs {

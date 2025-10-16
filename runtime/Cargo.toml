@@ -54,6 +54,7 @@ solana-compute-budget = { workspace = true }
 solana-compute-budget-program = { workspace = true }
 solana-config-program = { workspace = true }
 solana-cost-model = { workspace = true }
+solana-fee = { workspace = true }
 solana-frozen-abi = { workspace = true, optional = true }
 solana-frozen-abi-macro = { workspace = true, optional = true }
 solana-inline-spl = { workspace = true }
@@ -63,9 +64,11 @@ solana-metrics = { workspace = true }
 solana-perf = { workspace = true }
 solana-program-runtime = { workspace = true }
 solana-rayon-threadlimit = { workspace = true }
+solana-runtime-transaction = { workspace = true }
 solana-sdk = { workspace = true }
 solana-stake-program = { workspace = true }
 solana-svm = { workspace = true }
+solana-svm-transaction = { workspace = true }
 solana-system-program = { workspace = true }
 solana-timings = { workspace = true }
 solana-transaction-status = { workspace = true }
@@ -110,11 +113,12 @@ test-case = { workspace = true }
 targets = ["x86_64-unknown-linux-gnu"]
 
 [build-dependencies]
-rustc_version = { workspace = true }
+rustc_version = { workspace = true, optional = true }
 
 [features]
 dev-context-only-utils = ["solana-svm/dev-context-only-utils"]
 frozen-abi = [
+    "dep:rustc_version",
     "dep:solana-frozen-abi",
     "dep:solana-frozen-abi-macro",
     "solana-accounts-db/frozen-abi",
@@ -131,3 +135,6 @@ frozen-abi = [
 
 [[bench]]
 name = "prioritization_fee_cache"
+
+[lints]
+workspace = true

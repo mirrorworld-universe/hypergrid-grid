@@ -10,6 +10,7 @@ license = { workspace = true }
 edition = { workspace = true }
 
 [dependencies]
+ahash = { workspace = true }
 bincode = { workspace = true }
 blake3 = { workspace = true }
 bv = { workspace = true, features = ["serde"] }
@@ -39,12 +40,14 @@ solana-bucket-map = { workspace = true }
 solana-frozen-abi = { workspace = true, optional = true }
 solana-frozen-abi-macro = { workspace = true, optional = true }
 solana-inline-spl = { workspace = true }
+solana-lattice-hash = { workspace = true }
 solana-measure = { workspace = true }
 solana-metrics = { workspace = true }
 solana-nohash-hasher = { workspace = true }
 solana-rayon-threadlimit = { workspace = true }
 solana-sdk = { workspace = true }
 solana-stake-program = { workspace = true, optional = true }
+solana-svm-transaction = { workspace = true }
 solana-vote-program = { workspace = true, optional = true }
 static_assertions = { workspace = true }
 tar = { workspace = true }
@@ -81,11 +84,16 @@ test-case = { workspace = true }
 targets = ["x86_64-unknown-linux-gnu"]
 
 [build-dependencies]
-rustc_version = { workspace = true }
+rustc_version = { workspace = true, optional = true }
 
 [features]
-dev-context-only-utils = ["dep:qualifier_attr", "dep:solana-stake-program", "dep:solana-vote-program"]
+dev-context-only-utils = [
+    "dep:qualifier_attr",
+    "dep:solana-stake-program",
+    "dep:solana-vote-program",
+]
 frozen-abi = [
+    "dep:rustc_version",
     "dep:solana-frozen-abi",
     "dep:solana-frozen-abi-macro",
     "solana-sdk/frozen-abi",
@@ -103,3 +111,10 @@ harness = false
 [[bench]]
 name = "bench_serde"
 harness = false
+
+[[bench]]
+name = "bench_lock_accounts"
+harness = false
+
+[lints]
+workspace = true

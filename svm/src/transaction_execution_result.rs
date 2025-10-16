@@ -5,28 +5,19 @@
 )]
 pub use solana_sdk::inner_instruction::{InnerInstruction, InnerInstructionsList};
 use {
-    serde::{Deserialize, Serialize},
+    crate::account_loader::LoadedTransaction,
     solana_program_runtime::loaded_programs::ProgramCacheEntry,
     solana_sdk::{
-        fee::FeeDetails,
         pubkey::Pubkey,
-        rent_debits::RentDebits,
         transaction::{self, TransactionError},
         transaction_context::TransactionReturnData,
     },
     std::{collections::HashMap, sync::Arc},
 };
 
-pub struct TransactionResults {
-    pub fee_collection_results: Vec<transaction::Result<()>>,
-    pub loaded_accounts_stats: Vec<transaction::Result<TransactionLoadedAccountsStats>>,
-    pub execution_results: Vec<TransactionExecutionResult>,
-    pub rent_debits: Vec<RentDebits>,
-}
-
 #[derive(Debug, Default, Clone)]
 pub struct TransactionLoadedAccountsStats {
-    pub loaded_accounts_data_size: usize,
+    pub loaded_accounts_data_size: u32,
     pub loaded_accounts_count: usize,
 }
 
@@ -42,52 +33,37 @@ pub struct TransactionLoadedAccountsStats {
 /// make such checks hard to do incorrectly.
 #[derive(Debug, Clone)]
 pub enum TransactionExecutionResult {
-    Executed {
-        details: TransactionExecutionDetails,
-        programs_modified_by_tx: HashMap<Pubkey, Arc<ProgramCacheEntry>>,
-    },
+    Executed(Box<ExecutedTransaction>),
     NotExecuted(TransactionError),
 }
 
-impl TransactionExecutionResult {
-    pub fn was_executed_successfully(&self) -> bool {
-        match self {
-            Self::Executed { details, .. } => details.status.is_ok(),
-            Self::NotExecuted { .. } => false,
-        }
-    }
+#[derive(Debug, Clone)]
+pub struct ExecutedTransaction {
+    pub loaded_transaction: LoadedTransaction,
+    pub execution_details: TransactionExecutionDetails,
+    pub programs_modified_by_tx: HashMap<Pubkey, Arc<ProgramCacheEntry>>,
+}
 
-    pub fn was_executed(&self) -> bool {
-        match self {
-            Self::Executed { .. } => true,
-            Self::NotExecuted(_) => false,
-        }
-    }
-
-    pub fn details(&self) -> Option<&TransactionExecutionDetails> {
-        match self {
-            Self::Executed { details, .. } => Some(details),
-            Self::NotExecuted(_) => None,
-        }
-    }
-
-    pub fn flattened_result(&self) -> transaction::Result<()> {
-        match self {
-            Self::Executed { details, .. } => details.status.clone(),
-            Self::NotExecuted(err) => Err(err.clone()),
-        }
+impl ExecutedTransaction {
+    pub fn was_successful(&self) -> bool {
+        self.execution_details.status.is_ok()
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TransactionExecutionDetails {
     pub status: transaction::Result<()>,
     pub log_messages: Option<Vec<String>>,
     pub inner_instructions: Option<InnerInstructionsList>,
-    pub fee_details: FeeDetails,
     pub return_data: Option<TransactionReturnData>,
     pub executed_units: u64,
     /// The change in accounts data len for this transaction.
     /// NOTE: This value is valid IFF `status` is `Ok`.
     pub accounts_data_len_delta: i64,
+}
+
+impl TransactionExecutionDetails {
+    pub fn was_successful(&self) -> bool {
+        self.status.is_ok()
+    }
 }

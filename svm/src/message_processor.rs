@@ -5,7 +5,6 @@ use {
     solana_program_runtime::invoke_context::InvokeContext,
     solana_sdk::{
         account::WritableAccount,
-        message::SanitizedMessage,
         precompiles::is_precompile,
         pubkey::Pubkey, // Sonic: Add Pubkey
         saturating_add_assign,
@@ -13,6 +12,7 @@ use {
         transaction::TransactionError,
         transaction_context::{IndexOfAccount, InstructionAccount},
     },
+    solana_svm_transaction::svm_message::SVMMessage,
     solana_timings::{ExecuteDetailsTimings, ExecuteTimings},
 };
 
@@ -35,14 +35,14 @@ impl MessageProcessor {
     /// the call does not violate the bank's accounting rules.
     /// The accounts are committed back to the bank only if every instruction succeeds.
     pub fn process_message(
-        message: &SanitizedMessage,
+        message: &impl SVMMessage,
         program_indices: &[Vec<IndexOfAccount>],
         invoke_context: &mut InvokeContext,
         execute_timings: &mut ExecuteTimings,
         accumulated_consumed_units: &mut u64,
         remote_accounts: std::collections::HashSet<Pubkey>, // Sonic: Add remote_accounts
     ) -> Result<(), TransactionError> {
-        debug_assert_eq!(program_indices.len(), message.instructions().len());
+        debug_assert_eq!(program_indices.len(), message.num_instructions());
         for (instruction_index, ((program_id, instruction), program_indices)) in message
             .program_instructions_iter()
             .zip(program_indices.iter())
@@ -110,7 +110,7 @@ impl MessageProcessor {
                         instruction_context.configure(
                             program_indices,
                             &instruction_accounts,
-                            &instruction.data,
+                            instruction.data,
                         );
                     })
                     .and_then(|_| {
@@ -121,7 +121,7 @@ impl MessageProcessor {
                 let time = Measure::start("execute_instruction");
                 let mut compute_units_consumed = 0;
                 let result = invoke_context.process_instruction(
-                    &instruction.data,
+                    instruction.data,
                     &instruction_accounts,
                     program_indices,
                     &mut compute_units_consumed,
@@ -173,7 +173,7 @@ mod tests {
             feature_set::FeatureSet,
             hash::Hash,
             instruction::{AccountMeta, Instruction, InstructionError},
-            message::{AccountKeys, Message},
+            message::{AccountKeys, Message, SanitizedMessage},
             native_loader::{self, create_loadable_account_for_test},
             pubkey::Pubkey,
             rent::Rent,
@@ -184,15 +184,6 @@ mod tests {
         },
         std::sync::Arc,
     };
-
-    #[derive(Debug, serde_derive::Serialize, serde_derive::Deserialize)]
-    enum MockInstruction {
-        NoopSuccess,
-        NoopFail,
-        ModifyOwned,
-        ModifyNotOwned,
-        ModifyReadonly,
-    }
 
     fn new_sanitized_message(message: Message) -> SanitizedMessage {
         SanitizedMessage::try_from_legacy_message(message, &ReservedAccountKeys::empty_key_set())
