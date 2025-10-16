@@ -28,8 +28,6 @@ solana-measure = { workspace = true }
 thiserror = { workspace = true }
 
 [features]
-default = ["frozen-abi"]
-frozen-abi = []
 dummy-for-ci-check = []
 
 [lib]
@@ -37,6 +35,3 @@ name = "sonic_hypergrid"
 
 [package.metadata.docs.rs]
 targets = ["x86_64-unknown-linux-gnu"]
-
-[build-dependencies]
-rustc_version = { workspace = true }

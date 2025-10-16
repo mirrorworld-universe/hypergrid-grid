@@ -502,7 +502,7 @@ mod tests {
         assert_eq!(dbank.epoch_reward_status, EpochRewardStatus::Inactive);
     }
 
-    #[cfg(all(RUSTC_WITH_SPECIALIZATION, feature = "frozen-abi"))]
+    #[cfg(feature = "frozen-abi")]
     mod test_bank_serialize {
         use {
             super::*,
@@ -535,7 +535,7 @@ mod tests {
         #[cfg_attr(
             feature = "frozen-abi",
             derive(AbiExample),
-            frozen_abi(digest = "J7MnnLU99fYk2hfZPjdqyTYxgHstwRUDk2Yr8fFnXxFp")
+            frozen_abi(digest = "6d4H7gw1hSrspdTew8dAXZ5dZT1mwFc6VZdXnkuggJ8E")
         )]
         #[derive(Serialize)]
         pub struct BankAbiTestWrapper {

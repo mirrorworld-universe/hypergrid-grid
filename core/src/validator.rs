@@ -113,6 +113,7 @@ use {
         epoch_schedule::MAX_LEADER_SCHEDULE_EPOCH_OFFSET,
         exit::Exit,
         genesis_config::{ClusterType, GenesisConfig},
+        hard_forks::HardForks,
         hash::Hash,
         pubkey::Pubkey,
         shred_version::compute_shred_version,
@@ -596,24 +597,7 @@ impl Validator {
             ));
         }
         let genesis_config = load_genesis(config, ledger_path)?;
-
         metrics_config_sanity_check(genesis_config.cluster_type)?;
-
-        if let Some(expected_shred_version) = config.expected_shred_version {
-            if let Some(wait_for_supermajority_slot) = config.wait_for_supermajority {
-                *start_progress.write().unwrap() = ValidatorStartProgress::CleaningBlockStore;
-                backup_and_clear_blockstore(
-                    ledger_path,
-                    config,
-                    wait_for_supermajority_slot + 1,
-                    expected_shred_version,
-                )
-                .context(
-                    "Failed to backup and clear shreds with incorrect \
-                        shred version from blockstore",
-                )?;
-            }
-        }
 
         info!("Cleaning accounts paths..");
         *start_progress.write().unwrap() = ValidatorStartProgress::CleaningAccounts;
@@ -682,9 +666,8 @@ impl Validator {
             .and_then(|geyser_plugin_service| geyser_plugin_service.get_block_metadata_notifier());
 
         info!(
-            "Geyser plugin: accounts_update_notifier: {}, \
-            transaction_notifier: {}, \
-            entry_notifier: {}",
+            "Geyser plugin: accounts_update_notifier: {}, transaction_notifier: {}, \
+             entry_notifier: {}",
             accounts_update_notifier.is_some(),
             transaction_notifier.is_some(),
             entry_notifier.is_some()
@@ -742,28 +725,46 @@ impl Validator {
             check_poh_speed(&bank_forks.read().unwrap().root_bank(), None)?;
         }
 
-        let hard_forks = bank_forks.read().unwrap().root_bank().hard_forks();
-        if !hard_forks.is_empty() {
-            info!("Hard forks: {:?}", hard_forks);
-        }
-
-        node.info.set_wallclock(timestamp());
-        node.info.set_shred_version(compute_shred_version(
-            &genesis_config.hash(),
-            Some(&hard_forks),
-        ));
-        Self::print_node_info(&node);
+        let (root_slot, hard_forks) = {
+            let root_bank = bank_forks.read().unwrap().root_bank();
+            (root_bank.slot(), root_bank.hard_forks())
+        };
+        let shred_version = compute_shred_version(&genesis_config.hash(), Some(&hard_forks));
+        info!(
+            "shred version: {shred_version}, hard forks: {:?}",
+            hard_forks
+        );
 
         if let Some(expected_shred_version) = config.expected_shred_version {
-            if expected_shred_version != node.info.shred_version() {
-                return Err(ValidatorError::Other(format!(
-                    "shred version mismatch: expected {} found: {}",
-                    expected_shred_version,
-                    node.info.shred_version(),
-                ))
+            if expected_shred_version != shred_version {
+                return Err(ValidatorError::ShredVersionMismatch {
+                    actual: shred_version,
+                    expected: expected_shred_version,
+                }
                 .into());
             }
         }
+
+        if let Some(start_slot) = should_cleanup_blockstore_incorrect_shred_versions(
+            config,
+            &blockstore,
+            root_slot,
+            &hard_forks,
+        )? {
+            *start_progress.write().unwrap() = ValidatorStartProgress::CleaningBlockStore;
+            cleanup_blockstore_incorrect_shred_versions(
+                &blockstore,
+                config,
+                start_slot,
+                shred_version,
+            )?;
+        } else {
+            info!("Skipping the blockstore check for shreds with incorrect version");
+        }
+
+        node.info.set_shred_version(shred_version);
+        node.info.set_wallclock(timestamp());
+        Self::print_node_info(&node);
 
         let mut cluster_info = ClusterInfo::new(
             node.info.clone(),
@@ -1450,7 +1451,7 @@ impl Validator {
             ("cluster_type", genesis_config.cluster_type as u32, i64),
             ("elapsed_ms", start_time.elapsed().as_millis() as i64, i64),
             ("waited_for_supermajority", waited_for_supermajority, bool),
-            ("expected_shred_version", config.expected_shred_version, Option<i64>),
+            ("shred_version", shred_version as i64, i64),
         );
 
         *start_progress.write().unwrap() = ValidatorStartProgress::Running;
@@ -1695,9 +1696,8 @@ fn check_poh_speed(bank: &Bank, maybe_hash_samples: Option<u64>) -> Result<(), V
         (hashes_per_slot as f64 / target_slot_duration.as_secs_f64()) as u64;
 
     info!(
-        "PoH speed check: \
-            computed hashes per second {my_hashes_per_second}, \
-            target hashes per second {target_hashes_per_second}"
+        "PoH speed check: computed hashes per second {my_hashes_per_second}, target hashes per \
+         second {target_hashes_per_second}"
     );
     if my_hashes_per_second < target_hashes_per_second {
         return Err(ValidatorError::PohTooSlow {
@@ -1777,20 +1777,21 @@ fn post_process_restored_tower(
             }
             if should_require_tower && voting_has_been_active {
                 return Err(format!(
-                    "Requested mandatory tower restore failed: {err}. \
-                     And there is an existing vote_account containing actual votes. \
-                     Aborting due to possible conflicting duplicate votes"
+                    "Requested mandatory tower restore failed: {err}. And there is an existing \
+                     vote_account containing actual votes. Aborting due to possible conflicting \
+                     duplicate votes"
                 ));
             }
             if err.is_file_missing() && !voting_has_been_active {
                 // Currently, don't protect against spoofed snapshots with no tower at all
                 info!(
-                    "Ignoring expected failed tower restore because this is the initial \
-                      validator start with the vote account..."
+                    "Ignoring expected failed tower restore because this is the initial validator \
+                     start with the vote account..."
                 );
             } else {
                 error!(
-                    "Rebuilding a new tower from the latest vote account due to failed tower restore: {}",
+                    "Rebuilding a new tower from the latest vote account due to failed tower \
+                     restore: {}",
                     err
                 );
             }
@@ -2184,9 +2185,71 @@ fn maybe_warp_slot(
     Ok(())
 }
 
+/// Returns the starting slot at which the blockstore should be scanned for
+/// shreds with an incorrect shred version, or None if the check is unnecessary
+fn should_cleanup_blockstore_incorrect_shred_versions(
+    config: &ValidatorConfig,
+    blockstore: &Blockstore,
+    root_slot: Slot,
+    hard_forks: &HardForks,
+) -> Result<Option<Slot>, BlockstoreError> {
+    // Perform the check if we are booting as part of a cluster restart at slot root_slot
+    let maybe_cluster_restart_slot = maybe_cluster_restart_with_hard_fork(config, root_slot);
+    if maybe_cluster_restart_slot.is_some() {
+        return Ok(Some(root_slot + 1));
+    }
+
+    // If there are no hard forks, the shred version cannot have changed
+    let Some(latest_hard_fork) = hard_forks.iter().last().map(|(slot, _)| *slot) else {
+        return Ok(None);
+    };
+
+    // If the blockstore is empty, there are certainly no shreds with an incorrect version
+    let Some(blockstore_max_slot) = blockstore.highest_slot()? else {
+        return Ok(None);
+    };
+    let blockstore_min_slot = blockstore.lowest_slot();
+    info!(
+        "Blockstore contains data from slot {blockstore_min_slot} to {blockstore_max_slot}, the \
+        latest hard fork is {latest_hard_fork}"
+    );
+
+    if latest_hard_fork < blockstore_min_slot {
+        // latest_hard_fork < blockstore_min_slot <= blockstore_max_slot
+        //
+        // All slots in the blockstore are newer than the latest hard fork, and only shreds with
+        // the correct shred version should have been inserted since the latest hard fork
+        //
+        // This is the normal case where the last cluster restart & hard fork was a while ago; we
+        // can skip the check for this case
+        Ok(None)
+    } else if latest_hard_fork < blockstore_max_slot {
+        // blockstore_min_slot < latest_hard_fork < blockstore_max_slot
+        //
+        // This could be a case where there was a cluster restart, but this node was not part of
+        // the supermajority that actually restarted the cluster. Rather, this node likely
+        // downloaded a new snapshot while retaining the blockstore, including slots beyond the
+        // chosen restart slot. We need to perform the blockstore check for this case
+        //
+        // Note that the downloaded snapshot slot (root_slot) could be greater than the latest hard
+        // fork slot. Even though this node will only replay slots after root_slot, start the check
+        // at latest_hard_fork + 1 to check (and possibly purge) any invalid state.
+        Ok(Some(latest_hard_fork + 1))
+    } else {
+        // blockstore_min_slot <= blockstore_max_slot <= latest_hard_fork
+        //
+        // All slots in the blockstore are older than the latest hard fork. The blockstore check
+        // would start from latest_hard_fork + 1; skip the check as there are no slots to check
+        //
+        // This is kind of an unusual case to hit, maybe a node has been offline for a long time
+        // and just restarted with a new downloaded snapshot but the old blockstore
+        Ok(None)
+    }
+}
+
 /// Searches the blockstore for data shreds with a shred version that differs
 /// from the passed `expected_shred_version`
-fn blockstore_contains_incorrect_shred_version(
+fn scan_blockstore_for_incorrect_shred_version(
     blockstore: &Blockstore,
     start_slot: Slot,
     expected_shred_version: u16,
@@ -2196,7 +2259,7 @@ fn blockstore_contains_incorrect_shred_version(
     // Search for shreds with incompatible version in blockstore
     let slot_meta_iterator = blockstore.slot_meta_iterator(start_slot)?;
 
-    info!("Searching blockstore for shred with incorrect version..");
+    info!("Searching blockstore for shred with incorrect version from slot {start_slot}");
     for (slot, _meta) in slot_meta_iterator {
         let shreds = blockstore.get_data_shreds_for_slot(slot, 0)?;
         for shred in &shreds {
@@ -2214,76 +2277,74 @@ fn blockstore_contains_incorrect_shred_version(
 
 /// If the blockstore contains any shreds with the incorrect shred version,
 /// copy them to a backup blockstore and purge them from the actual blockstore.
-fn backup_and_clear_blockstore(
-    ledger_path: &Path,
+fn cleanup_blockstore_incorrect_shred_versions(
+    blockstore: &Blockstore,
     config: &ValidatorConfig,
     start_slot: Slot,
     expected_shred_version: u16,
 ) -> Result<(), BlockstoreError> {
-    let blockstore =
-        Blockstore::open_with_options(ledger_path, blockstore_options_from_config(config))?;
-    let incorrect_shred_version = blockstore_contains_incorrect_shred_version(
-        &blockstore,
+    let incorrect_shred_version = scan_blockstore_for_incorrect_shred_version(
+        blockstore,
         start_slot,
         expected_shred_version,
     )?;
-
-    if let Some(incorrect_shred_version) = incorrect_shred_version {
-        // .unwrap() safe because getting to this point implies blockstore has slots/shreds
-        let end_slot = blockstore.highest_slot()?.unwrap();
-
-        // Backing up the shreds that will be deleted from primary blockstore is
-        // not critical, so swallow errors from backup blockstore operations.
-        let backup_folder = format!(
-            "{}_backup_{}_{}_{}",
-            config
-                .ledger_column_options
-                .shred_storage_type
-                .blockstore_directory(),
-            incorrect_shred_version,
-            start_slot,
-            end_slot
-        );
-        match Blockstore::open_with_options(
-            &ledger_path.join(backup_folder),
-            blockstore_options_from_config(config),
-        ) {
-            Ok(backup_blockstore) => {
-                info!("Backing up slots from {start_slot} to {end_slot}");
-                let mut timer = Measure::start("blockstore backup");
-
-                const PRINT_INTERVAL: Duration = Duration::from_secs(5);
-                let mut print_timer = Instant::now();
-                let mut num_slots_copied = 0;
-                let slot_meta_iterator = blockstore.slot_meta_iterator(start_slot)?;
-                for (slot, _meta) in slot_meta_iterator {
-                    let shreds = blockstore.get_data_shreds_for_slot(slot, 0)?;
-                    let _ = backup_blockstore.insert_shreds(shreds, None, true);
-                    num_slots_copied += 1;
-
-                    if print_timer.elapsed() > PRINT_INTERVAL {
-                        info!("Backed up {num_slots_copied} slots thus far");
-                        print_timer = Instant::now();
-                    }
-                }
-
-                timer.stop();
-                info!("Backing up slots done. {timer}");
-            }
-            Err(err) => {
-                warn!("Unable to backup shreds with incorrect shred version: {err}");
-            }
-        }
-
-        info!("Purging slots {start_slot} to {end_slot} from blockstore");
-        let mut timer = Measure::start("blockstore purge");
-        blockstore.purge_from_next_slots(start_slot, end_slot);
-        blockstore.purge_slots(start_slot, end_slot, PurgeType::Exact);
-        timer.stop();
-        info!("Purging slots done. {timer}");
-    } else {
+    let Some(incorrect_shred_version) = incorrect_shred_version else {
         info!("Only shreds with the correct version were found in the blockstore");
+        return Ok(());
+    };
+
+    // .unwrap() safe because getting to this point implies blockstore has slots/shreds
+    let end_slot = blockstore.highest_slot()?.unwrap();
+
+    // Backing up the shreds that will be deleted from primary blockstore is
+    // not critical, so swallow errors from backup blockstore operations.
+    let backup_folder = format!(
+        "{}_backup_{}_{}_{}",
+        config
+            .ledger_column_options
+            .shred_storage_type
+            .blockstore_directory(),
+        incorrect_shred_version,
+        start_slot,
+        end_slot
+    );
+    match Blockstore::open_with_options(
+        &blockstore.ledger_path().join(backup_folder),
+        blockstore_options_from_config(config),
+    ) {
+        Ok(backup_blockstore) => {
+            info!("Backing up slots from {start_slot} to {end_slot}");
+            let mut timer = Measure::start("blockstore backup");
+
+            const PRINT_INTERVAL: Duration = Duration::from_secs(5);
+            let mut print_timer = Instant::now();
+            let mut num_slots_copied = 0;
+            let slot_meta_iterator = blockstore.slot_meta_iterator(start_slot)?;
+            for (slot, _meta) in slot_meta_iterator {
+                let shreds = blockstore.get_data_shreds_for_slot(slot, 0)?;
+                let _ = backup_blockstore.insert_shreds(shreds, None, true);
+                num_slots_copied += 1;
+
+                if print_timer.elapsed() > PRINT_INTERVAL {
+                    info!("Backed up {num_slots_copied} slots thus far");
+                    print_timer = Instant::now();
+                }
+            }
+
+            timer.stop();
+            info!("Backing up slots done. {timer}");
+        }
+        Err(err) => {
+            warn!("Unable to backup shreds with incorrect shred version: {err}");
+        }
     }
+
+    info!("Purging slots {start_slot} to {end_slot} from blockstore");
+    let mut timer = Measure::start("blockstore purge");
+    blockstore.purge_from_next_slots(start_slot, end_slot);
+    blockstore.purge_slots(start_slot, end_slot, PurgeType::Exact);
+    timer.stop();
+    info!("Purging slots done. {timer}");
 
     Ok(())
 }
@@ -2344,6 +2405,9 @@ pub enum ValidatorError {
     #[error("Bad expected bank hash")]
     BadExpectedBankHash,
 
+    #[error("blockstore error: {0}")]
+    Blockstore(#[source] BlockstoreError),
+
     #[error("genesis hash mismatch: actual={0}, expected={1}")]
     GenesisHashMismatch(Hash, Hash),
 
@@ -2360,6 +2424,9 @@ pub enum ValidatorError {
         "PoH hashes/second rate is slower than the cluster target: mine {mine}, cluster {target}"
     )]
     PohTooSlow { mine: u64, target: u64 },
+
+    #[error("shred version mistmatch: actual {actual}, expected {expected}")]
+    ShredVersionMismatch { actual: u16, expected: u16 },
 
     #[error(transparent)]
     TraceError(#[from] TraceError),
@@ -2396,8 +2463,8 @@ fn wait_for_supermajority(
                 std::cmp::Ordering::Less => return Ok(false),
                 std::cmp::Ordering::Greater => {
                     error!(
-                        "Ledger does not have enough data to wait for supermajority, \
-                             please enable snapshot fetch. Has {} needs {}",
+                        "Ledger does not have enough data to wait for supermajority, please \
+                         enable snapshot fetch. Has {} needs {}",
                         bank.slot(),
                         wait_for_supermajority_slot
                     );
@@ -2488,7 +2555,7 @@ fn get_stake_percent_in_gossip(bank: &Bank, cluster_info: &ClusterInfo, log: boo
         if activated_stake == 0 {
             continue;
         }
-        let vote_state_node_pubkey = vote_account.node_pubkey().copied().unwrap_or_default();
+        let vote_state_node_pubkey = *vote_account.node_pubkey();
 
         if let Some(peer) = peers.get(&vote_state_node_pubkey) {
             if peer.shred_version() == my_shred_version {
@@ -2661,7 +2728,143 @@ mod tests {
     }
 
     #[test]
-    fn test_backup_and_clear_blockstore() {
+    fn test_should_cleanup_blockstore_incorrect_shred_versions() {
+        solana_logger::setup();
+
+        let ledger_path = get_tmp_ledger_path_auto_delete!();
+        let blockstore = Blockstore::open(ledger_path.path()).unwrap();
+
+        let mut validator_config = ValidatorConfig::default_for_test();
+        let mut hard_forks = HardForks::default();
+        let mut root_slot;
+
+        // Do check from root_slot + 1 if wait_for_supermajority (10) == root_slot (10)
+        root_slot = 10;
+        validator_config.wait_for_supermajority = Some(root_slot);
+        assert_eq!(
+            should_cleanup_blockstore_incorrect_shred_versions(
+                &validator_config,
+                &blockstore,
+                root_slot,
+                &hard_forks
+            )
+            .unwrap(),
+            Some(root_slot + 1)
+        );
+
+        // No check if wait_for_supermajority (10) < root_slot (15) (no hard forks)
+        // Arguably operator error to pass a value for wait_for_supermajority in this case
+        root_slot = 15;
+        assert_eq!(
+            should_cleanup_blockstore_incorrect_shred_versions(
+                &validator_config,
+                &blockstore,
+                root_slot,
+                &hard_forks
+            )
+            .unwrap(),
+            None,
+        );
+
+        // Emulate cluster restart at slot 10
+        // No check if wait_for_supermajority (10) < root_slot (15) (empty blockstore)
+        hard_forks.register(10);
+        assert_eq!(
+            should_cleanup_blockstore_incorrect_shred_versions(
+                &validator_config,
+                &blockstore,
+                root_slot,
+                &hard_forks
+            )
+            .unwrap(),
+            None,
+        );
+
+        // Insert some shreds at newer slots than hard fork
+        let entries = entry::create_ticks(1, 0, Hash::default());
+        for i in 20..35 {
+            let shreds = blockstore::entries_to_test_shreds(
+                &entries,
+                i,     // slot
+                i - 1, // parent_slot
+                true,  // is_full_slot
+                1,     // version
+                true,  // merkle_variant
+            );
+            blockstore.insert_shreds(shreds, None, true).unwrap();
+        }
+
+        // No check as all blockstore data is newer than latest hard fork
+        assert_eq!(
+            should_cleanup_blockstore_incorrect_shred_versions(
+                &validator_config,
+                &blockstore,
+                root_slot,
+                &hard_forks
+            )
+            .unwrap(),
+            None,
+        );
+
+        // Emulate cluster restart at slot 25
+        // Do check from root_slot + 1 regardless of whether wait_for_supermajority set correctly
+        root_slot = 25;
+        hard_forks.register(root_slot);
+        validator_config.wait_for_supermajority = Some(root_slot);
+        assert_eq!(
+            should_cleanup_blockstore_incorrect_shred_versions(
+                &validator_config,
+                &blockstore,
+                root_slot,
+                &hard_forks
+            )
+            .unwrap(),
+            Some(root_slot + 1),
+        );
+        validator_config.wait_for_supermajority = None;
+        assert_eq!(
+            should_cleanup_blockstore_incorrect_shred_versions(
+                &validator_config,
+                &blockstore,
+                root_slot,
+                &hard_forks
+            )
+            .unwrap(),
+            Some(root_slot + 1),
+        );
+
+        // Do check with advanced root slot, even without wait_for_supermajority set correctly
+        // Check starts from latest hard fork + 1
+        root_slot = 30;
+        let latest_hard_fork = hard_forks.iter().last().unwrap().0;
+        assert_eq!(
+            should_cleanup_blockstore_incorrect_shred_versions(
+                &validator_config,
+                &blockstore,
+                root_slot,
+                &hard_forks
+            )
+            .unwrap(),
+            Some(latest_hard_fork + 1),
+        );
+
+        // Purge blockstore up to latest hard fork
+        // No check since all blockstore data newer than latest hard fork
+        blockstore.purge_slots(0, latest_hard_fork, PurgeType::Exact);
+        assert_eq!(
+            should_cleanup_blockstore_incorrect_shred_versions(
+                &validator_config,
+                &blockstore,
+                root_slot,
+                &hard_forks
+            )
+            .unwrap(),
+            None,
+        );
+    }
+
+    #[test]
+    fn test_cleanup_blockstore_incorrect_shred_versions() {
         solana_logger::setup();
 
         let validator_config = ValidatorConfig::default_for_test();
@@ -2680,12 +2883,9 @@ mod tests {
             );
             blockstore.insert_shreds(shreds, None, true).unwrap();
         }
-        drop(blockstore);
 
         // this purges and compacts all slots greater than or equal to 5
-        backup_and_clear_blockstore(ledger_path.path(), &validator_config, 5, 2).unwrap();
-
-        let blockstore = Blockstore::open(ledger_path.path()).unwrap();
+        cleanup_blockstore_incorrect_shred_versions(&blockstore, &validator_config, 5, 2).unwrap();
         // assert that slots less than 5 aren't affected
         assert!(blockstore.meta(4).unwrap().unwrap().next_slots.is_empty());
         for i in 5..10 {

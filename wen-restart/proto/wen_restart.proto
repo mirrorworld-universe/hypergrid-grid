@@ -21,9 +21,16 @@ message LastVotedForkSlotsAggregateRecord {
     optional LastVotedForkSlotsAggregateFinal final_result = 2;
 }
 
+message LastVotedForkSlotsEpochInfoRecord {
+    uint64 epoch = 1;
+    uint64 total_stake = 2;
+    uint64 actively_voting_stake = 3;
+    uint64 actively_voting_for_this_epoch_stake = 4;
+}
+
 message LastVotedForkSlotsAggregateFinal {
     map<uint64, uint64> slots_stake_map = 1;
-    uint64 total_active_stake = 2;
+    repeated LastVotedForkSlotsEpochInfoRecord epoch_infos = 2;
 }
 
 message HeaviestForkRecord {
@@ -52,6 +59,11 @@ message GenerateSnapshotRecord {
     uint32 shred_version = 4;
 }
 
+message ConflictMessage {
+    string old_message = 2;
+    string new_message = 3;
+}
+
 message WenRestartProgress {
     State state = 1;
     optional LastVotedForkSlotsRecord my_last_voted_fork_slots = 2;
@@ -59,4 +71,5 @@ message WenRestartProgress {
     optional HeaviestForkRecord my_heaviest_fork = 4;
     optional HeaviestForkAggregateRecord heaviest_fork_aggregate = 5;
     optional GenerateSnapshotRecord my_snapshot = 6;
+    map<string, ConflictMessage> conflict_message = 7;
 }

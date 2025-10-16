@@ -13,6 +13,7 @@ edition = { workspace = true }
 bincode = { workspace = true }
 log = { workspace = true }
 solana-config-program = { workspace = true }
+solana-feature-set = { workspace = true }
 solana-log-collector = { workspace = true }
 solana-program-runtime = { workspace = true }
 solana-sdk = { workspace = true }
@@ -25,9 +26,6 @@ proptest = { workspace = true }
 solana-compute-budget = { workspace = true }
 solana-logger = { workspace = true }
 test-case = { workspace = true }
-
-[build-dependencies]
-rustc_version = { workspace = true, optional = true }
 
 [lib]
 crate-type = ["lib"]

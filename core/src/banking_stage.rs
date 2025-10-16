@@ -31,7 +31,7 @@ use {
     crossbeam_channel::{unbounded, Receiver, RecvTimeoutError, Sender},
     histogram::Histogram,
     solana_client::connection_cache::ConnectionCache,
-    solana_gossip::cluster_info::ClusterInfo,
+    solana_gossip::{cluster_info::ClusterInfo, contact_info::ContactInfo},
     solana_ledger::blockstore_processor::TransactionStatusSender,
     solana_measure::measure_us,
     solana_perf::{data_budget::DataBudget, packet::PACKETS_PER_BATCH},
@@ -40,9 +40,10 @@ use {
         bank_forks::BankForks, prioritization_fee_cache::PrioritizationFeeCache,
         vote_sender_types::ReplayVoteSender,
     },
-    solana_sdk::timing::AtomicInterval,
+    solana_sdk::{pubkey::Pubkey, timing::AtomicInterval},
     std::{
         cmp, env,
+        ops::Deref,
         sync::{
             atomic::{AtomicU64, AtomicUsize, Ordering},
             Arc, RwLock,
@@ -323,12 +324,33 @@ pub struct FilterForwardingResults {
     pub(crate) total_filter_packets_us: u64,
 }
 
+pub trait LikeClusterInfo: Send + Sync + 'static + Clone {
+    fn id(&self) -> Pubkey;
+
+    fn lookup_contact_info<F, Y>(&self, id: &Pubkey, map: F) -> Option<Y>
+    where
+        F: FnOnce(&ContactInfo) -> Y;
+}
+
+impl LikeClusterInfo for Arc<ClusterInfo> {
+    fn id(&self) -> Pubkey {
+        self.deref().id()
+    }
+
+    fn lookup_contact_info<F, Y>(&self, id: &Pubkey, map: F) -> Option<Y>
+    where
+        F: FnOnce(&ContactInfo) -> Y,
+    {
+        self.deref().lookup_contact_info(id, map)
+    }
+}
+
 impl BankingStage {
     /// Create the stage using `bank`. Exit when `verified_receiver` is dropped.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         block_production_method: BlockProductionMethod,
-        cluster_info: &Arc<ClusterInfo>,
+        cluster_info: &impl LikeClusterInfo,
         poh_recorder: &Arc<RwLock<PohRecorder>>,
         non_vote_receiver: BankingPacketReceiver,
         tpu_vote_receiver: BankingPacketReceiver,
@@ -362,7 +384,7 @@ impl BankingStage {
     #[allow(clippy::too_many_arguments)]
     pub fn new_num_threads(
         block_production_method: BlockProductionMethod,
-        cluster_info: &Arc<ClusterInfo>,
+        cluster_info: &impl LikeClusterInfo,
         poh_recorder: &Arc<RwLock<PohRecorder>>,
         non_vote_receiver: BankingPacketReceiver,
         tpu_vote_receiver: BankingPacketReceiver,
@@ -413,7 +435,7 @@ impl BankingStage {
 
     #[allow(clippy::too_many_arguments)]
     pub fn new_thread_local_multi_iterator(
-        cluster_info: &Arc<ClusterInfo>,
+        cluster_info: &impl LikeClusterInfo,
         poh_recorder: &Arc<RwLock<PohRecorder>>,
         non_vote_receiver: BankingPacketReceiver,
         tpu_vote_receiver: BankingPacketReceiver,
@@ -434,7 +456,10 @@ impl BankingStage {
         let batch_limit =
             TOTAL_BUFFERED_PACKETS / ((num_threads - NUM_VOTE_PROCESSING_THREADS) as usize);
         // Keeps track of extraneous vote transactions for the vote threads
-        let latest_unprocessed_votes = Arc::new(LatestUnprocessedVotes::new());
+        let latest_unprocessed_votes = {
+            let bank = bank_forks.read().unwrap().working_bank();
+            Arc::new(LatestUnprocessedVotes::new(&bank))
+        };
 
         let decision_maker = DecisionMaker::new(cluster_info.id(), poh_recorder.clone());
         let committer = Committer::new(
@@ -497,7 +522,7 @@ impl BankingStage {
 
     #[allow(clippy::too_many_arguments)]
     pub fn new_central_scheduler(
-        cluster_info: &Arc<ClusterInfo>,
+        cluster_info: &impl LikeClusterInfo,
         poh_recorder: &Arc<RwLock<PohRecorder>>,
         non_vote_receiver: BankingPacketReceiver,
         tpu_vote_receiver: BankingPacketReceiver,
@@ -517,7 +542,10 @@ impl BankingStage {
         // Once an entry has been recorded, its blockhash is registered with the bank.
         let data_budget = Arc::new(DataBudget::default());
         // Keeps track of extraneous vote transactions for the vote threads
-        let latest_unprocessed_votes = Arc::new(LatestUnprocessedVotes::new());
+        let latest_unprocessed_votes = {
+            let bank = bank_forks.read().unwrap().working_bank();
+            Arc::new(LatestUnprocessedVotes::new(&bank))
+        };
 
         let decision_maker = DecisionMaker::new(cluster_info.id(), poh_recorder.clone());
         let committer = Committer::new(
@@ -629,7 +657,7 @@ impl BankingStage {
         Self { bank_thread_hdls }
     }
 
-    fn spawn_thread_local_multi_iterator_thread(
+    fn spawn_thread_local_multi_iterator_thread<T: LikeClusterInfo>(
         id: u32,
         packet_receiver: BankingPacketReceiver,
         bank_forks: Arc<RwLock<BankForks>>,
@@ -637,7 +665,7 @@ impl BankingStage {
         committer: Committer,
         transaction_recorder: TransactionRecorder,
         log_messages_bytes_limit: Option<usize>,
-        mut forwarder: Forwarder,
+        mut forwarder: Forwarder<T>,
         unprocessed_transaction_storage: UnprocessedTransactionStorage,
     ) -> JoinHandle<()> {
         let mut packet_receiver = PacketReceiver::new(id, packet_receiver, bank_forks);
@@ -664,9 +692,9 @@ impl BankingStage {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn process_buffered_packets(
+    fn process_buffered_packets<T: LikeClusterInfo>(
         decision_maker: &DecisionMaker,
-        forwarder: &mut Forwarder,
+        forwarder: &mut Forwarder<T>,
         consumer: &Consumer,
         unprocessed_transaction_storage: &mut UnprocessedTransactionStorage,
         banking_stage_stats: &BankingStageStats,
@@ -730,10 +758,10 @@ impl BankingStage {
         }
     }
 
-    fn process_loop(
+    fn process_loop<T: LikeClusterInfo>(
         packet_receiver: &mut PacketReceiver,
         decision_maker: &DecisionMaker,
-        forwarder: &mut Forwarder,
+        forwarder: &mut Forwarder<T>,
         consumer: &Consumer,
         id: u32,
         mut unprocessed_transaction_storage: UnprocessedTransactionStorage,
