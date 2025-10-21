@@ -1,3 +1,5 @@
+// Sonic:
+use solana_accounts_db::accounts_db::AccountsDb;
 use {
     crate::svm_bridge::{
         create_executable_environment, LoadAndExecuteTransactionsOutput, MockBankCallback,
@@ -112,7 +114,7 @@ pub struct JsonRpcRequestProcessor {
     account_map: Vec<(Pubkey, AccountSharedData)>,
     #[allow(dead_code)]
     exit: Arc<RwLock<Exit>>,
-    transaction_processor: Arc<RwLock<TransactionBatchProcessor<MockForkGraph>>>,
+    transaction_processor: Arc<RwLock<TransactionBatchProcessor<MockForkGraph, AccountsDb>>>,
 }
 
 struct TransactionSimulationResult {
@@ -209,9 +211,12 @@ impl JsonRpcRequestProcessor {
                 (pubkey, acc_data)
             })
             .collect();
-        let batch_processor = TransactionBatchProcessor::<MockForkGraph>::new_uninitialized(
+        let batch_processor = TransactionBatchProcessor::new_uninitialized(
             EXECUTION_SLOT,
             EXECUTION_EPOCH,
+            // Sonic: recheck if its fine
+            Arc::new(AccountsDb::default_for_tests()),
+            Default::default(),
         );
 
         Self {

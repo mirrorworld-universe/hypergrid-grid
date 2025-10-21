@@ -1,3 +1,5 @@
+// Sonic:
+use solana_accounts_db::accounts_db::AccountsDb;
 use {
     log::*,
     solana_bpf_loader_program::syscalls::{
@@ -201,7 +203,7 @@ pub fn create_executable_environment(
     fork_graph: Arc<RwLock<MockForkGraph>>,
     account_keys: &AccountKeys,
     mock_bank: &mut MockBankCallback,
-    transaction_processor: &TransactionBatchProcessor<MockForkGraph>,
+    transaction_processor: &TransactionBatchProcessor<MockForkGraph, AccountsDb>,
 ) {
     let mut program_cache = transaction_processor.program_cache.write().unwrap();
 
