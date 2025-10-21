@@ -697,7 +697,9 @@ mod tests {
     #[test]
     fn test_remote_account_loader() {
         let loader = RemoteAccountLoader::default();
-        let pubkey = Pubkey::from_str("4WTUyXNcf6QCEj76b3aRDLPewkPGkXFZkkyf3A3vua1z").unwrap();
+        let pubkey = "4WTUyXNcf6QCEj76b3aRDLPewkPGkXFZkkyf3A3vua1z"
+            .parse::<Pubkey>()
+            .unwrap();
         let account = loader.get_account(&pubkey);
         assert!(account.is_none());
     }
@@ -705,7 +707,9 @@ mod tests {
     #[test]
     fn test_remote_account_loader2() {
         let loader = RemoteAccountLoader::default();
-        let pubkey = Pubkey::from_str("4WTUyXNcf6QCEj76b3aRDLPewkPGkXFZkkyf3A3vua1z").unwrap();
+        let pubkey = "4WTUyXNcf6QCEj76b3aRDLPewkPGkXFZkkyf3A3vua1z"
+            .parse::<Pubkey>()
+            .unwrap();
         let account = loader.has_account(&pubkey);
         assert!(!account);
     }
@@ -713,15 +717,19 @@ mod tests {
     #[test]
     fn test_remote_account_loader3() {
         let loader = RemoteAccountLoader::default();
-        let pubkey = Pubkey::from_str("4WTUyXNcf6QCEj76b3aRDLPewkPGkXFZkkyf3A3vua1z").unwrap();
-        let account = loader.load_account("", 0, &pubkey, None);
+        let pubkey = "4WTUyXNcf6QCEj76b3aRDLPewkPGkXFZkkyf3A3vua1z"
+            .parse::<Pubkey>()
+            .unwrap();
+        let account = loader.load_account(0, &pubkey, None);
         assert!(account.is_none());
     }
 
     #[test]
     fn test_remote_account_loader4() {
         let loader = RemoteAccountLoader::default();
-        let pubkey = Pubkey::from_str("4WTUyXNcf6QCEj76b3aRDLPewkPGkXFZkkyf3A3vua1z").unwrap();
+        let pubkey = "4WTUyXNcf6QCEj76b3aRDLPewkPGkXFZkkyf3A3vua1z"
+            .parse::<Pubkey>()
+            .unwrap();
         loader.deactivate_account(0, &pubkey);
         let account = loader.get_account(&pubkey);
         assert!(account.is_none());
@@ -730,7 +738,9 @@ mod tests {
     #[test]
     fn test_remote_account_loader5() {
         let loader = RemoteAccountLoader::default();
-        let pubkey = Pubkey::from_str("4WTUyXNcf6QCEj76b3aRDLPewkPGkXFZkkyf3A3vua1z").unwrap();
+        let pubkey = "4WTUyXNcf6QCEj76b3aRDLPewkPGkXFZkkyf3A3vua1z"
+            .parse::<Pubkey>()
+            .unwrap();
         loader.deactivate_account(0, &pubkey);
         let account = loader.has_account(&pubkey);
         assert!(!account);
@@ -739,8 +749,10 @@ mod tests {
     #[test]
     fn test_remote_account_loader6() {
         let loader = RemoteAccountLoader::default();
-        let pubkey = Pubkey::from_str("4WTUyXNcf6QCEj76b3aRDLPewkPGkXFZkkyf3A3vua1z").unwrap();
-        let account = loader.load_account("", 0, &pubkey, None);
+        let pubkey = "4WTUyXNcf6QCEj76b3aRDLPewkPGkXFZkkyf3A3vua1z"
+            .parse::<Pubkey>()
+            .unwrap();
+        let account = loader.load_account(0, &pubkey, None);
         assert!(account.is_none());
     }
 }
