@@ -128,20 +128,21 @@ pub static BUILTINS: &[BuiltinPrototype] = &[
         program_id: solana_zk_sdk::zk_elgamal_proof_program::id(),
         entrypoint: solana_zk_elgamal_proof_program::Entrypoint::vm,
     }),
-    testable_prototype!(BuiltinPrototype {
-        core_bpf_migration_config: None,
-        name: sonic_account_migrater_program,
-        enable_feature_id: None,
-        program_id: solana_sdk::sonic_account_migrater::program::id(),
-        entrypoint: sonic_account_migrater_program::processor::Entrypoint::vm,
-    }),
-    testable_prototype!(BuiltinPrototype {
-        core_bpf_migration_config: None,
-        name: sonic_fee_settlement_program,
-        enable_feature_id: None,
-        program_id: solana_sdk::sonic_fee_settlement::program::id(),
-        entrypoint: sonic_fee_settlement_program::processor::Entrypoint::vm,
-    }),
+    // XXX: decide if we need it in tests later
+    // testable_prototype!(BuiltinPrototype {
+    //     core_bpf_migration_config: None,
+    //     name: sonic_account_migrater_program,
+    //     enable_feature_id: None,
+    //     program_id: solana_sdk::sonic_account_migrater::program::id(),
+    //     entrypoint: sonic_account_migrater_program::processor::Entrypoint::vm,
+    // }),
+    // testable_prototype!(BuiltinPrototype {
+    //     core_bpf_migration_config: None,
+    //     name: sonic_fee_settlement_program,
+    //     enable_feature_id: None,
+    //     program_id: solana_sdk::sonic_fee_settlement::program::id(),
+    //     entrypoint: sonic_fee_settlement_program::processor::Entrypoint::vm,
+    // }),
 ];
 
 pub static STATELESS_BUILTINS: &[StatelessBuiltinPrototype] = &[StatelessBuiltinPrototype {
