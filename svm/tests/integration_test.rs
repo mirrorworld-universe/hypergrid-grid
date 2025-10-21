@@ -4,8 +4,8 @@
 use {
     crate::mock_bank::{
         create_executable_environment, deploy_program_with_upgrade_authority, program_address,
-        register_builtins, MockBankCallback, MockForkGraph, EXECUTION_EPOCH, EXECUTION_SLOT,
-        WALLCLOCK_TIME,
+        register_builtins, MockBankCallback, MockForkGraph, TransactionBatchProcessor,
+        EXECUTION_EPOCH, EXECUTION_SLOT, WALLCLOCK_TIME,
     },
     solana_sdk::{
         account::{AccountSharedData, ReadableAccount, WritableAccount},
@@ -31,8 +31,7 @@ use {
         transaction_execution_result::TransactionExecutionDetails,
         transaction_processing_result::{ProcessedTransaction, TransactionProcessingResult},
         transaction_processor::{
-            ExecutionRecordingConfig, TransactionBatchProcessor, TransactionProcessingConfig,
-            TransactionProcessingEnvironment,
+            ExecutionRecordingConfig, TransactionProcessingConfig, TransactionProcessingEnvironment,
         },
     },
     solana_svm_transaction::svm_message::SVMMessage,
@@ -81,6 +80,9 @@ impl SvmTestEnvironment<'_> {
         let batch_processor = TransactionBatchProcessor::<MockForkGraph>::new_uninitialized(
             EXECUTION_SLOT,
             EXECUTION_EPOCH,
+            // Sonic:
+            Default::default(),
+            Default::default(),
         );
 
         let fork_graph = Arc::new(RwLock::new(MockForkGraph {}));

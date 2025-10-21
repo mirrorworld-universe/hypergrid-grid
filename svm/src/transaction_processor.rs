@@ -1314,6 +1314,26 @@ mod tests {
         }
     }
 
+    // Sonic:
+    #[derive(Default)]
+    struct MockAccountsDb(Arc<sonic_hypergrid::remote_loader::RemoteAccountLoader>);
+
+    // Sonic:
+    impl AccountsDb for MockAccountsDb {
+        fn default_for_testing() -> Self {
+            Default::default()
+        }
+        fn is_account_in_index(&self, _addr: Pubkey) -> bool {
+            false
+        }
+        fn remote_loader(&self) -> Arc<sonic_hypergrid::remote_loader::RemoteAccountLoader> {
+            self.0.clone()
+        }
+    }
+
+    // Sonic:
+    type TransactionBatchProcessorTest<FG, A = MockAccountsDb> = TransactionBatchProcessor<FG, A>;
+
     #[test_case(1; "Check results too small")]
     #[test_case(3; "Check results too large")]
     #[should_panic(expected = "Length of check_results does not match length of sanitized_txs")]
@@ -1347,7 +1367,7 @@ mod tests {
             check_results_len
         ];
 
-        let batch_processor = TransactionBatchProcessor::<TestForkGraph>::default();
+        let batch_processor = TransactionBatchProcessorTest::<TestForkGraph>::default();
         let callback = MockBankCallback::default();
 
         batch_processor.load_and_execute_sanitized_transactions(
@@ -1377,7 +1397,7 @@ mod tests {
             }
         }
         let inner_instructions =
-            TransactionBatchProcessor::<TestForkGraph>::inner_instructions_list_from_instruction_trace(
+            TransactionBatchProcessorTest::<TestForkGraph>::inner_instructions_list_from_instruction_trace(
                 &transaction_context,
             );
 
@@ -1425,7 +1445,7 @@ mod tests {
 
         let sanitized_message = new_unchecked_sanitized_message(message);
         let mut program_cache_for_tx_batch = ProgramCacheForTxBatch::default();
-        let batch_processor = TransactionBatchProcessor::<TestForkGraph>::default();
+        let batch_processor = TransactionBatchProcessorTest::<TestForkGraph>::default();
 
         let sanitized_transaction = SanitizedTransaction::new_for_tests(
             sanitized_message,
@@ -1512,7 +1532,7 @@ mod tests {
 
         let sanitized_message = new_unchecked_sanitized_message(message);
         let mut program_cache_for_tx_batch = ProgramCacheForTxBatch::default();
-        let batch_processor = TransactionBatchProcessor::<TestForkGraph>::default();
+        let batch_processor = TransactionBatchProcessorTest::<TestForkGraph>::default();
 
         let sanitized_transaction = SanitizedTransaction::new_for_tests(
             sanitized_message,
@@ -1559,7 +1579,7 @@ mod tests {
     #[should_panic = "called load_program_with_pubkey() with nonexistent account"]
     fn test_replenish_program_cache_with_nonexistent_accounts() {
         let mock_bank = MockBankCallback::default();
-        let batch_processor = TransactionBatchProcessor::<TestForkGraph>::default();
+        let batch_processor = TransactionBatchProcessorTest::<TestForkGraph>::default();
         let fork_graph = Arc::new(RwLock::new(TestForkGraph {}));
         batch_processor.program_cache.write().unwrap().fork_graph =
             Some(Arc::downgrade(&fork_graph));
@@ -1574,7 +1594,7 @@ mod tests {
     #[test]
     fn test_replenish_program_cache() {
         let mock_bank = MockBankCallback::default();
-        let batch_processor = TransactionBatchProcessor::<TestForkGraph>::default();
+        let batch_processor = TransactionBatchProcessorTest::<TestForkGraph>::default();
         let fork_graph = Arc::new(RwLock::new(TestForkGraph {}));
         batch_processor.program_cache.write().unwrap().fork_graph =
             Some(Arc::downgrade(&fork_graph));
@@ -1690,12 +1710,13 @@ mod tests {
         ];
         let owners = vec![owner1, owner2];
 
-        let result = TransactionBatchProcessor::<TestForkGraph>::filter_executable_program_accounts(
-            &mock_bank,
-            &transactions,
-            &validation_results,
-            &owners,
-        );
+        let result =
+            TransactionBatchProcessorTest::<TestForkGraph>::filter_executable_program_accounts(
+                &mock_bank,
+                &transactions,
+                &validation_results,
+                &owners,
+            );
 
         assert_eq!(result.len(), 2);
         assert_eq!(result[&key1], 2);
@@ -1772,7 +1793,7 @@ mod tests {
 
         let owners = &[program1_pubkey, program2_pubkey];
         let programs =
-            TransactionBatchProcessor::<TestForkGraph>::filter_executable_program_accounts(
+            TransactionBatchProcessorTest::<TestForkGraph>::filter_executable_program_accounts(
                 &bank,
                 &[sanitized_tx1, sanitized_tx2],
                 &[
@@ -1873,7 +1894,7 @@ mod tests {
             Err(TransactionError::BlockhashNotFound),
         ];
         let programs =
-            TransactionBatchProcessor::<TestForkGraph>::filter_executable_program_accounts(
+            TransactionBatchProcessorTest::<TestForkGraph>::filter_executable_program_accounts(
                 &bank,
                 &[sanitized_tx1, sanitized_tx2],
                 &validation_results,
@@ -1937,7 +1958,7 @@ mod tests {
             .unwrap()
             .insert(sysvar::rent::id(), rent_account);
 
-        let transaction_processor = TransactionBatchProcessor::<TestForkGraph>::default();
+        let transaction_processor = TransactionBatchProcessorTest::<TestForkGraph>::default();
         transaction_processor.fill_missing_sysvar_cache_entries(&mock_bank);
 
         let sysvar_cache = transaction_processor.sysvar_cache.read().unwrap();
@@ -2013,7 +2034,7 @@ mod tests {
             .unwrap()
             .insert(sysvar::rent::id(), rent_account);
 
-        let transaction_processor = TransactionBatchProcessor::<TestForkGraph>::default();
+        let transaction_processor = TransactionBatchProcessorTest::<TestForkGraph>::default();
         // Fill the sysvar cache
         transaction_processor.fill_missing_sysvar_cache_entries(&mock_bank);
         // Reset the sysvar cache
@@ -2062,7 +2083,7 @@ mod tests {
     #[test]
     fn test_add_builtin() {
         let mock_bank = MockBankCallback::default();
-        let batch_processor = TransactionBatchProcessor::<TestForkGraph>::default();
+        let batch_processor = TransactionBatchProcessorTest::<TestForkGraph>::default();
         let fork_graph = Arc::new(RwLock::new(TestForkGraph {}));
         batch_processor.program_cache.write().unwrap().fork_graph =
             Some(Arc::downgrade(&fork_graph));
@@ -2149,7 +2170,7 @@ mod tests {
         };
 
         let mut error_counters = TransactionErrorMetrics::default();
-        let batch_processor = TransactionBatchProcessor::<TestForkGraph>::default();
+        let batch_processor = TransactionBatchProcessorTest::<TestForkGraph>::default();
         let result = batch_processor.validate_transaction_fee_payer(
             &mock_bank,
             None,
@@ -2227,7 +2248,7 @@ mod tests {
         };
 
         let mut error_counters = TransactionErrorMetrics::default();
-        let batch_processor = TransactionBatchProcessor::<TestForkGraph>::default();
+        let batch_processor = TransactionBatchProcessorTest::<TestForkGraph>::default();
         let result = batch_processor.validate_transaction_fee_payer(
             &mock_bank,
             None,
@@ -2278,7 +2299,7 @@ mod tests {
 
         let mock_bank = MockBankCallback::default();
         let mut error_counters = TransactionErrorMetrics::default();
-        let batch_processor = TransactionBatchProcessor::<TestForkGraph>::default();
+        let batch_processor = TransactionBatchProcessorTest::<TestForkGraph>::default();
         let result = batch_processor.validate_transaction_fee_payer(
             &mock_bank,
             None,
@@ -2312,7 +2333,7 @@ mod tests {
         };
 
         let mut error_counters = TransactionErrorMetrics::default();
-        let batch_processor = TransactionBatchProcessor::<TestForkGraph>::default();
+        let batch_processor = TransactionBatchProcessorTest::<TestForkGraph>::default();
         let result = batch_processor.validate_transaction_fee_payer(
             &mock_bank,
             None,
@@ -2350,7 +2371,7 @@ mod tests {
         };
 
         let mut error_counters = TransactionErrorMetrics::default();
-        let batch_processor = TransactionBatchProcessor::<TestForkGraph>::default();
+        let batch_processor = TransactionBatchProcessorTest::<TestForkGraph>::default();
         let result = batch_processor.validate_transaction_fee_payer(
             &mock_bank,
             None,
@@ -2386,7 +2407,7 @@ mod tests {
         };
 
         let mut error_counters = TransactionErrorMetrics::default();
-        let batch_processor = TransactionBatchProcessor::<TestForkGraph>::default();
+        let batch_processor = TransactionBatchProcessorTest::<TestForkGraph>::default();
         let result = batch_processor.validate_transaction_fee_payer(
             &mock_bank,
             None,
@@ -2418,7 +2439,7 @@ mod tests {
 
         let mock_bank = MockBankCallback::default();
         let mut error_counters = TransactionErrorMetrics::default();
-        let batch_processor = TransactionBatchProcessor::<TestForkGraph>::default();
+        let batch_processor = TransactionBatchProcessorTest::<TestForkGraph>::default();
         let result = batch_processor.validate_transaction_fee_payer(
             &mock_bank,
             None,
@@ -2479,7 +2500,7 @@ mod tests {
             };
 
             let mut error_counters = TransactionErrorMetrics::default();
-            let batch_processor = TransactionBatchProcessor::<TestForkGraph>::default();
+            let batch_processor = TransactionBatchProcessorTest::<TestForkGraph>::default();
 
             let nonce = Some(NonceInfo::new(
                 *fee_payer_address,
@@ -2547,7 +2568,7 @@ mod tests {
             };
 
             let mut error_counters = TransactionErrorMetrics::default();
-            let batch_processor = TransactionBatchProcessor::<TestForkGraph>::default();
+            let batch_processor = TransactionBatchProcessorTest::<TestForkGraph>::default();
             let result = batch_processor.validate_transaction_fee_payer(
                 &mock_bank,
                 None,
@@ -2600,7 +2621,7 @@ mod tests {
         };
 
         let mut error_counters = TransactionErrorMetrics::default();
-        let batch_processor = TransactionBatchProcessor::<TestForkGraph>::default();
+        let batch_processor = TransactionBatchProcessorTest::<TestForkGraph>::default();
 
         let result = batch_processor.validate_transaction_fee_payer(
             &mock_bank,
@@ -2648,7 +2669,7 @@ mod tests {
             Some(&fee_payer_address),
             &Hash::new_unique(),
         ));
-        let batch_processor = TransactionBatchProcessor::<TestForkGraph>::default();
+        let batch_processor = TransactionBatchProcessorTest::<TestForkGraph>::default();
         batch_processor
             .validate_transaction_fee_payer(
                 &mock_bank,

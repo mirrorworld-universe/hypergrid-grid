@@ -27,10 +27,7 @@ use {
         slot_hashes::Slot,
         sysvar::SysvarId,
     },
-    solana_svm::{
-        transaction_processing_callback::{AccountState, TransactionProcessingCallback},
-        transaction_processor::TransactionBatchProcessor,
-    },
+    solana_svm::transaction_processing_callback::{AccountState, TransactionProcessingCallback},
     solana_type_overrides::sync::{Arc, RwLock},
     std::{
         cmp::Ordering,
@@ -116,6 +113,27 @@ impl MockBankCallback {
         self.feature_set = Arc::new(new_set)
     }
 }
+
+// Sonic:
+#[derive(Default)]
+pub struct MockAccountsDb(Arc<sonic_hypergrid::remote_loader::RemoteAccountLoader>);
+
+// Sonic:
+impl solana_svm::transaction_processor::AccountsDb for MockAccountsDb {
+    fn default_for_testing() -> Self {
+        Default::default()
+    }
+    fn is_account_in_index(&self, _addr: Pubkey) -> bool {
+        false
+    }
+    fn remote_loader(&self) -> Arc<sonic_hypergrid::remote_loader::RemoteAccountLoader> {
+        self.0.clone()
+    }
+}
+
+// Sonic:
+pub type TransactionBatchProcessor<FG, A = MockAccountsDb> =
+    solana_svm::transaction_processor::TransactionBatchProcessor<FG, A>;
 
 #[allow(unused)]
 fn load_program(name: String) -> Vec<u8> {

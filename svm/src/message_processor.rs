@@ -290,7 +290,7 @@ mod tests {
             &mut invoke_context,
             &mut ExecuteTimings::default(),
             &mut 0,
-            None, // Sonic: Add remote_accounts
+            Default::default(), // Sonic: Add remote_accounts
         );
         assert!(result.is_ok());
         assert_eq!(
@@ -345,7 +345,7 @@ mod tests {
             &mut invoke_context,
             &mut ExecuteTimings::default(),
             &mut 0,
-            None, // Sonic: Add remote_accounts
+            Default::default(), // Sonic: Add remote_accounts
         );
         assert_eq!(
             result,
@@ -390,7 +390,7 @@ mod tests {
             &mut invoke_context,
             &mut ExecuteTimings::default(),
             &mut 0,
-            None, // Sonic: Add remote_accounts
+            Default::default(), // Sonic: Add remote_accounts
         );
         assert_eq!(
             result,
@@ -526,7 +526,7 @@ mod tests {
             &mut invoke_context,
             &mut ExecuteTimings::default(),
             &mut 0,
-            None, // Sonic: Add remote_accounts
+            Default::default(), // Sonic: Add remote_accounts
         );
         assert_eq!(
             result,
@@ -566,7 +566,7 @@ mod tests {
             &mut invoke_context,
             &mut ExecuteTimings::default(),
             &mut 0,
-            None, // Sonic: Add remote_accounts
+            Default::default(), // Sonic: Add remote_accounts
         );
         assert!(result.is_ok());
 
@@ -603,7 +603,7 @@ mod tests {
             &mut invoke_context,
             &mut ExecuteTimings::default(),
             &mut 0,
-            None, // Sonic: Add remote_accounts
+            Default::default(), // Sonic: Add remote_accounts
         );
         assert!(result.is_ok());
         assert_eq!(
@@ -701,7 +701,7 @@ mod tests {
             &mut invoke_context,
             &mut ExecuteTimings::default(),
             &mut 0,
-            None, // Sonic: Add remote_accounts
+            Default::default(), // Sonic: Add remote_accounts
         );
 
         assert_eq!(
