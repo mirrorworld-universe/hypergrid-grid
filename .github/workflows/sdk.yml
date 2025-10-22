@@ -109,7 +109,8 @@ jobs:
       matrix:
         os:
           - macos-latest
-          - windows-latest
+          # Sonic: XXX: openssl v3.3.2 is no longer available via choco
+          # - windows-latest
           - ubuntu-latest
     runs-on: ${{ matrix.os }}
     steps:
