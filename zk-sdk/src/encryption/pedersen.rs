@@ -1,5 +1,7 @@
 //! Pedersen commitment implementation using the Ristretto prime-order group.
 
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::*;
 use {
     crate::encryption::{PEDERSEN_COMMITMENT_LEN, PEDERSEN_OPENING_LEN},
     core::ops::{Add, Mul, Sub},
@@ -108,7 +110,7 @@ impl ConstantTimeEq for PedersenOpening {
     }
 }
 
-impl<'a, 'b> Add<&'b PedersenOpening> for &'a PedersenOpening {
+impl<'b> Add<&'b PedersenOpening> for &PedersenOpening {
     type Output = PedersenOpening;
 
     fn add(self, opening: &'b PedersenOpening) -> PedersenOpening {
@@ -122,7 +124,7 @@ define_add_variants!(
     Output = PedersenOpening
 );
 
-impl<'a, 'b> Sub<&'b PedersenOpening> for &'a PedersenOpening {
+impl<'b> Sub<&'b PedersenOpening> for &PedersenOpening {
     type Output = PedersenOpening;
 
     fn sub(self, opening: &'b PedersenOpening) -> PedersenOpening {
@@ -136,7 +138,7 @@ define_sub_variants!(
     Output = PedersenOpening
 );
 
-impl<'a, 'b> Mul<&'b Scalar> for &'a PedersenOpening {
+impl<'b> Mul<&'b Scalar> for &PedersenOpening {
     type Output = PedersenOpening;
 
     fn mul(self, scalar: &'b Scalar) -> PedersenOpening {
@@ -150,7 +152,7 @@ define_mul_variants!(
     Output = PedersenOpening
 );
 
-impl<'a, 'b> Mul<&'b PedersenOpening> for &'a Scalar {
+impl<'b> Mul<&'b PedersenOpening> for &Scalar {
     type Output = PedersenOpening;
 
     fn mul(self, opening: &'b PedersenOpening) -> PedersenOpening {
@@ -165,6 +167,7 @@ define_mul_variants!(
 );
 
 /// Pedersen commitment type.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct PedersenCommitment(RistrettoPoint);
 impl PedersenCommitment {
@@ -193,7 +196,7 @@ impl PedersenCommitment {
     }
 }
 
-impl<'a, 'b> Add<&'b PedersenCommitment> for &'a PedersenCommitment {
+impl<'b> Add<&'b PedersenCommitment> for &PedersenCommitment {
     type Output = PedersenCommitment;
 
     fn add(self, commitment: &'b PedersenCommitment) -> PedersenCommitment {
@@ -207,7 +210,7 @@ define_add_variants!(
     Output = PedersenCommitment
 );
 
-impl<'a, 'b> Sub<&'b PedersenCommitment> for &'a PedersenCommitment {
+impl<'b> Sub<&'b PedersenCommitment> for &PedersenCommitment {
     type Output = PedersenCommitment;
 
     fn sub(self, commitment: &'b PedersenCommitment) -> PedersenCommitment {
@@ -221,7 +224,7 @@ define_sub_variants!(
     Output = PedersenCommitment
 );
 
-impl<'a, 'b> Mul<&'b Scalar> for &'a PedersenCommitment {
+impl<'b> Mul<&'b Scalar> for &PedersenCommitment {
     type Output = PedersenCommitment;
 
     fn mul(self, scalar: &'b Scalar) -> PedersenCommitment {
@@ -235,7 +238,7 @@ define_mul_variants!(
     Output = PedersenCommitment
 );
 
-impl<'a, 'b> Mul<&'b PedersenCommitment> for &'a Scalar {
+impl<'b> Mul<&'b PedersenCommitment> for &Scalar {
     type Output = PedersenCommitment;
 
     fn mul(self, commitment: &'b PedersenCommitment) -> PedersenCommitment {

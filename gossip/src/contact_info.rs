@@ -23,6 +23,8 @@ use {
 
 pub const SOCKET_ADDR_UNSPECIFIED: SocketAddr =
     SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), /*port:*/ 0u16);
+const EMPTY_SOCKET_ADDR_CACHE: [SocketAddr; SOCKET_CACHE_SIZE] =
+    [SOCKET_ADDR_UNSPECIFIED; SOCKET_CACHE_SIZE];
 
 const SOCKET_TAG_GOSSIP: u8 = 0;
 const SOCKET_TAG_RPC: u8 = 2;
@@ -39,6 +41,11 @@ const SOCKET_TAG_TVU: u8 = 10;
 const SOCKET_TAG_TVU_QUIC: u8 = 11;
 const_assert_eq!(SOCKET_CACHE_SIZE, 13);
 const SOCKET_CACHE_SIZE: usize = SOCKET_TAG_TPU_VOTE_QUIC as usize + 1usize;
+
+// An alias for a function that reads data from a ContactInfo entry stored in
+// the gossip CRDS table.
+pub trait ContactInfoQuery<R>: Fn(&ContactInfo) -> R {}
+impl<R, F: Fn(&ContactInfo) -> R> ContactInfoQuery<R> for F {}
 
 #[derive(Copy, Clone, Debug, Eq, Error, PartialEq)]
 pub enum Error {
@@ -86,7 +93,7 @@ pub struct ContactInfo {
     extensions: Vec<Extension>,
     // Only sanitized socket-addrs can be cached!
     #[serde(skip_serializing)]
-    cache: [Result<SocketAddr, Error>; SOCKET_CACHE_SIZE],
+    cache: [SocketAddr; SOCKET_CACHE_SIZE],
 }
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
@@ -125,7 +132,10 @@ macro_rules! get_socket {
     ($name:ident, $key:ident) => {
         #[inline]
         pub fn $name(&self) -> Option<SocketAddr> {
-            self.cache[usize::from($key)].ok()
+            let socket = &self.cache[usize::from($key)];
+            (socket != &SOCKET_ADDR_UNSPECIFIED)
+                .then_some(socket)
+                .copied()
         }
     };
     ($name:ident, $udp:ident, $quic:ident) => {
@@ -135,7 +145,10 @@ macro_rules! get_socket {
                 Protocol::QUIC => $quic,
                 Protocol::UDP => $udp,
             };
-            self.cache[usize::from(key)].ok()
+            let socket = &self.cache[usize::from(key)];
+            (socket != &SOCKET_ADDR_UNSPECIFIED)
+                .then_some(socket)
+                .copied()
         }
     };
 }
@@ -187,7 +200,7 @@ impl ContactInfo {
             addrs: Vec::<IpAddr>::default(),
             sockets: Vec::<SocketEntry>::default(),
             extensions: Vec::<Extension>::default(),
-            cache: new_empty_cache(),
+            cache: EMPTY_SOCKET_ADDR_CACHE,
         }
     }
 
@@ -334,7 +347,7 @@ impl ContactInfo {
             }
         }
         if let Some(entry) = self.cache.get_mut(usize::from(key)) {
-            *entry = Ok(socket); // socket is already sanitized above.
+            *entry = socket; // socket is already sanitized above.
         }
         debug_assert_matches!(sanitize_entries(&self.addrs, &self.sockets), Ok(()));
         Ok(())
@@ -349,7 +362,7 @@ impl ContactInfo {
             }
             self.maybe_remove_addr(entry.index);
             if let Some(entry) = self.cache.get_mut(usize::from(key)) {
-                *entry = Err(Error::SocketNotFound(key));
+                *entry = SOCKET_ADDR_UNSPECIFIED;
             }
         }
     }
@@ -463,11 +476,6 @@ impl ContactInfo {
     }
 }
 
-fn new_empty_cache() -> [Result<SocketAddr, Error>; SOCKET_CACHE_SIZE] {
-    debug_assert!(SOCKET_CACHE_SIZE < usize::from(u8::MAX));
-    std::array::from_fn(|key| Err(Error::SocketNotFound(key as u8)))
-}
-
 fn get_node_outset() -> u64 {
     let now = SystemTime::now();
     let elapsed = now.duration_since(UNIX_EPOCH).unwrap();
@@ -518,7 +526,7 @@ impl TryFrom<ContactInfoLite> for ContactInfo {
             addrs,
             sockets,
             extensions,
-            cache: new_empty_cache(),
+            cache: EMPTY_SOCKET_ADDR_CACHE,
         };
         // Populate node.cache.
         // Only sanitized socket-addrs can be cached!
@@ -532,7 +540,9 @@ impl TryFrom<ContactInfoLite> for ContactInfo {
                 continue;
             };
             let socket = SocketAddr::new(addr, port);
-            *entry = sanitize_socket(&socket).map(|()| socket);
+            if sanitize_socket(&socket).is_ok() {
+                *entry = socket;
+            }
         }
         Ok(node)
     }
@@ -610,6 +620,7 @@ fn sanitize_entries(addrs: &[IpAddr], sockets: &[SocketEntry]) -> Result<(), Err
 }
 
 // Verifies that the other socket is at QUIC_PORT_OFFSET from the first one.
+#[cfg(test)]
 pub(crate) fn sanitize_quic_offset(
     socket: &Option<SocketAddr>, // udp
     other: &Option<SocketAddr>,  // quic: udp + QUIC_PORT_OFFSET
@@ -642,7 +653,7 @@ impl solana_frozen_abi::abi_example::AbiExample for ContactInfo {
             addrs: Vec::<IpAddr>::example(),
             sockets: Vec::<SocketEntry>::example(),
             extensions: vec![],
-            cache: new_empty_cache(),
+            cache: EMPTY_SOCKET_ADDR_CACHE,
         }
     }
 }
@@ -807,7 +818,7 @@ mod tests {
             addrs: Vec::default(),
             sockets: Vec::default(),
             extensions: Vec::default(),
-            cache: new_empty_cache(),
+            cache: EMPTY_SOCKET_ADDR_CACHE,
         };
         let mut sockets = HashMap::<u8, SocketAddr>::new();
         for _ in 0..1 << 14 {
@@ -827,10 +838,10 @@ mod tests {
                 if usize::from(key) < SOCKET_CACHE_SIZE {
                     assert_eq!(
                         node.cache[usize::from(key)],
-                        match socket {
-                            None => Err(Error::SocketNotFound(key)),
-                            Some(&socket) => sanitize_socket(&socket).map(|()| socket),
-                        }
+                        socket
+                            .filter(|socket| sanitize_socket(socket).is_ok())
+                            .copied()
+                            .unwrap_or(SOCKET_ADDR_UNSPECIFIED),
                     );
                 }
             }

@@ -8,7 +8,7 @@ use {
             TransactionCheckResult, TransactionLoadResult, ValidatedTransactionDetails,
         },
         account_overrides::AccountOverrides,
-        message_processor::MessageProcessor,
+        message_processor::process_message,
         nonce_info::NonceInfo,
         program_loader::{get_program_modification_slot, load_program_with_pubkey},
         rollback_accounts::RollbackAccounts,
@@ -186,7 +186,7 @@ pub struct TransactionBatchProcessor<FG: ForkGraph, A> {
 
     /// SysvarCache is a collection of system variables that are
     /// accessible from on chain programs. It is passed to SVM from
-    /// client code (e.g. Bank) and forwarded to the MessageProcessor.
+    /// client code (e.g. Bank) and forwarded to process_message.
     sysvar_cache: RwLock<SysvarCache>,
 
     /// Programs required for transaction batch processing
@@ -1187,7 +1187,7 @@ impl<FG: ForkGraph, A: AccountsDb> TransactionBatchProcessor<FG, A> {
         );
 
         let mut process_message_time = Measure::start("process_message_time");
-        let process_result = MessageProcessor::process_message(
+        let process_result = process_message(
             tx,
             &loaded_transaction.program_indices,
             &mut invoke_context,
@@ -1387,7 +1387,8 @@ impl<FG: ForkGraph, A: AccountsDb> TransactionBatchProcessor<FG, A> {
     }
 
     #[cfg(feature = "dev-context-only-utils")]
-    pub fn writable_sysvar_cache(&self) -> &RwLock<SysvarCache> {
+    #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
+    fn writable_sysvar_cache(&self) -> &RwLock<SysvarCache> {
         &self.sysvar_cache
     }
 }
@@ -1445,10 +1446,10 @@ mod tests {
     }
 
     #[derive(Default, Clone)]
-    pub struct MockBankCallback {
-        pub account_shared_data: Arc<RwLock<HashMap<Pubkey, AccountSharedData>>>,
+    struct MockBankCallback {
+        account_shared_data: Arc<RwLock<HashMap<Pubkey, AccountSharedData>>>,
         #[allow(clippy::type_complexity)]
-        pub inspected_accounts:
+        inspected_accounts:
             Arc<RwLock<HashMap<Pubkey, Vec<(Option<AccountSharedData>, /* is_writable */ bool)>>>>,
     }
 

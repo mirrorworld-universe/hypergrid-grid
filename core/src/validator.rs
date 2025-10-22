@@ -207,6 +207,31 @@ impl BlockProductionMethod {
     }
 }
 
+#[derive(Clone, EnumString, EnumVariantNames, Default, IntoStaticStr, Display)]
+#[strum(serialize_all = "kebab-case")]
+pub enum TransactionStructure {
+    #[default]
+    Sdk,
+    View,
+}
+
+impl TransactionStructure {
+    pub const fn cli_names() -> &'static [&'static str] {
+        Self::VARIANTS
+    }
+
+    pub fn cli_message() -> &'static str {
+        lazy_static! {
+            static ref MESSAGE: String = format!(
+                "Switch internal transaction structure/representation [default: {}]",
+                TransactionStructure::default()
+            );
+        };
+
+        &MESSAGE
+    }
+}
+
 /// Configuration for the block generator invalidator for replay.
 #[derive(Clone, Debug)]
 pub struct GeneratorConfig {
@@ -273,6 +298,7 @@ pub struct ValidatorConfig {
     pub banking_trace_dir_byte_limit: banking_trace::DirByteLimit,
     pub block_verification_method: BlockVerificationMethod,
     pub block_production_method: BlockProductionMethod,
+    pub transaction_struct: TransactionStructure,
     pub enable_block_production_forwarding: bool,
     pub generator_config: Option<GeneratorConfig>,
     pub use_snapshot_archives_at_startup: UseSnapshotArchivesAtStartup,
@@ -345,6 +371,7 @@ impl Default for ValidatorConfig {
             banking_trace_dir_byte_limit: 0,
             block_verification_method: BlockVerificationMethod::default(),
             block_production_method: BlockProductionMethod::default(),
+            transaction_struct: TransactionStructure::default(),
             enable_block_production_forwarding: false,
             generator_config: None,
             use_snapshot_archives_at_startup: UseSnapshotArchivesAtStartup::default(),
@@ -869,8 +896,8 @@ impl Validator {
             config.accounts_db_test_hash_calculation,
         );
         info!(
-            "Using: block-verification-method: {}, block-production-method: {}",
-            config.block_verification_method, config.block_production_method
+            "Using: block-verification-method: {}, block-production-method: {}, transaction-structure: {}",
+            config.block_verification_method, config.block_production_method, config.transaction_struct
         );
 
         let (replay_vote_sender, replay_vote_receiver) = unbounded();
@@ -878,6 +905,28 @@ impl Validator {
         // block min prioritization fee cache should be readable by RPC, and writable by validator
         // (by both replay stage and banking stage)
         let prioritization_fee_cache = Arc::new(PrioritizationFeeCache::default());
+
+        let leader_schedule_cache = Arc::new(leader_schedule_cache);
+        let startup_verification_complete;
+        let (poh_recorder, entry_receiver, record_receiver) = {
+            let bank = &bank_forks.read().unwrap().working_bank();
+            startup_verification_complete = Arc::clone(bank.get_startup_verification_complete());
+            PohRecorder::new_with_clear_signal(
+                bank.tick_height(),
+                bank.last_blockhash(),
+                bank.clone(),
+                None,
+                bank.ticks_per_slot(),
+                config.delay_leader_block_for_pending_fork,
+                blockstore.clone(),
+                blockstore.get_new_shred_signal(0),
+                &leader_schedule_cache,
+                &genesis_config.poh_config,
+                Some(poh_timing_point_sender),
+                exit.clone(),
+            )
+        };
+        let poh_recorder = Arc::new(RwLock::new(poh_recorder));
 
         match &config.block_verification_method {
             BlockVerificationMethod::BlockstoreProcessor => {
@@ -904,7 +953,6 @@ impl Validator {
             }
         }
 
-        let leader_schedule_cache = Arc::new(leader_schedule_cache);
         let entry_notification_sender = entry_notifier_service
             .as_ref()
             .map(|service| service.sender());
@@ -978,27 +1026,6 @@ impl Validator {
         ));
 
         let max_slots = Arc::new(MaxSlots::default());
-
-        let startup_verification_complete;
-        let (poh_recorder, entry_receiver, record_receiver) = {
-            let bank = &bank_forks.read().unwrap().working_bank();
-            startup_verification_complete = Arc::clone(bank.get_startup_verification_complete());
-            PohRecorder::new_with_clear_signal(
-                bank.tick_height(),
-                bank.last_blockhash(),
-                bank.clone(),
-                None,
-                bank.ticks_per_slot(),
-                config.delay_leader_block_for_pending_fork,
-                blockstore.clone(),
-                blockstore.get_new_shred_signal(0),
-                &leader_schedule_cache,
-                &genesis_config.poh_config,
-                Some(poh_timing_point_sender),
-                exit.clone(),
-            )
-        };
-        let poh_recorder = Arc::new(RwLock::new(poh_recorder));
 
         let staked_nodes = Arc::new(RwLock::new(StakedNodes::default()));
 
@@ -1524,6 +1551,7 @@ impl Validator {
             tpu_max_connections_per_ipaddr_per_minute,
             &prioritization_fee_cache,
             config.block_production_method.clone(),
+            config.transaction_struct.clone(),
             config.enable_block_production_forwarding,
             config.generator_config.clone(),
         );
@@ -1892,7 +1920,7 @@ fn load_genesis(
     // grows too large
     let leader_schedule_slot_offset = genesis_config.epoch_schedule.leader_schedule_slot_offset;
     let slots_per_epoch = genesis_config.epoch_schedule.slots_per_epoch;
-    let leader_epoch_offset = (leader_schedule_slot_offset + slots_per_epoch - 1) / slots_per_epoch;
+    let leader_epoch_offset = leader_schedule_slot_offset.div_ceil(slots_per_epoch);
     assert!(leader_epoch_offset <= MAX_LEADER_SCHEDULE_EPOCH_OFFSET);
 
     let genesis_hash = genesis_config.hash();

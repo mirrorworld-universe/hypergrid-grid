@@ -1,14 +1,17 @@
 #![cfg(feature = "dev-context-only-utils")]
 use {
     crate::{
-        banking_stage::{BankingStage, LikeClusterInfo},
-        banking_trace::{
-            BankingPacketBatch, BankingTracer, ChannelLabel, Channels, TimedTracedEvent,
-            TracedEvent, TracedSender, TracerThread, BANKING_TRACE_DIR_DEFAULT_BYTE_LIMIT,
-            BASENAME,
+        banking_stage::{
+            update_bank_forks_and_poh_recorder_for_new_tpu_bank, BankingStage, LikeClusterInfo,
         },
-        validator::BlockProductionMethod,
+        banking_trace::{
+            BankingTracer, ChannelLabel, Channels, TimedTracedEvent, TracedEvent, TracedSender,
+            TracerThread, BANKING_TRACE_DIR_DEFAULT_BYTE_LIMIT, BASENAME,
+        },
+        validator::{BlockProductionMethod, TransactionStructure},
     },
+    agave_banking_stage_ingress_types::BankingPacketBatch,
+    assert_matches::assert_matches,
     bincode::deserialize_from,
     crossbeam_channel::{unbounded, Sender},
     itertools::Itertools,
@@ -16,7 +19,7 @@ use {
     solana_client::connection_cache::ConnectionCache,
     solana_gossip::{
         cluster_info::{ClusterInfo, Node},
-        contact_info::ContactInfo,
+        contact_info::ContactInfoQuery,
     },
     solana_ledger::{
         blockstore::{Blockstore, PurgeType},
@@ -245,10 +248,7 @@ impl LikeClusterInfo for Arc<DummyClusterInfo> {
         *self.id.read().unwrap()
     }
 
-    fn lookup_contact_info<F, Y>(&self, _id: &Pubkey, _map: F) -> Option<Y>
-    where
-        F: FnOnce(&ContactInfo) -> Y,
-    {
+    fn lookup_contact_info<R>(&self, _: &Pubkey, _: impl ContactInfoQuery<R>) -> Option<R> {
         None
     }
 }
@@ -450,6 +450,9 @@ impl SimulatorLoop {
                 info!("Bank::new_from_parent()!");
 
                 logger.log_jitter(&bank);
+                if let Some((result, _execute_timings)) = bank.wait_for_completed_scheduler() {
+                    assert_matches!(result, Ok(()));
+                }
                 bank.freeze();
                 let new_slot = if bank.slot() == self.parent_slot {
                     info!("initial leader block!");
@@ -484,16 +487,17 @@ impl SimulatorLoop {
                     logger.log_frozen_bank_cost(&bank);
                 }
                 self.retransmit_slots_sender.send(bank.slot()).unwrap();
-                self.bank_forks.write().unwrap().insert(new_bank);
+                update_bank_forks_and_poh_recorder_for_new_tpu_bank(
+                    &self.bank_forks,
+                    &self.poh_recorder,
+                    new_bank,
+                    false,
+                );
                 bank = self
                     .bank_forks
                     .read()
                     .unwrap()
                     .working_bank_with_scheduler();
-                self.poh_recorder
-                    .write()
-                    .unwrap()
-                    .set_bank(bank.clone_with_scheduler(), false);
             } else {
                 logger.log_ongoing_bank_cost(&bank);
             }
@@ -672,6 +676,7 @@ impl BankingSimulator {
         bank_forks: Arc<RwLock<BankForks>>,
         blockstore: Arc<Blockstore>,
         block_production_method: BlockProductionMethod,
+        transaction_struct: TransactionStructure,
     ) -> (SenderLoop, SimulatorLoop, SimulatorThreads) {
         let parent_slot = self.parent_slot().unwrap();
         let mut packet_batches_by_time = self.banking_trace_events.packet_batches_by_time;
@@ -803,6 +808,7 @@ impl BankingSimulator {
         let prioritization_fee_cache = &Arc::new(PrioritizationFeeCache::new(0u64));
         let banking_stage = BankingStage::new_num_threads(
             block_production_method.clone(),
+            transaction_struct.clone(),
             &cluster_info,
             &poh_recorder,
             non_vote_receiver,
@@ -889,12 +895,14 @@ impl BankingSimulator {
         bank_forks: Arc<RwLock<BankForks>>,
         blockstore: Arc<Blockstore>,
         block_production_method: BlockProductionMethod,
+        transaction_struct: TransactionStructure,
     ) -> Result<(), SimulateError> {
         let (sender_loop, simulator_loop, simulator_threads) = self.prepare_simulation(
             genesis_config,
             bank_forks,
             blockstore,
             block_production_method,
+            transaction_struct,
         );
 
         sender_loop.log_starting();

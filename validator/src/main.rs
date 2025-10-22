@@ -35,8 +35,9 @@ use {
         system_monitor_service::SystemMonitorService,
         tpu::DEFAULT_TPU_COALESCE,
         validator::{
-            is_snapshot_config_valid, BlockProductionMethod, BlockVerificationMethod, Validator,
-            ValidatorConfig, ValidatorError, ValidatorStartProgress, ValidatorTpuConfig,
+            is_snapshot_config_valid, BlockProductionMethod, BlockVerificationMethod,
+            TransactionStructure, Validator, ValidatorConfig, ValidatorError,
+            ValidatorStartProgress, ValidatorTpuConfig,
         },
     },
     solana_gossip::{
@@ -66,7 +67,7 @@ use {
         snapshot_utils::{self, ArchiveFormat, SnapshotVersion},
     },
     solana_sdk::{
-        clock::{Slot, DEFAULT_S_PER_SLOT},
+        clock::{Slot, DEFAULT_SLOTS_PER_EPOCH, DEFAULT_S_PER_SLOT},
         commitment_config::CommitmentConfig,
         hash::Hash,
         pubkey::Pubkey,
@@ -1821,6 +1822,18 @@ pub fn main() {
         },
     );
 
+    // It is unlikely that a full snapshot interval greater than an epoch is a good idea.
+    // Minimally we should warn the user in case this was a mistake.
+    if full_snapshot_archive_interval_slots > DEFAULT_SLOTS_PER_EPOCH
+        && full_snapshot_archive_interval_slots != DISABLED_SNAPSHOT_ARCHIVE_INTERVAL
+    {
+        warn!(
+            "The full snapshot interval is excessively large: {}! This will negatively \
+            impact the background cleanup tasks in accounts-db. Consider a smaller value.",
+            full_snapshot_archive_interval_slots,
+        );
+    }
+
     if !is_snapshot_config_valid(
         &validator_config.snapshot_config,
         validator_config.accounts_hash_interval_slots,
@@ -1846,6 +1859,12 @@ pub fn main() {
         matches, // comment to align formatting...
         "block_production_method",
         BlockProductionMethod
+    )
+    .unwrap_or_default();
+    validator_config.transaction_struct = value_t!(
+        matches, // comment to align formatting...
+        "transaction_struct",
+        TransactionStructure
     )
     .unwrap_or_default();
     validator_config.enable_block_production_forwarding = staked_nodes_overrides_path.is_some();

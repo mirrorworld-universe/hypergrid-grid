@@ -521,7 +521,7 @@ struct ItemLocation<'a> {
     pointer: SlotGroupPointer,
 }
 
-impl<'a> AccountsHasher<'a> {
+impl AccountsHasher<'_> {
     pub fn calculate_hash(hashes: Vec<Vec<Hash>>) -> (Hash, usize) {
         let cumulative_offsets = CumulativeOffsets::from_raw(&hashes);
 
@@ -1398,7 +1398,7 @@ mod tests {
         static ref ACTIVE_STATS: ActiveStats = ActiveStats::default();
     }
 
-    impl<'a> AccountsHasher<'a> {
+    impl AccountsHasher<'_> {
         fn new(dir_for_temp_cache_files: PathBuf) -> Self {
             Self {
                 zero_lamport_accounts: ZeroLamportAccounts::Excluded,

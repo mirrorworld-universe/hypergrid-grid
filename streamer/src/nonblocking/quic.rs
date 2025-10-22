@@ -25,7 +25,7 @@ use {
     solana_keypair::Keypair,
     solana_measure::measure::Measure,
     solana_packet::{Meta, PACKET_DATA_SIZE},
-    solana_perf::packet::{PacketBatch, PACKETS_PER_BATCH},
+    solana_perf::packet::{PacketBatch, PacketBatchRecycler, PACKETS_PER_BATCH},
     solana_pubkey::Pubkey,
     solana_quic_definitions::{
         QUIC_CONNECTION_HANDSHAKE_TIMEOUT, QUIC_MAX_STAKED_CONCURRENT_STREAMS,
@@ -230,7 +230,6 @@ pub fn spawn_server_multi(
 /// litter the code with open connection tracking. This is added into the
 /// connection table as part of the ConnectionEntry. The reference is auto
 /// reduced when it is dropped.
-
 struct ClientConnectionTracker {
     stats: Arc<StreamerStats>,
 }
@@ -889,10 +888,12 @@ async fn packet_batch_sender(
     coalesce: Duration,
 ) {
     trace!("enter packet_batch_sender");
+    let recycler = PacketBatchRecycler::default();
     let mut batch_start_time = Instant::now();
     loop {
         let mut packet_perf_measure: Vec<([u8; 64], Instant)> = Vec::default();
-        let mut packet_batch = PacketBatch::with_capacity(PACKETS_PER_BATCH);
+        let mut packet_batch =
+            PacketBatch::new_with_recycler(&recycler, PACKETS_PER_BATCH, "quic_packet_coalescer");
         let mut total_bytes: usize = 0;
 
         stats
@@ -1166,6 +1167,8 @@ async fn handle_connection(
                         CONNECTION_CLOSE_CODE_INVALID_STREAM.into(),
                         CONNECTION_CLOSE_REASON_INVALID_STREAM,
                     );
+                    stats.total_streams.fetch_sub(1, Ordering::Relaxed);
+                    stream_load_ema.update_ema_if_needed();
                     break 'conn;
                 }
             }
@@ -1503,7 +1506,7 @@ struct EndpointAccept<'a> {
     accept: Accept<'a>,
 }
 
-impl<'a> Future for EndpointAccept<'a> {
+impl Future for EndpointAccept<'_> {
     type Output = (Option<quinn::Incoming>, usize);
 
     fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context) -> Poll<Self::Output> {

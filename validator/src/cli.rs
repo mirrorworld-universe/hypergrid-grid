@@ -21,7 +21,7 @@ use {
     },
     solana_core::{
         banking_trace::{DirByteLimit, BANKING_TRACE_DIR_DEFAULT_BYTE_LIMIT},
-        validator::{BlockProductionMethod, BlockVerificationMethod},
+        validator::{BlockProductionMethod, BlockVerificationMethod, TransactionStructure},
     },
     solana_faucet::faucet::{self, FAUCET_PORT},
     solana_ledger::use_snapshot_archives_at_startup,
@@ -1600,6 +1600,14 @@ pub fn app<'a>(version: &'a str, default_args: &'a DefaultArgs) -> App<'a, 'a> {
                 .help(BlockProductionMethod::cli_message()),
         )
         .arg(
+            Arg::with_name("transaction_struct")
+                .long("transaction-structure")
+                .value_name("STRUCT")
+                .takes_value(true)
+                .possible_values(TransactionStructure::cli_names())
+                .help(TransactionStructure::cli_message()),
+        )
+        .arg(
             Arg::with_name("unified_scheduler_handler_threads")
                 .long("unified-scheduler-handler-threads")
                 .value_name("COUNT")
@@ -2451,9 +2459,8 @@ fn hash_validator(hash: String) -> Result<(), String> {
 }
 
 /// Test validator
-
 pub fn test_app<'a>(version: &'a str, default_args: &'a DefaultTestArgs) -> App<'a, 'a> {
-    return App::new("solana-test-validator")
+    App::new("solana-test-validator")
         .about("Test Validator")
         .version(version)
         .arg({
@@ -2904,7 +2911,7 @@ pub fn test_app<'a>(version: &'a str, default_args: &'a DefaultTestArgs) -> App<
                      argument in the genesis configuration. If the ledger \
                      already exists then this parameter is silently ignored",
                 ),
-        );
+        )
 }
 
 pub struct DefaultTestArgs {
