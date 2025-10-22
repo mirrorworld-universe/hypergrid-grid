@@ -3617,6 +3617,10 @@ fn test_bank_hash_internal_state_verify(is_accounts_lt_hash_enabled: bool) {
                 .accounts
                 .remove(&feature_set::accounts_lt_hash::id())
                 .unwrap();
+            genesis_config
+                .accounts
+                .remove(&feature_set::remove_accounts_delta_hash::id())
+                .unwrap();
         }
         let (bank0, bank_forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
         assert_eq!(
@@ -13591,11 +13595,22 @@ fn test_bank_epoch_stakes() {
     }
 }
 
-#[test]
-fn test_rehash_good() {
+/// Ensure rehash() does *not* change the bank hash if accounts are unmodified
+#[test_case(true; "with accounts delta hash")]
+#[test_case(false; "without accounts delta hash")]
+fn test_rehash_accounts_unmodified(has_accounts_delta_hash: bool) {
     let ten_sol = 10 * LAMPORTS_PER_SOL;
-    let (genesis_config, _mint) = create_genesis_config(ten_sol);
-    let bank = Bank::new_for_tests(&genesis_config);
+    let mut genesis_config_info = genesis_utils::create_genesis_config(ten_sol);
+    if has_accounts_delta_hash {
+        // Keep the accounts delta hash by removing the 'remove_accounts_delta_hash'
+        // feature account from genesis.
+        genesis_config_info
+            .genesis_config
+            .accounts
+            .remove(&feature_set::remove_accounts_delta_hash::id())
+            .unwrap();
+    }
+    let bank = Bank::new_for_tests(&genesis_config_info.genesis_config);
 
     let lamports = 123_456_789;
     let account = AccountSharedData::new(lamports, 0, &Pubkey::default());
@@ -13612,12 +13627,20 @@ fn test_rehash_good() {
     assert_eq!(post_bank_hash, prev_bank_hash);
 }
 
+/// Ensure rehash() *does* change the bank hash if accounts are modified
 #[test]
 #[should_panic(expected = "rehashing is not allowed to change the account state")]
-fn test_rehash_bad() {
+fn test_rehash_accounts_modified() {
     let ten_sol = 10 * LAMPORTS_PER_SOL;
-    let (genesis_config, _mint) = create_genesis_config(ten_sol);
-    let bank = Bank::new_for_tests(&genesis_config);
+    let mut genesis_config_info = genesis_utils::create_genesis_config(ten_sol);
+    // Keep the accounts delta hash by removing the 'remove_accounts_delta_hash'
+    // feature account from genesis.
+    genesis_config_info
+        .genesis_config
+        .accounts
+        .remove(&feature_set::remove_accounts_delta_hash::id())
+        .unwrap();
+    let bank = Bank::new_for_tests(&genesis_config_info.genesis_config);
 
     let mut account = AccountSharedData::new(ten_sol, 0, &Pubkey::default());
     let pubkey = Pubkey::new_unique();
@@ -13634,61 +13657,4 @@ fn test_rehash_bad() {
 
     // let the show begin
     bank.rehash();
-}
-
-/// Test that when a bank freezes, it populate `uncleaned_pubkeys` for the slot
-/// to clean. And after clean, it will remove the slot from `uncleaned_pubkeys`.
-#[test]
-fn test_populate_uncleaned_slot_for_bank() {
-    let ten_sol = 10 * LAMPORTS_PER_SOL;
-    let bank = create_simple_test_bank(100);
-    let account = AccountSharedData::new(ten_sol, 0, &Pubkey::default());
-    let pubkey = Pubkey::new_unique();
-    bank.store_account_and_update_capitalization(&pubkey, &account);
-    bank.freeze();
-
-    assert_eq!(
-        bank.rc
-            .accounts
-            .accounts_db
-            .get_len_of_slots_with_uncleaned_pubkeys(),
-        1
-    );
-
-    bank.clean_accounts();
-    assert_eq!(
-        bank.rc
-            .accounts
-            .accounts_db
-            .get_len_of_slots_with_uncleaned_pubkeys(),
-        0
-    );
-}
-
-/// This test is similar to `test_populate_uncleaned_slot_for_bank`, but it
-/// tests when there is no accounts in the bank. In theory, we should optimize
-/// and not populate the slot to clean. But the current code didn't check if
-/// there are accounts in the bank, so it will populate the slot to clean even
-/// it is empty. This test is to make sure the behavior is consistent.
-#[test]
-fn test_populate_uncleaned_slot_for_bank_with_empty_accounts() {
-    let bank = create_simple_test_bank(100);
-    bank.freeze();
-
-    assert_eq!(
-        bank.rc
-            .accounts
-            .accounts_db
-            .get_len_of_slots_with_uncleaned_pubkeys(),
-        1
-    );
-
-    bank.clean_accounts();
-    assert_eq!(
-        bank.rc
-            .accounts
-            .accounts_db
-            .get_len_of_slots_with_uncleaned_pubkeys(),
-        0
-    );
 }

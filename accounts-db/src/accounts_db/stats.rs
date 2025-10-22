@@ -1,11 +1,5 @@
 use {
-    crate::{
-        accounts_index::AccountsIndexRootsStats,
-        append_vec::{
-            APPEND_VEC_MMAPPED_FILES_DIRTY, APPEND_VEC_MMAPPED_FILES_OPEN,
-            APPEND_VEC_OPEN_AS_FILE_IO,
-        },
-    },
+    crate::{accounts_index::AccountsIndexRootsStats, append_vec::APPEND_VEC_STATS},
     solana_sdk::timing::AtomicInterval,
     std::{
         num::Saturating,
@@ -34,7 +28,6 @@ pub struct AccountsStats {
     pub store_get_slot_store: AtomicU64,
     pub store_find_existing: AtomicU64,
     pub dropped_stores: AtomicU64,
-    pub store_uncleaned_update: AtomicU64,
     pub handle_dead_keys_us: AtomicU64,
     pub purge_exact_us: AtomicU64,
     pub purge_exact_count: AtomicU64,
@@ -244,17 +237,17 @@ impl LatestAccountsIndexRootsStats {
             ),
             (
                 "append_vecs_open",
-                APPEND_VEC_MMAPPED_FILES_OPEN.load(Ordering::Relaxed),
+                APPEND_VEC_STATS.mmap_files_open.load(Ordering::Relaxed),
                 i64
             ),
             (
                 "append_vecs_dirty",
-                APPEND_VEC_MMAPPED_FILES_DIRTY.load(Ordering::Relaxed),
+                APPEND_VEC_STATS.mmap_files_dirty.load(Ordering::Relaxed),
                 i64
             ),
             (
                 "append_vecs_open_as_file_io",
-                APPEND_VEC_OPEN_AS_FILE_IO.load(Ordering::Relaxed),
+                APPEND_VEC_STATS.open_as_file_io.load(Ordering::Relaxed),
                 i64
             )
         );

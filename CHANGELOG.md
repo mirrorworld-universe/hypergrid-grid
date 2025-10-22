@@ -8,12 +8,15 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 and follows a [Backwards Compatibility Policy](https://docs.solanalabs.com/backwards-compatibility)
 
 Release channels have their own copy of this changelog:
-* [edge - v2.2](#edge-channel)
-* [beta - v2.1](https://github.com/anza-xyz/agave/blob/v2.1/CHANGELOG.md)
-* [stable - v2.0](https://github.com/anza-xyz/agave/blob/v2.0/CHANGELOG.md)
+* [edge - v2.3](#edge-channel)
+* [beta - v2.2](https://github.com/anza-xyz/agave/blob/v2.2/CHANGELOG.md)
+* [stable - v2.1](https://github.com/anza-xyz/agave/blob/v2.1/CHANGELOG.md)
 
 <a name="edge-channel"></a>
-## 2.2.0 - Unreleased
+## 2.3.0 - Unreleased
+
+
+## 2.2.0
 * Breaking:
   * Blockstore Index column format change
     * The Blockstore Index column format has been updated. The column format written in v2.2 is compatible with v2.1, but incompatible with v2.0 and older.
@@ -23,6 +26,7 @@ Release channels have their own copy of this changelog:
   * CLI:
     * Add global `--skip-preflight` option for skipping preflight checks on all transactions sent through RPC. This flag, along with `--use-rpc`, can improve success rate with program deployments using the public RPC nodes.
     * Add new command `solana feature revoke` for revoking pending feature activations. When a feature is activated, `solana feature revoke <feature-keypair> <cluster>` can be used to deallocate and reassign the account to the System program, undoing the operation. This can only be done before the feature becomes active.
+    * Add new variant to `--block-production-method` for `central-scheduler-greedy`. This is a simplified scheduler that has much better performance than the more strict `central-scheduler` variant.
   * Unhide `--accounts-db-access-storages-method` for agave-validator and agave-ledger-tool and change default to `file`
   * Remove tracer stats from banking-trace. `banking-trace` directory should be cleared when restarting on v2.2 for first time. It will not break if not cleared, but the file will be a mix of new/old format. (#4043)
   * Add `--snapshot-zstd-compression-level` to set the compression level when archiving snapshots with zstd.
