@@ -17,13 +17,15 @@ use {
     },
     solana_keypair::Keypair,
     solana_measure::measure::Measure,
-    solana_net_utils::VALIDATOR_PORT_RANGE,
+    solana_net_utils::{SocketConfig, VALIDATOR_PORT_RANGE},
     solana_quic_definitions::{
         QUIC_CONNECTION_HANDSHAKE_TIMEOUT, QUIC_KEEP_ALIVE, QUIC_MAX_TIMEOUT,
     },
     solana_rpc_client_api::client_error::ErrorKind as ClientErrorKind,
     solana_streamer::nonblocking::quic::ALPN_TPU_PROTOCOL_ID,
-    solana_tls_utils::{new_dummy_x509_certificate, QuicClientCertificate, SkipServerVerification},
+    solana_tls_utils::{
+        new_dummy_x509_certificate, tls_client_config_builder, QuicClientCertificate,
+    },
     solana_transaction_error::TransportResult,
     std::{
         net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
@@ -75,9 +77,11 @@ impl QuicLazyInitializedEndpoint {
         let mut endpoint = if let Some(endpoint) = &self.client_endpoint {
             endpoint.clone()
         } else {
-            let client_socket = solana_net_utils::bind_in_range(
+            let config = SocketConfig::default();
+            let client_socket = solana_net_utils::bind_in_range_with_config(
                 IpAddr::V4(Ipv4Addr::UNSPECIFIED),
                 VALIDATOR_PORT_RANGE,
+                config,
             )
             .expect("QuicLazyInitializedEndpoint::create_endpoint bind_in_range")
             .1;
@@ -85,9 +89,7 @@ impl QuicLazyInitializedEndpoint {
             QuicNewConnection::create_endpoint(EndpointConfig::default(), client_socket)
         };
 
-        let mut crypto = rustls::ClientConfig::builder()
-            .dangerous()
-            .with_custom_certificate_verifier(SkipServerVerification::new())
+        let mut crypto = tls_client_config_builder()
             .with_client_auth_cert(
                 vec![self.client_certificate.certificate.clone()],
                 self.client_certificate.key.clone_key(),
