@@ -3518,7 +3518,7 @@ mod tests {
         let mut src_rewards = create_filled_type::<EpochRewards>(false);
         src_rewards.distribution_starting_block_height = 42;
         src_rewards.num_partitions = 2;
-        src_rewards.parent_blockhash = Hash::new(&[3; 32]);
+        src_rewards.parent_blockhash = Hash::new_from_array([3; 32]);
         src_rewards.total_points = 4;
         src_rewards.total_rewards = 100;
         src_rewards.distributed_rewards = 10;
@@ -4800,10 +4800,10 @@ mod tests {
         with_mock_invoke_context!(invoke_context, transaction_context, vec![]);
         invoke_context.environment_config = EnvironmentConfig::new(
             Hash::default(),
+            0,
             Some(expected_total_stake),
             None, // Vote accounts are not needed for this test.
             Arc::<FeatureSet>::default(),
-            0,
             &sysvar_cache,
         );
 
@@ -4854,10 +4854,10 @@ mod tests {
         with_mock_invoke_context!(invoke_context, transaction_context, vec![]);
         invoke_context.environment_config = EnvironmentConfig::new(
             Hash::default(),
+            0,
             None, // Total stake is not needed for this test.
             Some(&vote_accounts_map),
             Arc::<FeatureSet>::default(),
-            0,
             &sysvar_cache,
         );
 

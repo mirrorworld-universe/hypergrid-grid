@@ -1349,6 +1349,12 @@ pub fn main() {
         )
         .ok(),
         max_ancient_storages: value_t!(matches, "accounts_db_max_ancient_storages", usize).ok(),
+        hash_calculation_pubkey_bins: value_t!(
+            matches,
+            "accounts_db_hash_calculation_pubkey_bins",
+            usize
+        )
+        .ok(),
         exhaustively_verify_refcounts: matches.is_present("accounts_db_verify_refcounts"),
         create_ancient_storage,
         test_partitioned_epoch_rewards,
@@ -1374,9 +1380,10 @@ pub fn main() {
                 .collect(),
         )
     } else {
-        value_t_or_exit!(matches, "geyser_plugin_always_enabled", bool).then(Vec::new)
+        None
     };
-    let starting_with_geyser_plugins: bool = on_start_geyser_plugin_config_files.is_some();
+    let starting_with_geyser_plugins: bool = on_start_geyser_plugin_config_files.is_some()
+        || matches.is_present("geyser_plugin_always_enabled");
 
     let rpc_bigtable_config = if matches.is_present("enable_rpc_bigtable_ledger_storage")
         || matches.is_present("enable_bigtable_ledger_upload")
@@ -1489,6 +1496,7 @@ pub fn main() {
             skip_preflight_health_check: matches.is_present("skip_preflight_health_check"),
         },
         on_start_geyser_plugin_config_files,
+        geyser_plugin_always_enabled: matches.is_present("geyser_plugin_always_enabled"),
         rpc_addrs: value_t!(matches, "rpc_port", u16).ok().map(|rpc_port| {
             (
                 SocketAddr::new(rpc_bind_address, rpc_port),

@@ -877,6 +877,17 @@ pub mod lift_cpi_caller_restriction {
     solana_pubkey::declare_id!("HcW8ZjBezYYgvcbxNJwqv1t484Y2556qJsfNDWvJGZRH");
 }
 
+pub mod disable_account_loader_special_case {
+    solana_pubkey::declare_id!("EQUMpNFr7Nacb1sva56xn1aLfBxppEoSBH8RRVdkcD1x");
+}
+
+pub mod enable_secp256r1_precompile {
+    solana_pubkey::declare_id!("sr11RdZWgbHTHxSroPALe6zgaT5A1K9LcE4nfsZS4gi");
+}
+pub mod accounts_lt_hash {
+    solana_pubkey::declare_id!("LtHaSHHsUge7EWTPVrmpuexKz6uVHZXZL6cgJa7W7Zn");
+}
+
 lazy_static! {
     /// Map of feature identifiers to user-visible description
     pub static ref FEATURE_NAMES: HashMap<Pubkey, &'static str> = [
@@ -1091,6 +1102,9 @@ lazy_static! {
         (reenable_sbpf_v1_execution::id(), "Re-enables execution of SBPFv1 programs"),
         (remove_accounts_executable_flag_checks::id(), "Remove checks of accounts is_executable flag SIMD-0162"),
         (lift_cpi_caller_restriction::id(), "Lift the restriction in CPI that the caller must have the callee as an instruction account #2202"),
+        (disable_account_loader_special_case::id(), "Disable account loader special case #3513"),
+        (accounts_lt_hash::id(), "enables lattice-based accounts hash #3333"),
+        (enable_secp256r1_precompile::id(), "Enable secp256r1 precompile SIMD-0075"),
         /*************** ADD NEW FEATURES HERE ***************/
     ]
     .iter()
