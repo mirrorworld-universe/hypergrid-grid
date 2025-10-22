@@ -18,8 +18,8 @@ use {
         sysvar::epoch_schedule::EpochSchedule,
     },
     std::{
-        collections::HashSet,
         clone,
+        collections::HashSet,
         convert::TryInto,
         fs::File,
         io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},

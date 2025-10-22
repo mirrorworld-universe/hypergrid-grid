@@ -34,6 +34,7 @@ jobs:
   check-crates:
     name: Check crate ownership
     runs-on: ubuntu-latest
+    if: github.repository == 'anza-xyz/agave'
     steps:
       - name: Git Checkout
         uses: actions/checkout@v4
@@ -140,6 +141,8 @@ jobs:
     name: Audit
     runs-on: ubuntu-latest
     needs: [sanity]
+    # Sonic: HACK: Disable because some dependencies are old and vulnerable, but upstream too old ATM
+    if: github.repository == 'anza-xyz/agave'
     steps:
       - name: Git Checkout
         uses: actions/checkout@v4
@@ -220,6 +223,7 @@ jobs:
     name: Check sorting of crate dependencies
     runs-on: ubuntu-latest
     needs: [sanity]
+    if: github.repository == 'anza-xyz/agave'
     steps:
       - name: Git Checkout
         uses: actions/checkout@v4

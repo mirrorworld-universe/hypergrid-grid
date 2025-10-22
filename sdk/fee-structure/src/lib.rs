@@ -92,10 +92,13 @@ impl FeeStructure {
             .collect::<Vec<_>>();
 
         //Sonic: get fee multiplier from environment variable
-        let fee_multiplier = std::env::var("SONIC_FEE_MULTIPLIER").unwrap_or("10000".to_string());
-        // println!("Sonic: SONIC_FEE_MULTIPLIER: {}", fee_multiplier);
-        let fee_multiplier = fee_multiplier.parse().unwrap_or(10000);
-        // println!("Sonic: Fee multiplier: {}", fee_multiplier);
+        let mut fee_multiplier = 10_000;
+
+        if let Ok(env) = std::env::var("SONIC_FEE_MULTIPLIER") {
+            if let Ok(res) = env.parse() {
+                fee_multiplier = res;
+            }
+        }
 
         FeeStructure {
             lamports_per_signature: sol_to_lamports(sol_per_signature),
@@ -141,14 +144,15 @@ impl FeeStructure {
         include_loaded_account_data_size_in_fee: bool,
     ) -> u64 {
         #[allow(deprecated)]
-        let fee = self.calculate_fee_details(
-            message,
-            lamports_per_signature,
-            budget_limits,
-            include_loaded_account_data_size_in_fee,
-        )
-        .total_fee();
-        
+        let fee = self
+            .calculate_fee_details(
+                message,
+                lamports_per_signature,
+                budget_limits,
+                include_loaded_account_data_size_in_fee,
+            )
+            .total_fee();
+
         // Sonic: custom fee
         fee * (self.fee_multiplier as u64) / 10000
     }

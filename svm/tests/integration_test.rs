@@ -1,11 +1,12 @@
 #![cfg(test)]
 #![allow(clippy::arithmetic_side_effects)]
 
+// Sonic:
 use {
     crate::mock_bank::{
         create_custom_loader, deploy_program_with_upgrade_authority, program_address,
-        register_builtins, MockBankCallback, MockForkGraph, EXECUTION_EPOCH, EXECUTION_SLOT,
-        WALLCLOCK_TIME,
+        register_builtins, MockBankCallback, MockForkGraph, TransactionBatchProcessor,
+        EXECUTION_EPOCH, EXECUTION_SLOT, WALLCLOCK_TIME,
     },
     solana_sdk::{
         account::{AccountSharedData, ReadableAccount, WritableAccount},
@@ -41,8 +42,6 @@ use {
     std::collections::HashMap,
     test_case::test_case,
 };
-// Sonic:
-use crate::mock_bank::TransactionBatchProcessor;
 
 // This module contains the implementation of TransactionProcessingCallback
 mod mock_bank;
