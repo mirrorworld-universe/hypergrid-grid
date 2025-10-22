@@ -5,7 +5,6 @@ use {
         transaction_meta::{StaticMeta, TransactionMeta},
         transaction_with_meta::TransactionWithMeta,
     },
-    core::borrow::Borrow,
     solana_pubkey::Pubkey,
     solana_sdk::{
         message::{AddressLoader, TransactionSignatureDetails},
@@ -16,7 +15,7 @@ use {
         },
     },
     solana_svm_transaction::instruction::SVMInstruction,
-    std::collections::HashSet,
+    std::{borrow::Cow, collections::HashSet},
 };
 
 impl RuntimeTransaction<SanitizedVersionedTransaction> {
@@ -48,6 +47,7 @@ impl RuntimeTransaction<SanitizedVersionedTransaction> {
             ),
             precompile_signature_details.num_secp256k1_instruction_signatures,
             precompile_signature_details.num_ed25519_instruction_signatures,
+            precompile_signature_details.num_secp256r1_instruction_signatures,
         );
         let compute_budget_instruction_details = ComputeBudgetInstructionDetails::try_from(
             sanitized_versioned_tx
@@ -125,8 +125,8 @@ impl RuntimeTransaction<SanitizedTransaction> {
 
 impl TransactionWithMeta for RuntimeTransaction<SanitizedTransaction> {
     #[inline]
-    fn as_sanitized_transaction(&self) -> impl Borrow<SanitizedTransaction> {
-        &self.transaction
+    fn as_sanitized_transaction(&self) -> Cow<SanitizedTransaction> {
+        Cow::Borrowed(self)
     }
 
     #[inline]
@@ -160,7 +160,6 @@ mod tests {
         },
         solana_sdk::{
             compute_budget::ComputeBudgetInstruction,
-            feature_set::FeatureSet,
             hash::Hash,
             instruction::Instruction,
             message::Message,
@@ -331,7 +330,8 @@ mod tests {
         assert_eq!(0, signature_details.num_ed25519_instruction_signatures());
 
         let compute_budget_limits = runtime_transaction_static
-            .compute_budget_limits(&FeatureSet::default())
+            .compute_budget_instruction_details()
+            .sanitize_and_convert_to_compute_budget_limits()
             .unwrap();
         assert_eq!(compute_unit_limit, compute_budget_limits.compute_unit_limit);
         assert_eq!(compute_unit_price, compute_budget_limits.compute_unit_price);

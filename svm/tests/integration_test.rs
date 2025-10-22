@@ -4,8 +4,8 @@
 use {
     crate::mock_bank::{
         create_custom_loader, deploy_program_with_upgrade_authority, program_address,
-        program_data_size, register_builtins, MockBankCallback, MockForkGraph, EXECUTION_EPOCH,
-        EXECUTION_SLOT, WALLCLOCK_TIME, TransactionBatchProcessor
+        program_data_size, register_builtins, MockBankCallback, MockForkGraph,
+        TransactionBatchProcessor, EXECUTION_EPOCH, EXECUTION_SLOT, WALLCLOCK_TIME,
     },
     solana_sdk::{
         account::{AccountSharedData, ReadableAccount, WritableAccount},
