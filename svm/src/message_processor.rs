@@ -272,8 +272,8 @@ mod tests {
         let environment_config = EnvironmentConfig::new(
             Hash::default(),
             0,
-            None,
-            None,
+            0,
+            &|_| 0,
             Arc::new(FeatureSet::all_enabled()),
             &sysvar_cache,
         );
@@ -327,8 +327,8 @@ mod tests {
         let environment_config = EnvironmentConfig::new(
             Hash::default(),
             0,
-            None,
-            None,
+            0,
+            &|_| 0,
             Arc::new(FeatureSet::all_enabled()),
             &sysvar_cache,
         );
@@ -372,8 +372,8 @@ mod tests {
         let environment_config = EnvironmentConfig::new(
             Hash::default(),
             0,
-            None,
-            None,
+            0,
+            &|_| 0,
             Arc::new(FeatureSet::all_enabled()),
             &sysvar_cache,
         );
@@ -508,8 +508,8 @@ mod tests {
         let environment_config = EnvironmentConfig::new(
             Hash::default(),
             0,
-            None,
-            None,
+            0,
+            &|_| 0,
             Arc::new(FeatureSet::all_enabled()),
             &sysvar_cache,
         );
@@ -548,8 +548,8 @@ mod tests {
         let environment_config = EnvironmentConfig::new(
             Hash::default(),
             0,
-            None,
-            None,
+            0,
+            &|_| 0,
             Arc::new(FeatureSet::all_enabled()),
             &sysvar_cache,
         );
@@ -585,8 +585,8 @@ mod tests {
         let environment_config = EnvironmentConfig::new(
             Hash::default(),
             0,
-            None,
-            None,
+            0,
+            &|_| 0,
             Arc::new(FeatureSet::all_enabled()),
             &sysvar_cache,
         );
@@ -683,8 +683,8 @@ mod tests {
         let environment_config = EnvironmentConfig::new(
             Hash::default(),
             0,
-            None,
-            None,
+            0,
+            &|_| 0,
             Arc::new(FeatureSet::all_enabled()),
             &sysvar_cache,
         );
