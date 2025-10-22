@@ -1,6 +1,6 @@
 use {
     crate::{
-        mock_bank::{MockBankCallback, MockForkGraph},
+        mock_bank::{MockBankCallback, MockForkGraph, TransactionBatchProcessor},
         transaction_builder::SanitizedTransactionBuilder,
     },
     lazy_static::lazy_static,
@@ -38,8 +38,7 @@ use {
         transaction_processing_callback::TransactionProcessingCallback,
         transaction_processing_result::TransactionProcessingResultExtensions,
         transaction_processor::{
-            ExecutionRecordingConfig, TransactionBatchProcessor, TransactionProcessingConfig,
-            TransactionProcessingEnvironment,
+            ExecutionRecordingConfig, TransactionProcessingConfig, TransactionProcessingEnvironment,
         },
     },
     solana_svm_conformance::proto::{InstrEffects, InstrFixture},
@@ -244,7 +243,13 @@ fn run_fixture(fixture: InstrFixture, filename: OsString, execute_as_instr: bool
         create_program_runtime_environment_v1(&feature_set, &compute_budget, false, false).unwrap();
 
     mock_bank.override_feature_set(feature_set);
-    let batch_processor = TransactionBatchProcessor::<MockForkGraph>::new_uninitialized(42, 2);
+    let batch_processor = TransactionBatchProcessor::<MockForkGraph>::new_uninitialized(
+        42,
+        2,
+        // Sonic:
+        Default::default(),
+        Default::default(),
+    );
 
     let fork_graph = Arc::new(RwLock::new(MockForkGraph {}));
     {

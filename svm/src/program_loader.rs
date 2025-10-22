@@ -270,7 +270,6 @@ pub(crate) fn get_program_modification_slot<CB: TransactionProcessingCallback>(
 mod tests {
     use {
         super::*,
-        crate::transaction_processor::TransactionBatchProcessor,
         solana_program_runtime::{
             loaded_programs::{BlockRelation, ForkGraph, ProgramRuntimeEnvironments},
             solana_rbpf::program::BuiltinProgram,
@@ -323,6 +322,27 @@ mod tests {
                 .insert(*program_id, account_data);
         }
     }
+
+    // Sonic:
+    #[derive(Default)]
+    struct MockAccountsDb(Arc<sonic_hypergrid::remote_loader::RemoteAccountLoader>);
+
+    // Sonic:
+    impl crate::transaction_processor::AccountsDb for MockAccountsDb {
+        fn default_for_testing() -> Self {
+            Default::default()
+        }
+        fn is_account_in_index(&self, _addr: Pubkey) -> bool {
+            false
+        }
+        fn remote_loader(&self) -> Arc<sonic_hypergrid::remote_loader::RemoteAccountLoader> {
+            self.0.clone()
+        }
+    }
+
+    // Sonic:
+    type TransactionBatchProcessor<FG, A = MockAccountsDb> =
+        crate::transaction_processor::TransactionBatchProcessor<FG, A>;
 
     #[test]
     fn test_load_program_accounts_account_not_found() {
