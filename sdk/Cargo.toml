@@ -32,6 +32,7 @@ full = [
     "ed25519-dalek-bip32",
     "libsecp256k1",
     "sha3",
+    "solana-commitment-config",
     "digest",
     "solana-pubkey/rand",
     "dep:solana-precompile-error",
@@ -43,6 +44,7 @@ frozen-abi = [
     "dep:solana-frozen-abi",
     "dep:solana-frozen-abi-macro",
     "solana-feature-set/frozen-abi",
+    "solana-fee-structure/frozen-abi",
     "solana-account/frozen-abi",
     "solana-inflation/frozen-abi",
     "solana-program/frozen-abi",
@@ -91,9 +93,11 @@ sha3 = { workspace = true, optional = true }
 siphasher = { workspace = true }
 solana-account = { workspace = true, features = ["bincode"] }
 solana-bn254 = { workspace = true }
+solana-commitment-config = { workspace = true, optional = true, features = ["serde"] }
 solana-decode-error = { workspace = true }
 solana-derivation-path = { workspace = true }
 solana-feature-set = { workspace = true }
+solana-fee-structure = { workspace = true, features = ["serde"] }
 solana-frozen-abi = { workspace = true, optional = true, features = [
     "frozen-abi",
 ] }
@@ -119,6 +123,7 @@ solana-signature = { workspace = true, features = [
     "std",
     "verify",
 ], optional = true }
+solana-time-utils = { workspace = true }
 solana-transaction-error = { workspace = true, features = ["serde"], optional = true }
 thiserror = { workspace = true }
 

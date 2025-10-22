@@ -1,4 +1,6 @@
 //! Fee structures.
+#![cfg_attr(docsrs, feature(doc_auto_cfg))]
+#![cfg_attr(feature = "frozen-abi", feature(min_specialization))]
 
 #[cfg(not(target_os = "solana"))]
 use solana_program::message::SanitizedMessage;
@@ -33,7 +35,11 @@ pub struct FeeStructure {
     pub fee_multiplier: u32,
 }
 
-#[derive(Debug, Default, Clone, Copy, Eq, PartialEq, Deserialize, Serialize)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde_derive::Deserialize, serde_derive::Serialize)
+)]
+#[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
 pub struct FeeDetails {
     transaction_fee: u64,
     prioritization_fee: u64,
@@ -84,19 +90,6 @@ impl FeeDetails {
 pub const ACCOUNT_DATA_COST_PAGE_SIZE: u64 = 32_u64.saturating_mul(1024);
 
 impl FeeStructure {
-    pub fn zero_fees() -> Self {
-        Self {
-            lamports_per_signature: 0,
-            lamports_per_write_lock: 0,
-            compute_fee_bins: vec![FeeBin {
-                limit: u64::MAX,
-                fee: 0,
-            }],
-            // Sonic:
-            fee_multiplier: 0,
-        }
-    }
-
     pub fn new(
         sol_per_signature: f64,
         sol_per_write_lock: f64,

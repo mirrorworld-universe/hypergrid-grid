@@ -461,6 +461,8 @@ pub struct BankFieldsToDeserialize {
     pub(crate) accounts_data_len: u64,
     pub(crate) incremental_snapshot_persistence: Option<BankIncrementalSnapshotPersistence>,
     pub(crate) epoch_accounts_hash: Option<Hash>,
+    // When removing the accounts lt hash featurization code, also remove this Option wrapper
+    pub(crate) accounts_lt_hash: Option<AccountsLtHash>,
 }
 
 /// Bank's common fields shared by all supported snapshot versions for serialization.
@@ -504,6 +506,8 @@ pub struct BankFieldsToSerialize {
     pub is_delta: bool,
     pub accounts_data_len: u64,
     pub versioned_epoch_stakes: HashMap<u64, VersionedEpochStakes>,
+    // When removing the accounts lt hash featurization code, also remove this Option wrapper
+    pub accounts_lt_hash: Option<AccountsLtHash>,
 }
 
 // Can't derive PartialEq because RwLock doesn't implement PartialEq
@@ -663,6 +667,7 @@ impl BankFieldsToSerialize {
             is_delta: bool::default(),
             accounts_data_len: u64::default(),
             versioned_epoch_stakes: HashMap::default(),
+            accounts_lt_hash: Some(AccountsLtHash(LtHash([0x7E57; LtHash::NUM_ELEMENTS]))),
         }
     }
 }
@@ -1119,21 +1124,6 @@ impl Bank {
         bank.process_genesis_config(genesis_config);
         #[cfg(feature = "dev-context-only-utils")]
         bank.process_genesis_config(genesis_config, collector_id_for_tests, genesis_hash);
-
-        // Many tests (including local-cluster tests) rely on the fact
-        // that transaction fees are zero.
-        // This was previously handled by the `FeeRateGovernor`
-        // in the `genesis_config`, but that is no longer the case.
-        // However, for testing, we can set the fee structure to
-        // result in zero base fees for all transactions IF the
-        // lamports_per_signature is zero on the `FeeRateGovernor`.
-        if genesis_config
-            .fee_rate_governor
-            .target_lamports_per_signature
-            == 0
-        {
-            bank.fee_structure = FeeStructure::zero_fees();
-        }
 
         bank.finish_init(
             genesis_config,
@@ -1739,21 +1729,6 @@ impl Bank {
             block_id: RwLock::new(None),
         };
 
-        // Many tests (including local-cluster tests) rely on the fact
-        // that transaction fees are zero.
-        // This was previously handled by the `FeeRateGovernor`
-        // in the `genesis_config`, but that is no longer the case.
-        // However, for testing, we can set the fee structure to
-        // result in zero base fees for all transactions IF the
-        // lamports_per_signature is zero on the `FeeRateGovernor`.
-        if genesis_config
-            .fee_rate_governor
-            .target_lamports_per_signature
-            == 0
-        {
-            bank.fee_structure = FeeStructure::zero_fees();
-        }
-
         bank.transaction_processor = TransactionBatchProcessor::new_uninitialized(
             bank.slot,
             bank.epoch,
@@ -1777,16 +1752,30 @@ impl Bank {
             .fill_missing_sysvar_cache_entries(&bank);
         bank.rebuild_skipped_rewrites();
 
-        let calculate_accounts_lt_hash_duration = bank.is_accounts_lt_hash_enabled().then(|| {
-            let (_, duration) = meas_dur!({
-                *bank.accounts_lt_hash.get_mut().unwrap() = bank
-                    .rc
-                    .accounts
-                    .accounts_db
-                    .calculate_accounts_lt_hash_at_startup_from_index(&bank.ancestors, bank.slot());
+        let mut calculate_accounts_lt_hash_duration = None;
+        if bank.is_accounts_lt_hash_enabled() {
+            // Use the accounts lt hash from the snapshot, if present, otherwise calculate it.
+            // When there is a feature gate for the accounts lt hash, if the feature is enabled
+            // then it will be *required* that the snapshot contains an accounts lt hash.
+            let accounts_lt_hash = fields.accounts_lt_hash.unwrap_or_else(|| {
+                info!("Calculating the accounts lt hash...");
+                let (accounts_lt_hash, duration) = meas_dur!({
+                    thread_pool.install(|| {
+                        bank.rc
+                            .accounts
+                            .accounts_db
+                            .calculate_accounts_lt_hash_at_startup_from_index(
+                                &bank.ancestors,
+                                bank.slot(),
+                            )
+                    })
+                });
+                info!("Calculating the accounts lt hash... Done in {duration:?}");
+                calculate_accounts_lt_hash_duration = Some(duration);
+                accounts_lt_hash
             });
-            duration
-        });
+            *bank.accounts_lt_hash.get_mut().unwrap() = accounts_lt_hash;
+        }
 
         // Sanity assertions between bank snapshot and genesis config
         // Consider removing from serializable bank state
@@ -1876,6 +1865,9 @@ impl Bank {
             is_delta: self.is_delta.load(Relaxed),
             accounts_data_len: self.load_accounts_data_size(),
             versioned_epoch_stakes,
+            accounts_lt_hash: self
+                .is_accounts_lt_hash_enabled()
+                .then(|| self.accounts_lt_hash.lock().unwrap().clone()),
         }
     }
 
@@ -3220,14 +3212,17 @@ impl Bank {
         self.rent_collector.rent.minimum_balance(data_len).max(1)
     }
 
+    pub fn get_lamports_per_signature(&self) -> u64 {
+        self.fee_rate_governor.lamports_per_signature
+    }
+
+    pub fn get_lamports_per_signature_for_blockhash(&self, hash: &Hash) -> Option<u64> {
+        let blockhash_queue = self.blockhash_queue.read().unwrap();
+        blockhash_queue.get_lamports_per_signature(hash)
+    }
+
     pub fn get_fee_for_message(&self, message: &SanitizedMessage) -> Option<u64> {
-        // It used to be required to get the lamports_per_signature from the
-        // blockhash_queue, which had the added benefit of ensuring that the
-        // transaction or nonce is not expired.
-        // This is no longer strictly required, but RPC users may have relied
-        // on this behavior. So even though the value is not used, we still
-        // fetch it to keep behavior consistent.
-        let _lamports_per_signature = {
+        let lamports_per_signature = {
             let blockhash_queue = self.blockhash_queue.read().unwrap();
             blockhash_queue.get_lamports_per_signature(message.recent_blockhash())
         }
@@ -3238,7 +3233,7 @@ impl Bank {
                 },
             )
         })?;
-        Some(self.get_fee_for_message_with_lamports_per_signature(message))
+        Some(self.get_fee_for_message_with_lamports_per_signature(message, lamports_per_signature))
     }
 
     /// Returns true when startup accounts hash verification has completed or never had to run in background.
@@ -3267,6 +3262,7 @@ impl Bank {
     pub fn get_fee_for_message_with_lamports_per_signature(
         &self,
         message: &impl SVMMessage,
+        lamports_per_signature: u64,
     ) -> u64 {
         let fee_budget_limits = FeeBudgetLimits::from(
             process_compute_budget_instructions(message.program_instructions_iter())
@@ -3274,6 +3270,7 @@ impl Bank {
         );
         solana_fee::calculate_fee(
             message,
+            lamports_per_signature == 0,
             self.fee_structure().lamports_per_signature,
             fee_budget_limits.prioritization_fee,
             self.feature_set
@@ -5675,25 +5672,24 @@ impl Bank {
             .wait_for_complete();
 
         let slot = self.slot();
-        let verify_kind = if self
-            .rc
-            .accounts
-            .accounts_db
-            .is_experimental_accumulator_hash_enabled()
-        {
-            VerifyKind::Lattice
-        } else {
-            VerifyKind::Merkle
-        };
 
-        if verify_kind == VerifyKind::Lattice {
-            // Calculating the accounts lt hash from storages *requires* a duplicates_lt_hash.
-            // If it is None here, then we must use the index instead, which also means we
-            // cannot run in the background.
-            if duplicates_lt_hash.is_none() {
+        let verify_kind = match (
+            duplicates_lt_hash.is_some(),
+            self.rc
+                .accounts
+                .accounts_db
+                .is_experimental_accumulator_hash_enabled(),
+        ) {
+            (true, _) => VerifyKind::Lattice,
+            (false, false) => VerifyKind::Merkle,
+            (false, true) => {
+                // Calculating the accounts lt hash from storages *requires* a duplicates_lt_hash.
+                // If it is None here, then we must use the index instead, which also means we
+                // cannot run in the background.
                 config.run_in_background = false;
+                VerifyKind::Lattice
             }
-        }
+        };
 
         if config.require_rooted_bank && !accounts.accounts_db.accounts_index.is_alive_root(slot) {
             if let Some(parent) = self.parent() {
@@ -5734,6 +5730,10 @@ impl Bank {
             use_bg_thread_pool: config.run_in_background,
         };
 
+        info!(
+            "Verifying accounts, in background? {}, verify kind: {verify_kind:?}",
+            config.run_in_background,
+        );
         if config.run_in_background {
             let accounts = Arc::clone(accounts);
             let accounts_ = Arc::clone(&accounts);
@@ -7249,8 +7249,8 @@ impl Bank {
         &self.transaction_processor
     }
 
-    pub fn set_fee_structure(&mut self, fee_structure: FeeStructure) {
-        self.fee_structure = fee_structure;
+    pub fn set_fee_structure(&mut self, fee_structure: &FeeStructure) {
+        self.fee_structure = fee_structure.clone();
     }
 
     pub fn load_program(

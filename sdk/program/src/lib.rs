@@ -478,7 +478,6 @@ pub mod bpf_loader_upgradeable;
 pub mod compute_units;
 pub mod ed25519_program;
 pub mod entrypoint_deprecated;
-pub mod epoch_rewards;
 pub mod epoch_schedule;
 pub mod epoch_stake;
 pub mod feature;
@@ -521,6 +520,8 @@ pub use solana_borsh::v0_10 as borsh0_10;
 #[cfg(feature = "borsh")]
 #[deprecated(since = "2.1.0", note = "Use `solana-borsh` crate instead")]
 pub use solana_borsh::v1 as borsh1;
+#[deprecated(since = "2.1.0", note = "Use `solana-epoch-rewards` crate instead")]
+pub use solana_epoch_rewards as epoch_rewards;
 #[deprecated(since = "2.1.0", note = "Use `solana-fee-calculator` crate instead")]
 pub use solana_fee_calculator as fee_calculator;
 #[deprecated(since = "2.1.0", note = "Use `solana-last-restart-slot` crate instead")]
@@ -611,6 +612,8 @@ pub mod sdk_ids {
 #[deprecated(since = "2.1.0", note = "Use `solana-decode-error` crate instead")]
 pub use solana_decode_error as decode_error;
 pub use solana_pubkey::{declare_deprecated_id, declare_id, pubkey};
+#[deprecated(since = "2.1.0", note = "Use `solana-sysvar-id` crate instead")]
+pub use solana_sysvar_id::{declare_deprecated_sysvar_id, declare_sysvar_id};
 
 #[macro_use]
 extern crate serde_derive;

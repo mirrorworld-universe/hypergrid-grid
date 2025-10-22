@@ -433,7 +433,7 @@ fn get_cluster_shred_version(entrypoints: &[SocketAddr]) -> Option<u16> {
     for entrypoint in entrypoints {
         match solana_net_utils::get_cluster_shred_version(entrypoint) {
             Err(err) => eprintln!("get_cluster_shred_version failed: {entrypoint}, {err}"),
-            Ok(0) => eprintln!("zero shred-version from entrypoint: {entrypoint}"),
+            Ok(0) => eprintln!("entrypoint {entrypoint} returned shred-version zero"),
             Ok(shred_version) => {
                 info!(
                     "obtained shred-version {} from {}",
@@ -915,6 +915,7 @@ pub fn main() {
         accounts_db_hash_threads,
         accounts_index_flush_threads,
         ip_echo_server_threads,
+        rayon_global_threads,
         replay_forks_threads,
         replay_transactions_threads,
         tvu_receive_threads,
@@ -1309,6 +1310,13 @@ pub fn main() {
             .ok()
             .map(|mb| mb * MB as u64),
         ancient_append_vec_offset: value_t!(matches, "accounts_db_ancient_append_vecs", i64).ok(),
+        ancient_storage_ideal_size: value_t!(
+            matches,
+            "accounts_db_ancient_storage_ideal_size",
+            u64
+        )
+        .ok(),
+        max_ancient_storages: value_t!(matches, "accounts_db_max_ancient_storages", usize).ok(),
         exhaustively_verify_refcounts: matches.is_present("accounts_db_verify_refcounts"),
         create_ancient_storage,
         test_partitioned_epoch_rewards,
@@ -1542,6 +1550,7 @@ pub fn main() {
             UseSnapshotArchivesAtStartup
         ),
         ip_echo_server_threads,
+        rayon_global_threads,
         replay_forks_threads,
         replay_transactions_threads,
         tvu_shred_sigverify_threads: tvu_sigverify_threads,
