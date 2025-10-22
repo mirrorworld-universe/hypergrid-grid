@@ -1,7 +1,6 @@
 use {
-    clap::{
-        crate_description, crate_name, App, AppSettings, Arg, ArgGroup, ArgMatches, SubCommand,
-    },
+    crate::commands,
+    clap::{crate_description, crate_name, App, AppSettings, Arg, ArgMatches, SubCommand},
     log::warn,
     solana_accounts_db::{
         accounts_db::{
@@ -12,8 +11,8 @@ use {
     solana_clap_utils::{
         hidden_unless_forced,
         input_validators::{
-            is_keypair, is_keypair_or_ask_keyword, is_parsable, is_pow2, is_pubkey,
-            is_pubkey_or_keypair, is_slot, is_url_or_moniker, is_valid_percentage, is_within_range,
+            is_keypair_or_ask_keyword, is_parsable, is_pow2, is_pubkey, is_pubkey_or_keypair,
+            is_slot, is_url_or_moniker, is_within_range,
             validate_maximum_full_snapshot_archives_to_retain,
             validate_maximum_incremental_snapshot_archives_to_retain,
         },
@@ -47,17 +46,18 @@ use {
     solana_send_transaction_service::send_transaction_service::{
         self, MAX_BATCH_SEND_RATE_MS, MAX_TRANSACTION_BATCH_SIZE,
     },
-    solana_streamer::quic::DEFAULT_QUIC_ENDPOINTS,
+    solana_streamer::quic::{
+        DEFAULT_MAX_CONNECTIONS_PER_IPADDR_PER_MINUTE, DEFAULT_MAX_QUIC_CONNECTIONS_PER_PEER,
+        DEFAULT_MAX_STAKED_CONNECTIONS, DEFAULT_MAX_STREAMS_PER_MS,
+        DEFAULT_MAX_UNSTAKED_CONNECTIONS, DEFAULT_QUIC_ENDPOINTS,
+    },
     solana_tpu_client::tpu_client::{DEFAULT_TPU_CONNECTION_POOL_SIZE, DEFAULT_VOTE_USE_QUIC},
     solana_unified_scheduler_pool::DefaultSchedulerPool,
     std::{path::PathBuf, str::FromStr},
 };
 
 pub mod thread_args;
-use {
-    solana_streamer::nonblocking::quic::DEFAULT_MAX_CONNECTIONS_PER_IPADDR_PER_MINUTE,
-    thread_args::{thread_args, DefaultThreadArgs},
-};
+use thread_args::{thread_args, DefaultThreadArgs};
 
 const EXCLUDE_KEY: &str = "account-index-exclude-key";
 const INCLUDE_KEY: &str = "account-index-include-key";
@@ -907,6 +907,60 @@ pub fn app<'a>(version: &'a str, default_args: &'a DefaultArgs) -> App<'a, 'a> {
                 .help("Controls if to use QUIC to send votes."),
         )
         .arg(
+            Arg::with_name("tpu_max_connections_per_peer")
+                .long("tpu-max-connections-per-peer")
+                .takes_value(true)
+                .default_value(&default_args.tpu_max_connections_per_peer)
+                .validator(is_parsable::<u32>)
+                .hidden(hidden_unless_forced())
+                .help("Controls the max concurrent connections per IpAddr."),
+        )
+        .arg(
+            Arg::with_name("tpu_max_staked_connections")
+                .long("tpu-max-staked-connections")
+                .takes_value(true)
+                .default_value(&default_args.tpu_max_staked_connections)
+                .validator(is_parsable::<u32>)
+                .hidden(hidden_unless_forced())
+                .help("Controls the max concurrent connections for TPU from staked nodes."),
+        )
+        .arg(
+            Arg::with_name("tpu_max_unstaked_connections")
+                .long("tpu-max-unstaked-connections")
+                .takes_value(true)
+                .default_value(&default_args.tpu_max_unstaked_connections)
+                .validator(is_parsable::<u32>)
+                .hidden(hidden_unless_forced())
+                .help("Controls the max concurrent connections fort TPU from unstaked nodes."),
+        )
+        .arg(
+            Arg::with_name("tpu_max_fwd_staked_connections")
+                .long("tpu-max-fwd-staked-connections")
+                .takes_value(true)
+                .default_value(&default_args.tpu_max_fwd_staked_connections)
+                .validator(is_parsable::<u32>)
+                .hidden(hidden_unless_forced())
+                .help("Controls the max concurrent connections for TPU-forward from staked nodes."),
+        )
+        .arg(
+            Arg::with_name("tpu_max_fwd_unstaked_connections")
+                .long("tpu-max-fwd-unstaked-connections")
+                .takes_value(true)
+                .default_value(&default_args.tpu_max_fwd_unstaked_connections)
+                .validator(is_parsable::<u32>)
+                .hidden(hidden_unless_forced())
+                .help("Controls the max concurrent connections for TPU-forward from unstaked nodes."),
+        )
+        .arg(
+            Arg::with_name("tpu_max_streams_per_ms")
+                .long("tpu-max-streams-per-ms")
+                .takes_value(true)
+                .default_value(&default_args.tpu_max_streams_per_ms)
+                .validator(is_parsable::<usize>)
+                .hidden(hidden_unless_forced())
+                .help("Controls the max number of streams for a TPU service."),
+        )
+        .arg(
             Arg::with_name("num_quic_endpoints")
                 .long("num-quic-endpoints")
                 .takes_value(true)
@@ -1231,6 +1285,20 @@ pub fn app<'a>(version: &'a str, default_args: &'a DefaultArgs) -> App<'a, 'a> {
                 .value_name("ARCHIVE_TYPE")
                 .takes_value(true)
                 .help("Snapshot archive format to use."),
+        )
+        .arg(
+            Arg::with_name("snapshot_zstd_compression_level")
+                .long("snapshot-zstd-compression-level")
+                .default_value(&default_args.snapshot_zstd_compression_level)
+                .value_name("LEVEL")
+                .takes_value(true)
+                .help("The compression level to use when archiving with zstd")
+                .long_help(
+                    "The compression level to use when archiving with zstd. \
+                     Higher compression levels generally produce higher \
+                     compression ratio at the expense of speed and memory. \
+                     See the zstd manpage for more information."
+                ),
         )
         .arg(
             Arg::with_name("max_genesis_archive_unpacked_size")
@@ -1664,349 +1732,22 @@ pub fn app<'a>(version: &'a str, default_args: &'a DefaultArgs) -> App<'a, 'a> {
         .args(&thread_args(&default_args.thread_args))
         .args(&get_deprecated_arguments())
         .after_help("The default subcommand is run")
-        .subcommand(
-            SubCommand::with_name("exit")
-                .about("Send an exit request to the validator")
-                .arg(
-                    Arg::with_name("force")
-                        .short("f")
-                        .long("force")
-                        .takes_value(false)
-                        .help(
-                            "Request the validator exit immediately instead of waiting for a \
-                             restart window",
-                        ),
-                )
-                .arg(
-                    Arg::with_name("monitor")
-                        .short("m")
-                        .long("monitor")
-                        .takes_value(false)
-                        .help("Monitor the validator after sending the exit request"),
-                )
-                .arg(
-                    Arg::with_name("min_idle_time")
-                        .long("min-idle-time")
-                        .takes_value(true)
-                        .validator(is_parsable::<usize>)
-                        .value_name("MINUTES")
-                        .default_value(&default_args.exit_min_idle_time)
-                        .help(
-                            "Minimum time that the validator should not be leader before \
-                             restarting",
-                        ),
-                )
-                .arg(
-                    Arg::with_name("max_delinquent_stake")
-                        .long("max-delinquent-stake")
-                        .takes_value(true)
-                        .validator(is_valid_percentage)
-                        .default_value(&default_args.exit_max_delinquent_stake)
-                        .value_name("PERCENT")
-                        .help("The maximum delinquent stake % permitted for an exit"),
-                )
-                .arg(
-                    Arg::with_name("skip_new_snapshot_check")
-                        .long("skip-new-snapshot-check")
-                        .help("Skip check for a new snapshot"),
-                )
-                .arg(
-                    Arg::with_name("skip_health_check")
-                        .long("skip-health-check")
-                        .help("Skip health check"),
-                ),
-        )
-        .subcommand(
-            SubCommand::with_name("authorized-voter")
-                .about("Adjust the validator authorized voters")
-                .setting(AppSettings::SubcommandRequiredElseHelp)
-                .setting(AppSettings::InferSubcommands)
-                .subcommand(
-                    SubCommand::with_name("add")
-                        .about("Add an authorized voter")
-                        .arg(
-                            Arg::with_name("authorized_voter_keypair")
-                                .index(1)
-                                .value_name("KEYPAIR")
-                                .required(false)
-                                .takes_value(true)
-                                .validator(is_keypair)
-                                .help(
-                                    "Path to keypair of the authorized voter to add [default: \
-                                     read JSON keypair from stdin]",
-                                ),
-                        )
-                        .after_help(
-                            "Note: the new authorized voter only applies to the currently running \
-                             validator instance",
-                        ),
-                )
-                .subcommand(
-                    SubCommand::with_name("remove-all")
-                        .about("Remove all authorized voters")
-                        .after_help(
-                            "Note: the removal only applies to the currently running validator \
-                             instance",
-                        ),
-                ),
-        )
-        .subcommand(
-            SubCommand::with_name("contact-info")
-                .about("Display the validator's contact info")
-                .arg(
-                    Arg::with_name("output")
-                        .long("output")
-                        .takes_value(true)
-                        .value_name("MODE")
-                        .possible_values(&["json", "json-compact"])
-                        .help("Output display mode"),
-                ),
-        )
-        .subcommand(
-            SubCommand::with_name("repair-shred-from-peer")
-                .about("Request a repair from the specified validator")
-                .arg(
-                    Arg::with_name("pubkey")
-                        .long("pubkey")
-                        .value_name("PUBKEY")
-                        .required(false)
-                        .takes_value(true)
-                        .validator(is_pubkey)
-                        .help("Identity pubkey of the validator to repair from"),
-                )
-                .arg(
-                    Arg::with_name("slot")
-                        .long("slot")
-                        .value_name("SLOT")
-                        .takes_value(true)
-                        .validator(is_parsable::<u64>)
-                        .help("Slot to repair"),
-                )
-                .arg(
-                    Arg::with_name("shred")
-                        .long("shred")
-                        .value_name("SHRED")
-                        .takes_value(true)
-                        .validator(is_parsable::<u64>)
-                        .help("Shred to repair"),
-                ),
-        )
-        .subcommand(
-            SubCommand::with_name("repair-whitelist")
-                .about("Manage the validator's repair protocol whitelist")
-                .setting(AppSettings::SubcommandRequiredElseHelp)
-                .setting(AppSettings::InferSubcommands)
-                .subcommand(
-                    SubCommand::with_name("get")
-                        .about("Display the validator's repair protocol whitelist")
-                        .arg(
-                            Arg::with_name("output")
-                                .long("output")
-                                .takes_value(true)
-                                .value_name("MODE")
-                                .possible_values(&["json", "json-compact"])
-                                .help("Output display mode"),
-                        ),
-                )
-                .subcommand(
-                    SubCommand::with_name("set")
-                        .about("Set the validator's repair protocol whitelist")
-                        .setting(AppSettings::ArgRequiredElseHelp)
-                        .arg(
-                            Arg::with_name("whitelist")
-                                .long("whitelist")
-                                .validator(is_pubkey)
-                                .value_name("VALIDATOR IDENTITY")
-                                .multiple(true)
-                                .takes_value(true)
-                                .help("Set the validator's repair protocol whitelist"),
-                        )
-                        .after_help(
-                            "Note: repair protocol whitelist changes only apply to the currently \
-                             running validator instance",
-                        ),
-                )
-                .subcommand(
-                    SubCommand::with_name("remove-all")
-                        .about("Clear the validator's repair protocol whitelist")
-                        .after_help(
-                            "Note: repair protocol whitelist changes only apply to the currently \
-                             running validator instance",
-                        ),
-                ),
-        )
+        .subcommand(commands::exit::command(default_args))
+        .subcommand(commands::authorized_voter::command(default_args))
+        .subcommand(commands::contact_info::command(default_args))
+        .subcommand(commands::repair_shred_from_peer::command(default_args))
+        .subcommand(commands::repair_whitelist::command(default_args))
         .subcommand(
             SubCommand::with_name("init").about("Initialize the ledger directory then exit"),
         )
-        .subcommand(SubCommand::with_name("monitor").about("Monitor the validator"))
+        .subcommand(commands::monitor::command(default_args))
         .subcommand(SubCommand::with_name("run").about("Run the validator"))
-        .subcommand(
-            SubCommand::with_name("plugin")
-                .about("Manage and view geyser plugins")
-                .setting(AppSettings::SubcommandRequiredElseHelp)
-                .setting(AppSettings::InferSubcommands)
-                .subcommand(
-                    SubCommand::with_name("list").about("List all current running gesyer plugins"),
-                )
-                .subcommand(
-                    SubCommand::with_name("unload")
-                        .about(
-                            "Unload a particular gesyer plugin. You must specify the gesyer \
-                             plugin name",
-                        )
-                        .arg(Arg::with_name("name").required(true).takes_value(true)),
-                )
-                .subcommand(
-                    SubCommand::with_name("reload")
-                        .about(
-                            "Reload a particular gesyer plugin. You must specify the gesyer \
-                             plugin name and the new config path",
-                        )
-                        .arg(Arg::with_name("name").required(true).takes_value(true))
-                        .arg(Arg::with_name("config").required(true).takes_value(true)),
-                )
-                .subcommand(
-                    SubCommand::with_name("load")
-                        .about(
-                            "Load a new gesyer plugin. You must specify the config path. Fails if \
-                             overwriting (use reload)",
-                        )
-                        .arg(Arg::with_name("config").required(true).takes_value(true)),
-                ),
-        )
-        .subcommand(
-            SubCommand::with_name("set-identity")
-                .about("Set the validator identity")
-                .arg(
-                    Arg::with_name("identity")
-                        .index(1)
-                        .value_name("KEYPAIR")
-                        .required(false)
-                        .takes_value(true)
-                        .validator(is_keypair)
-                        .help(
-                            "Path to validator identity keypair [default: read JSON keypair from \
-                             stdin]",
-                        ),
-                )
-                .arg(
-                    clap::Arg::with_name("require_tower")
-                        .long("require-tower")
-                        .takes_value(false)
-                        .help(
-                            "Refuse to set the validator identity if saved tower state is not \
-                             found",
-                        ),
-                )
-                .after_help(
-                    "Note: the new identity only applies to the currently running validator \
-                     instance",
-                ),
-        )
-        .subcommand(
-            SubCommand::with_name("set-log-filter")
-                .about("Adjust the validator log filter")
-                .arg(
-                    Arg::with_name("filter").takes_value(true).index(1).help(
-                        "New filter using the same format as the RUST_LOG environment variable",
-                    ),
-                )
-                .after_help(
-                    "Note: the new filter only applies to the currently running validator instance",
-                ),
-        )
-        .subcommand(
-            SubCommand::with_name("staked-nodes-overrides")
-                .about("Overrides stakes of specific node identities.")
-                .arg(
-                    Arg::with_name("path")
-                        .value_name("PATH")
-                        .takes_value(true)
-                        .required(true)
-                        .help(
-                            "Provide path to a file with custom overrides for stakes of specific \
-                             validator identities.",
-                        ),
-                )
-                .after_help(
-                    "Note: the new staked nodes overrides only applies to the currently running \
-                     validator instance",
-                ),
-        )
-        .subcommand(
-            SubCommand::with_name("wait-for-restart-window")
-                .about("Monitor the validator for a good time to restart")
-                .arg(
-                    Arg::with_name("min_idle_time")
-                        .long("min-idle-time")
-                        .takes_value(true)
-                        .validator(is_parsable::<usize>)
-                        .value_name("MINUTES")
-                        .default_value(&default_args.wait_for_restart_window_min_idle_time)
-                        .help(
-                            "Minimum time that the validator should not be leader before \
-                             restarting",
-                        ),
-                )
-                .arg(
-                    Arg::with_name("identity")
-                        .long("identity")
-                        .value_name("ADDRESS")
-                        .takes_value(true)
-                        .validator(is_pubkey_or_keypair)
-                        .help("Validator identity to monitor [default: your validator]"),
-                )
-                .arg(
-                    Arg::with_name("max_delinquent_stake")
-                        .long("max-delinquent-stake")
-                        .takes_value(true)
-                        .validator(is_valid_percentage)
-                        .default_value(&default_args.wait_for_restart_window_max_delinquent_stake)
-                        .value_name("PERCENT")
-                        .help("The maximum delinquent stake % permitted for a restart"),
-                )
-                .arg(
-                    Arg::with_name("skip_new_snapshot_check")
-                        .long("skip-new-snapshot-check")
-                        .help("Skip check for a new snapshot"),
-                )
-                .arg(
-                    Arg::with_name("skip_health_check")
-                        .long("skip-health-check")
-                        .help("Skip health check"),
-                )
-                .after_help(
-                    "Note: If this command exits with a non-zero status then this not a good time \
-                     for a restart",
-                ),
-        )
-        .subcommand(
-            SubCommand::with_name("set-public-address")
-                .about("Specify addresses to advertise in gossip")
-                .arg(
-                    Arg::with_name("tpu_addr")
-                        .long("tpu")
-                        .value_name("HOST:PORT")
-                        .takes_value(true)
-                        .validator(solana_net_utils::is_host_port)
-                        .help("TPU address to advertise in gossip"),
-                )
-                .arg(
-                    Arg::with_name("tpu_forwards_addr")
-                        .long("tpu-forwards")
-                        .value_name("HOST:PORT")
-                        .takes_value(true)
-                        .validator(solana_net_utils::is_host_port)
-                        .help("TPU Forwards address to advertise in gossip"),
-                )
-                .group(
-                    ArgGroup::with_name("set_public_address_details")
-                        .args(&["tpu_addr", "tpu_forwards_addr"])
-                        .required(true)
-                        .multiple(true),
-                )
-                .after_help("Note: At least one arg must be used. Using multiple is ok"),
-        );
+        .subcommand(commands::plugin::command(default_args))
+        .subcommand(commands::set_identity::command(default_args))
+        .subcommand(commands::set_log_filter::command(default_args))
+        .subcommand(commands::staked_nodes_overrides::command(default_args))
+        .subcommand(commands::wait_for_restart_window::command(default_args))
+        .subcommand(commands::set_public_address::command(default_args));
 }
 
 /// Deprecated argument description should be moved into the [`deprecated_arguments()`] function,
@@ -2305,6 +2046,7 @@ pub struct DefaultArgs {
 
     pub snapshot_version: SnapshotVersion,
     pub snapshot_archive_format: String,
+    pub snapshot_zstd_compression_level: String,
 
     pub rocksdb_shred_compaction: String,
     pub rocksdb_ledger_compression: String,
@@ -2313,7 +2055,15 @@ pub struct DefaultArgs {
     pub accounts_shrink_optimize_total_space: String,
     pub accounts_shrink_ratio: String,
     pub tpu_connection_pool_size: String,
+
+    pub tpu_max_connections_per_peer: String,
     pub tpu_max_connections_per_ipaddr_per_minute: String,
+    pub tpu_max_staked_connections: String,
+    pub tpu_max_unstaked_connections: String,
+    pub tpu_max_fwd_staked_connections: String,
+    pub tpu_max_fwd_unstaked_connections: String,
+    pub tpu_max_streams_per_ms: String,
+
     pub num_quic_endpoints: String,
     pub vote_use_quic: String,
 
@@ -2397,6 +2147,7 @@ impl DefaultArgs {
             min_snapshot_download_speed: DEFAULT_MIN_SNAPSHOT_DOWNLOAD_SPEED.to_string(),
             max_snapshot_download_abort: MAX_SNAPSHOT_DOWNLOAD_ABORT.to_string(),
             snapshot_archive_format: DEFAULT_ARCHIVE_COMPRESSION.to_string(),
+            snapshot_zstd_compression_level: "1".to_string(), // level 1 is optimized for speed
             contact_debug_interval: "120000".to_string(),
             snapshot_version: SnapshotVersion::default(),
             rocksdb_shred_compaction: "level".to_string(),
@@ -2409,6 +2160,14 @@ impl DefaultArgs {
             tpu_max_connections_per_ipaddr_per_minute:
                 DEFAULT_MAX_CONNECTIONS_PER_IPADDR_PER_MINUTE.to_string(),
             vote_use_quic: DEFAULT_VOTE_USE_QUIC.to_string(),
+            tpu_max_connections_per_peer: DEFAULT_MAX_QUIC_CONNECTIONS_PER_PEER.to_string(),
+            tpu_max_staked_connections: DEFAULT_MAX_STAKED_CONNECTIONS.to_string(),
+            tpu_max_unstaked_connections: DEFAULT_MAX_UNSTAKED_CONNECTIONS.to_string(),
+            tpu_max_fwd_staked_connections: DEFAULT_MAX_STAKED_CONNECTIONS
+                .saturating_add(DEFAULT_MAX_UNSTAKED_CONNECTIONS)
+                .to_string(),
+            tpu_max_fwd_unstaked_connections: 0.to_string(),
+            tpu_max_streams_per_ms: DEFAULT_MAX_STREAMS_PER_MS.to_string(),
             num_quic_endpoints: DEFAULT_QUIC_ENDPOINTS.to_string(),
             rpc_max_request_body_size: MAX_REQUEST_BODY_SIZE.to_string(),
             exit_min_idle_time: "10".to_string(),

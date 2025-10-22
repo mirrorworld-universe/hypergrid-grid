@@ -64,7 +64,7 @@ pub fn spawn_shred_sigverify(
     bank_forks: Arc<RwLock<BankForks>>,
     leader_schedule_cache: Arc<LeaderScheduleCache>,
     shred_fetch_receiver: Receiver<PacketBatch>,
-    retransmit_sender: Sender<Vec</*shred:*/ Vec<u8>>>,
+    retransmit_sender: Sender<Vec<shred::Payload>>,
     verified_sender: Sender<Vec<PacketBatch>>,
     num_sigverify_threads: NonZeroUsize,
 ) -> JoinHandle<()> {
@@ -129,7 +129,7 @@ fn run_shred_sigverify<const K: usize>(
     recycler_cache: &RecyclerCache,
     deduper: &Deduper<K, [u8]>,
     shred_fetch_receiver: &Receiver<PacketBatch>,
-    retransmit_sender: &Sender<Vec</*shred:*/ Vec<u8>>>,
+    retransmit_sender: &Sender<Vec<shred::Payload>>,
     verified_sender: &Sender<Vec<PacketBatch>>,
     cluster_nodes_cache: &ClusterNodesCache<RetransmitStage>,
     cache: &RwLock<LruCache>,
@@ -145,12 +145,22 @@ fn run_shred_sigverify<const K: usize>(
     stats.num_batches += packets.len();
     stats.num_packets += packets.iter().map(PacketBatch::len).sum::<usize>();
     stats.num_discards_pre += count_discards(&packets);
+    // Repair shreds include a randomly generated u32 nonce, so it does not
+    // make sense to deduplicate them (i.e. they are not duplicate of any other
+    // shred).
+    // If the nonce is excluded from the deduper then false positives might
+    // prevent us from repairing a block until the deduper is reset after
+    // DEDUPER_RESET_CYCLE. A workaround is to also repair "coding" shreds to
+    // add some redundancy but that is not implemented at the moment.
+    // Because the repair nonce is already verified in shred-fetch-stage we can
+    // exclude repair shreds from the deduper.
     stats.num_duplicates += thread_pool.install(|| {
         packets
             .par_iter_mut()
             .flatten()
             .filter(|packet| {
                 !packet.meta().discard()
+                    && !packet.meta().repair()
                     && packet
                         .data(..)
                         .map(|data| deduper.dedup(data))
@@ -236,6 +246,7 @@ fn run_shred_sigverify<const K: usize>(
         .filter(|packet| !packet.meta().discard() && !packet.meta().repair())
         .filter_map(shred::layout::get_shred)
         .map(<[u8]>::to_vec)
+        .map(shred::Payload::from)
         .collect();
     stats.num_retransmit_shreds += shreds.len();
     retransmit_sender.send(shreds)?;

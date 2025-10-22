@@ -448,7 +448,7 @@ impl RemoteAccountLoader {
         }
 
         let rpc_url = self.get_rpc_url_by_source(source, slot);
-        if rpc_url.eq("") {
+        if rpc_url.is_empty() {
             return None;
         }
 

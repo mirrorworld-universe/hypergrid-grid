@@ -30,6 +30,7 @@ use {
         tpu::{Tpu, TpuSockets, DEFAULT_TPU_COALESCE},
         tvu::{Tvu, TvuConfig, TvuSockets},
     },
+    agave_thread_manager::{ThreadManager, ThreadManagerConfig},
     anyhow::{anyhow, Context, Result},
     crossbeam_channel::{bounded, unbounded, Receiver},
     lazy_static::lazy_static,
@@ -124,7 +125,10 @@ use {
         timing::timestamp,
     },
     solana_send_transaction_service::send_transaction_service,
-    solana_streamer::{socket::SocketAddrSpace, streamer::StakedNodes},
+    solana_streamer::{quic::QuicServerParams, socket::SocketAddrSpace, streamer::StakedNodes},
+    solana_tpu_client::tpu_client::{
+        DEFAULT_TPU_CONNECTION_POOL_SIZE, DEFAULT_TPU_USE_QUIC, DEFAULT_VOTE_USE_QUIC,
+    },
     solana_turbine::{self, broadcast_stage::BroadcastStageType},
     solana_unified_scheduler_pool::DefaultSchedulerPool,
     solana_vote_program::vote_state,
@@ -310,6 +314,7 @@ pub struct ValidatorConfig {
     pub replay_forks_threads: NonZeroUsize,
     pub replay_transactions_threads: NonZeroUsize,
     pub tvu_shred_sigverify_threads: NonZeroUsize,
+    pub thread_manager_config: ThreadManagerConfig,
     pub delay_leader_block_for_pending_fork: bool,
 }
 
@@ -382,6 +387,7 @@ impl Default for ValidatorConfig {
             rayon_global_threads: NonZeroUsize::new(1).expect("1 is non-zero"),
             replay_forks_threads: NonZeroUsize::new(1).expect("1 is non-zero"),
             replay_transactions_threads: NonZeroUsize::new(1).expect("1 is non-zero"),
+            thread_manager_config: ThreadManagerConfig::default_for_agave(),
             tvu_shred_sigverify_threads: NonZeroUsize::new(1).expect("1 is non-zero"),
             delay_leader_block_for_pending_fork: false,
         }
@@ -510,8 +516,44 @@ pub struct ValidatorTpuConfig {
     pub tpu_connection_pool_size: usize,
     /// Controls if to enable UDP for TPU tansactions.
     pub tpu_enable_udp: bool,
-    /// Controls the new maximum connections per IpAddr per minute
-    pub tpu_max_connections_per_ipaddr_per_minute: u64,
+    /// QUIC server config for regular TPU
+    pub tpu_quic_server_config: QuicServerParams,
+    /// QUIC server config for TPU forward
+    pub tpu_fwd_quic_server_config: QuicServerParams,
+    /// QUIC server config for Vote
+    pub vote_quic_server_config: QuicServerParams,
+}
+
+impl ValidatorTpuConfig {
+    /// A convenient function to build a ValidatorTpuConfig for testing with good
+    /// default.
+    pub fn new_for_tests(tpu_enable_udp: bool) -> Self {
+        let tpu_quic_server_config = QuicServerParams {
+            max_connections_per_ipaddr_per_min: 32,
+            coalesce_channel_size: 100_000, // smaller channel size for faster test
+            ..Default::default()
+        };
+
+        let tpu_fwd_quic_server_config = QuicServerParams {
+            max_connections_per_ipaddr_per_min: 32,
+            max_unstaked_connections: 0,
+            coalesce_channel_size: 100_000, // smaller channel size for faster test
+            ..Default::default()
+        };
+
+        // vote and tpu_fwd share the same characteristics -- disallow non-staked connections:
+        let vote_quic_server_config = tpu_fwd_quic_server_config.clone();
+
+        ValidatorTpuConfig {
+            use_quic: DEFAULT_TPU_USE_QUIC,
+            vote_use_quic: DEFAULT_VOTE_USE_QUIC,
+            tpu_connection_pool_size: DEFAULT_TPU_CONNECTION_POOL_SIZE,
+            tpu_enable_udp,
+            tpu_quic_server_config,
+            tpu_fwd_quic_server_config,
+            vote_quic_server_config,
+        }
+    }
 }
 
 pub struct Validator {
@@ -549,6 +591,7 @@ pub struct Validator {
     repair_quic_endpoints: Option<[Endpoint; 3]>,
     repair_quic_endpoints_runtime: Option<TokioRuntime>,
     repair_quic_endpoints_join_handle: Option<repair::quic_endpoint::AsyncTryJoinHandle>,
+    thread_manager: ThreadManager,
 }
 
 impl Validator {
@@ -573,11 +616,14 @@ impl Validator {
             vote_use_quic,
             tpu_connection_pool_size,
             tpu_enable_udp,
-            tpu_max_connections_per_ipaddr_per_minute,
+            tpu_quic_server_config,
+            tpu_fwd_quic_server_config,
+            vote_quic_server_config,
         } = tpu_config;
 
         let start_time = Instant::now();
 
+        let thread_manager = ThreadManager::new(&config.thread_manager_config)?;
         // Initialize the global rayon pool first to ensure the value in config
         // is honored. Otherwise, some code accessing the global pool could
         // cause it to get initialized with Rayon's default (not ours)
@@ -927,6 +973,22 @@ impl Validator {
             )
         };
         let poh_recorder = Arc::new(RwLock::new(poh_recorder));
+
+        let (banking_tracer, tracer_thread) =
+            BankingTracer::new((config.banking_trace_dir_byte_limit > 0).then_some((
+                &blockstore.banking_trace_path(),
+                exit.clone(),
+                config.banking_trace_dir_byte_limit,
+            )))?;
+        if banking_tracer.is_enabled() {
+            info!(
+                "Enabled banking trace (dir_byte_limit: {})",
+                config.banking_trace_dir_byte_limit
+            );
+        } else {
+            info!("Disabled banking trace");
+        }
+        let banking_tracer_channels = banking_tracer.create_channels(false);
 
         match &config.block_verification_method {
             BlockVerificationMethod::BlockstoreProcessor => {
@@ -1289,21 +1351,6 @@ impl Validator {
         let (gossip_verified_vote_hash_sender, gossip_verified_vote_hash_receiver) = unbounded();
         let (duplicate_confirmed_slot_sender, duplicate_confirmed_slots_receiver) = unbounded();
 
-        let (banking_tracer, tracer_thread) =
-            BankingTracer::new((config.banking_trace_dir_byte_limit > 0).then_some((
-                &blockstore.banking_trace_path(),
-                exit.clone(),
-                config.banking_trace_dir_byte_limit,
-            )))?;
-        if banking_tracer.is_enabled() {
-            info!(
-                "Enabled banking trace (dir_byte_limit: {})",
-                config.banking_trace_dir_byte_limit
-            );
-        } else {
-            info!("Disabled banking trace");
-        }
-
         let entry_notification_sender = entry_notifier_service
             .as_ref()
             .map(|service| service.sender_cloned());
@@ -1545,10 +1592,12 @@ impl Validator {
             config.runtime_config.log_messages_bytes_limit,
             &staked_nodes,
             config.staked_nodes_overrides.clone(),
-            banking_tracer,
+            banking_tracer_channels,
             tracer_thread,
             tpu_enable_udp,
-            tpu_max_connections_per_ipaddr_per_minute,
+            tpu_quic_server_config,
+            tpu_fwd_quic_server_config,
+            vote_quic_server_config,
             &prioritization_fee_cache,
             config.block_production_method.clone(),
             config.transaction_struct.clone(),
@@ -1615,6 +1664,7 @@ impl Validator {
             repair_quic_endpoints,
             repair_quic_endpoints_runtime,
             repair_quic_endpoints_join_handle,
+            thread_manager,
         })
     }
 
@@ -1772,6 +1822,7 @@ impl Validator {
         self.poh_timing_report_service
             .join()
             .expect("poh_timing_report_service");
+        self.thread_manager.destroy();
     }
 }
 
@@ -2751,10 +2802,7 @@ mod tests {
             get_tmp_ledger_path_auto_delete,
         },
         solana_sdk::{genesis_config::create_genesis_config, poh_config::PohConfig},
-        solana_tpu_client::tpu_client::{
-            DEFAULT_TPU_CONNECTION_POOL_SIZE, DEFAULT_TPU_ENABLE_UDP, DEFAULT_TPU_USE_QUIC,
-            DEFAULT_VOTE_USE_QUIC,
-        },
+        solana_tpu_client::tpu_client::DEFAULT_TPU_ENABLE_UDP,
         std::{fs::remove_dir_all, thread, time::Duration},
     };
 
@@ -2792,13 +2840,7 @@ mod tests {
             None, // rpc_to_plugin_manager_receiver
             start_progress.clone(),
             SocketAddrSpace::Unspecified,
-            ValidatorTpuConfig {
-                use_quic: DEFAULT_TPU_USE_QUIC,
-                vote_use_quic: DEFAULT_VOTE_USE_QUIC,
-                tpu_connection_pool_size: DEFAULT_TPU_CONNECTION_POOL_SIZE,
-                tpu_enable_udp: DEFAULT_TPU_ENABLE_UDP,
-                tpu_max_connections_per_ipaddr_per_minute: 32, // max connections per IpAddr per minute for test
-            },
+            ValidatorTpuConfig::new_for_tests(DEFAULT_TPU_ENABLE_UDP),
             Arc::new(RwLock::new(None)),
         )
         .expect("assume successful validator start");
@@ -3014,13 +3056,7 @@ mod tests {
                     None, // rpc_to_plugin_manager_receiver
                     Arc::new(RwLock::new(ValidatorStartProgress::default())),
                     SocketAddrSpace::Unspecified,
-                    ValidatorTpuConfig {
-                        use_quic: DEFAULT_TPU_USE_QUIC,
-                        vote_use_quic: DEFAULT_VOTE_USE_QUIC,
-                        tpu_connection_pool_size: DEFAULT_TPU_CONNECTION_POOL_SIZE,
-                        tpu_enable_udp: DEFAULT_TPU_ENABLE_UDP,
-                        tpu_max_connections_per_ipaddr_per_minute: 32, // max connections per IpAddr per minute for test
-                    },
+                    ValidatorTpuConfig::new_for_tests(DEFAULT_TPU_ENABLE_UDP),
                     Arc::new(RwLock::new(None)),
                 )
                 .expect("assume successful validator start")

@@ -333,7 +333,7 @@ impl<'a> InvokeContext<'a> {
         // but performed on a very small slice and requires no heap allocations.
         let instruction_context = self.transaction_context.get_current_instruction_context()?;
         let mut deduplicated_instruction_accounts: Vec<InstructionAccount> = Vec::new();
-        let mut duplicate_indicies = Vec::with_capacity(instruction.accounts.len());
+        let mut duplicate_indicies = Vec::with_capacity(instruction.accounts.len() as usize);
         for (instruction_account_index, account_meta) in instruction.accounts.iter().enumerate() {
             let index_in_transaction = self
                 .transaction_context
@@ -536,7 +536,7 @@ impl<'a> InvokeContext<'a> {
             .ok_or(InstructionError::UnsupportedProgramId)?;
         let function = match &entry.program {
             ProgramCacheEntryType::Builtin(program) => program
-                .get_function_registry(SBPFVersion::V0)
+                .get_function_registry()
                 .lookup_by_key(ENTRYPOINT_KEY)
                 .map(|(_name, function)| function),
             _ => None,

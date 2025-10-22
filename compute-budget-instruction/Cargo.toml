@@ -12,9 +12,9 @@ edition = { workspace = true }
 [dependencies]
 log = { workspace = true }
 solana-borsh = { workspace = true }
-solana-builtins-default-costs = { workspace = true }
+solana-builtins-default-costs = { workspace = true, features = ["svm-internal"] }
 solana-compute-budget = { workspace = true }
-solana-compute-budget-interface = { workspace = true }
+solana-compute-budget-interface = { workspace = true, features = ["borsh"] }
 solana-feature-set = { workspace = true }
 solana-instruction = { workspace = true }
 solana-packet = { workspace = true }
@@ -32,14 +32,14 @@ name = "solana_compute_budget_instruction"
 bincode = { workspace = true }
 criterion = { workspace = true }
 rand = { workspace = true }
-solana-builtins-default-costs = { workspace = true, features = ["dev-context-only-utils"] }
+solana-builtins-default-costs = { workspace = true, features = ["dev-context-only-utils", "svm-internal"] }
 solana-hash = { workspace = true }
 solana-keypair = { workspace = true }
 solana-message = { workspace = true }
 solana-program = { workspace = true }
 solana-signer = { workspace = true }
 solana-system-interface = { workspace = true }
-solana-transaction = { workspace = true }
+solana-transaction = { workspace = true, features = ["blake3"] }
 
 [package.metadata.docs.rs]
 targets = ["x86_64-unknown-linux-gnu"]

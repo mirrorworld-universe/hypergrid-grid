@@ -180,8 +180,8 @@ all_test_steps() {
              ^ci/test-local-cluster.sh \
              ^core/build.rs \
              ^fetch-perf-libs.sh \
+             ^platform-tools-sdk/ \
              ^programs/ \
-             ^sdk/ \
       ; then
     cat >> "$output_file" <<"EOF"
   - command: "ci/test-stable-sbf.sh"
@@ -207,8 +207,8 @@ EOF
              ^ci/test-local-cluster.sh \
              ^core/build.rs \
              ^fetch-perf-libs.sh \
+             ^platform-tools-sdk/ \
              ^programs/ \
-             ^sdk/ \
              ^scripts/build-downstream-projects.sh \
       ; then
     cat >> "$output_file" <<"EOF"
@@ -219,18 +219,6 @@ EOF
   else
     annotate --style info \
       "downstream-projects skipped as no relevant files were modified"
-  fi
-
-  # Wasm support
-  if affects \
-             ^ci/test-wasm.sh \
-             ^ci/test-stable.sh \
-             ^sdk/ \
-      ; then
-    command_step wasm ". ci/rust-version.sh; ci/docker-run.sh \$\$rust_stable_docker_image ci/test-wasm.sh" 20
-  else
-    annotate --style info \
-      "wasm skipped as no relevant files were modified"
   fi
 
   # Benches...

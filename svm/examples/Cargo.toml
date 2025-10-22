@@ -35,7 +35,7 @@ solana-logger = { path = "../../sdk/logger" }
 solana-perf = { path = "../../perf" }
 solana-program-runtime = { path = "../../program-runtime" }
 solana-rpc-client-api = { path = "../../rpc-client-api" }
-solana-sdk = { path = "../../sdk/" }
+solana-sdk = { path = "../../sdk/sdk" }
 solana-svm = { path = "../" }
 solana-system-program = { path = "../../programs/system" }
 solana-version = { path = "../../version" }
@@ -43,7 +43,7 @@ solana-test-validator = { path = "../../test-validator" }
 solana-transaction-status = { path = "../../transaction-status" }
 spl-associated-token-account = "=6.0.0"
 spl-token = "=7.0.0"
-spl-token-2022 = "=6.0.0"
+spl-token-2022 = "=7.0.0"
 termcolor = "1.4.1"
 thiserror = "1.0.68"
 tokio = "1.29.1"
@@ -55,6 +55,7 @@ crossbeam-epoch = { git = "https://github.com/anza-xyz/crossbeam", rev = "fd279d
 solana-curve25519 = { path = "../../curves/curve25519" }
 solana-account-info = { path = "../../sdk/account-info" }
 solana-borsh = { path = "../../sdk/borsh" }
+solana-clock = { path = "../../sdk/clock" }
 solana-cpi = { path = "../../sdk/cpi" }
 solana-decode-error = { path = "../../sdk/decode-error" }
 solana-hash = { path = "../../sdk/hash" }
@@ -67,4 +68,5 @@ solana-program-option = { path = "../../sdk/program-option" }
 solana-program-pack = { path = "../../sdk/program-pack" }
 solana-pubkey = { path = "../../sdk/pubkey" }
 solana-sha256-hasher = { path = "../../sdk/sha256-hasher" }
+solana-sysvar-id = { path = "../../sdk/sysvar-id" }
 solana-zk-sdk = { path = "../../zk-sdk" }

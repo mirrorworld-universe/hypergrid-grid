@@ -1,0 +1,24 @@
+[package]
+name = "workspace-metadata"
+version = "2.2.0"
+description = "Solana SBF test program with tools version in workspace metadata"
+authors = ["Anza Maintainers <maintainers@anza.xyz>"]
+repository = "https://github.com/anza-xyz/agave"
+license = "Apache-2.0"
+homepage = "https://anza.xyz"
+edition = "2021"
+publish = false
+
+[dependencies]
+solana-account-info= { path = "../../../../../sdk/account-info", version = "=2.2.0" }
+solana-program-entrypoint = { path = "../../../../../sdk/program-entrypoint", version = "=2.2.0" }
+solana-program-error= { path = "../../../../../sdk/program-error", version = "=2.2.0" }
+solana-pubkey = { path = "../../../../../sdk/pubkey", version = "=2.2.0" }
+
+[lib]
+crate-type = ["cdylib"]
+
+[workspace]
+
+[workspace.metadata.solana]
+tools-version = "v1.43"

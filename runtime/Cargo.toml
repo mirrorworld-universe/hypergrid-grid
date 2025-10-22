@@ -18,7 +18,6 @@ bincode = { workspace = true }
 blake3 = { workspace = true }
 bv = { workspace = true, features = ["serde"] }
 bytemuck = { workspace = true }
-byteorder = { workspace = true }
 bzip2 = { workspace = true }
 crossbeam-channel = { workspace = true }
 dashmap = { workspace = true, features = ["rayon", "raw-api"] }
@@ -68,6 +67,7 @@ solana-inline-spl = { workspace = true }
 solana-lattice-hash = { workspace = true }
 solana-measure = { workspace = true }
 solana-metrics = { workspace = true }
+solana-nonce-account = { workspace = true }
 solana-perf = { workspace = true }
 solana-program = { workspace = true }
 solana-program-runtime = { workspace = true, features = ["metrics"] }

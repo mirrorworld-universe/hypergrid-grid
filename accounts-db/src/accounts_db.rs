@@ -87,6 +87,7 @@ use {
     solana_lattice_hash::lt_hash::LtHash,
     solana_measure::{meas_dur, measure::Measure, measure_us},
     solana_nohash_hasher::{BuildNoHashHasher, IntMap, IntSet},
+    solana_pubkey::Pubkey,
     solana_rayon_threadlimit::get_thread_count,
     solana_sdk::{
         account::{Account, AccountSharedData, ReadableAccount},
@@ -94,7 +95,6 @@ use {
         epoch_schedule::EpochSchedule,
         genesis_config::GenesisConfig,
         hash::Hash,
-        pubkey::Pubkey,
         rent_collector::RentCollector,
         saturating_add_assign,
         transaction::SanitizedTransaction,
@@ -517,6 +517,7 @@ pub const ACCOUNTS_DB_CONFIG_FOR_TESTING: AccountsDbConfig = AccountsDbConfig {
     shrink_paths: None,
     shrink_ratio: DEFAULT_ACCOUNTS_SHRINK_THRESHOLD_OPTION,
     read_cache_limit_bytes: None,
+    read_cache_evict_sample_size: None,
     write_cache_limit_bytes: None,
     ancient_append_vec_offset: None,
     ancient_storage_ideal_size: None,
@@ -544,6 +545,7 @@ pub const ACCOUNTS_DB_CONFIG_FOR_BENCHMARKS: AccountsDbConfig = AccountsDbConfig
     shrink_paths: None,
     shrink_ratio: DEFAULT_ACCOUNTS_SHRINK_THRESHOLD_OPTION,
     read_cache_limit_bytes: None,
+    read_cache_evict_sample_size: None,
     write_cache_limit_bytes: None,
     ancient_append_vec_offset: None,
     ancient_storage_ideal_size: None,
@@ -669,6 +671,9 @@ pub struct AccountsDbConfig {
     /// The low and high watermark sizes for the read cache, in bytes.
     /// If None, defaults will be used.
     pub read_cache_limit_bytes: Option<(usize, usize)>,
+    /// The number of elements that will be randomly sampled at eviction time,
+    /// the oldest of which will get evicted.
+    pub read_cache_evict_sample_size: Option<usize>,
     pub write_cache_limit_bytes: Option<u64>,
     /// if None, ancient append vecs are set to ANCIENT_APPEND_VEC_DEFAULT_OFFSET
     /// Some(offset) means include slots up to (max_slot - (slots_per_epoch - 'offset'))
@@ -1540,11 +1545,11 @@ pub struct AccountsDb {
     /// Starting file size of appendvecs
     file_size: u64,
 
-    /// Thread pool used for par_iter
+    /// Foreground thread pool used for par_iter
     pub thread_pool: ThreadPool,
-
+    /// Thread pool for AccountsBackgroundServices
     pub thread_pool_clean: ThreadPool,
-
+    /// Thread pool for AccountsHashVerifier
     pub thread_pool_hash: ThreadPool,
 
     accounts_delta_hashes: Mutex<HashMap<Slot, AccountsDeltaHash>>,
@@ -1906,16 +1911,16 @@ pub struct PubkeyHashAccount {
 impl AccountsDb {
     pub const DEFAULT_ACCOUNTS_HASH_CACHE_DIR: &'static str = "accounts_hash_cache";
 
-    // read only cache does not update lru on read of an entry unless it has been at least this many ms since the last lru update
-    #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
-    const READ_ONLY_CACHE_MS_TO_SKIP_LRU_UPDATE: u32 = 100;
-
     // The default high and low watermark sizes for the accounts read cache.
     // If the cache size exceeds MAX_SIZE_HI, it'll evict entries until the size is <= MAX_SIZE_LO.
     #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
     const DEFAULT_MAX_READ_ONLY_CACHE_DATA_SIZE_LO: usize = 400 * 1024 * 1024;
     #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
     const DEFAULT_MAX_READ_ONLY_CACHE_DATA_SIZE_HI: usize = 410 * 1024 * 1024;
+
+    // See AccountsDbConfig::read_cache_evict_sample_size.
+    #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
+    const DEFAULT_READ_ONLY_CACHE_EVICT_SAMPLE_SIZE: usize = 8;
 
     pub fn default_for_tests() -> Self {
         Self::new_single_for_tests()
@@ -1994,6 +1999,9 @@ impl AccountsDb {
             Self::DEFAULT_MAX_READ_ONLY_CACHE_DATA_SIZE_LO,
             Self::DEFAULT_MAX_READ_ONLY_CACHE_DATA_SIZE_HI,
         ));
+        let read_cache_evict_sample_size = accounts_db_config
+            .read_cache_evict_sample_size
+            .unwrap_or(Self::DEFAULT_READ_ONLY_CACHE_EVICT_SAMPLE_SIZE);
 
         // Increase the stack for foreground threads
         // rayon needs a lot of stack
@@ -2049,7 +2057,7 @@ impl AccountsDb {
             read_only_accounts_cache: ReadOnlyAccountsCache::new(
                 read_cache_size.0,
                 read_cache_size.1,
-                Self::READ_ONLY_CACHE_MS_TO_SKIP_LRU_UPDATE,
+                read_cache_evict_sample_size,
             ),
             write_cache_limit_bytes: accounts_db_config.write_cache_limit_bytes,
             partitioned_epoch_rewards_config: accounts_db_config.partitioned_epoch_rewards_config,
@@ -2741,6 +2749,8 @@ impl AccountsDb {
 
     /// called with cli argument to verify refcounts are correct on all accounts
     /// this is very slow
+    /// this function will call Rayon par_iter, so you will want to have thread pool installed if
+    /// you want to call this without consuming all the cores on the CPU.
     fn exhaustively_verify_refcounts(&self, max_slot_inclusive: Option<Slot>) {
         let max_slot_inclusive =
             max_slot_inclusive.unwrap_or_else(|| self.accounts_index.max_root_inclusive());
@@ -2846,7 +2856,14 @@ impl AccountsDb {
         old_storages_policy: OldStoragesPolicy,
     ) {
         if self.exhaustively_verify_refcounts {
-            self.exhaustively_verify_refcounts(max_clean_root_inclusive);
+            //at startup use all cores to verify refcounts
+            if is_startup {
+                self.exhaustively_verify_refcounts(max_clean_root_inclusive);
+            } else {
+                // otherwise, use the cleaning thread pool
+                self.thread_pool_clean
+                    .install(|| self.exhaustively_verify_refcounts(max_clean_root_inclusive));
+            }
         }
 
         let _guard = self.active_stats.activate(ActiveStatItem::Clean);
@@ -7707,12 +7724,11 @@ impl AccountsDb {
         accounts: &impl StorableAccounts<'a>,
         reclaim: UpsertReclaim,
         update_index_thread_selection: UpdateIndexThreadSelection,
+        thread_pool: &ThreadPool,
     ) -> SlotList<AccountInfo> {
         let target_slot = accounts.target_slot();
-        // using a thread pool here results in deadlock panics from bank_hashes.write()
-        // so, instead we limit how many threads will be created to the same size as the bg thread pool
         let len = std::cmp::min(accounts.len(), infos.len());
-        let threshold = 1;
+
         let update = |start, end| {
             let mut reclaims = Vec::with_capacity((end - start) / 2);
 
@@ -7734,6 +7750,8 @@ impl AccountsDb {
             });
             reclaims
         };
+
+        let threshold = 1;
         if matches!(
             update_index_thread_selection,
             UpdateIndexThreadSelection::PoolWithThreshold,
@@ -7741,15 +7759,17 @@ impl AccountsDb {
         {
             let chunk_size = std::cmp::max(1, len / quarter_thread_count()); // # pubkeys/thread
             let batches = 1 + len / chunk_size;
-            (0..batches)
-                .into_par_iter()
-                .map(|batch| {
-                    let start = batch * chunk_size;
-                    let end = std::cmp::min(start + chunk_size, len);
-                    update(start, end)
-                })
-                .flatten()
-                .collect::<Vec<_>>()
+            thread_pool.install(|| {
+                (0..batches)
+                    .into_par_iter()
+                    .map(|batch| {
+                        let start = batch * chunk_size;
+                        let end = std::cmp::min(start + chunk_size, len);
+                        update(start, end)
+                    })
+                    .flatten()
+                    .collect::<Vec<_>>()
+            })
         } else {
             update(0, len)
         }
@@ -8341,6 +8361,7 @@ impl AccountsDb {
             transactions,
             reclaim,
             update_index_thread_selection,
+            &self.thread_pool,
         );
     }
 
@@ -8360,6 +8381,7 @@ impl AccountsDb {
             None,
             StoreReclaims::Ignore,
             UpdateIndexThreadSelection::PoolWithThreshold,
+            &self.thread_pool_clean,
         )
     }
 
@@ -8371,6 +8393,7 @@ impl AccountsDb {
         transactions: Option<&'a [&'a SanitizedTransaction]>,
         reclaim: StoreReclaims,
         update_index_thread_selection: UpdateIndexThreadSelection,
+        thread_pool: &ThreadPool,
     ) -> StoreAccountsTiming {
         self.stats
             .store_num_accounts
@@ -8399,8 +8422,13 @@ impl AccountsDb {
         // after the account are stored by the above `store_accounts_to`
         // call and all the accounts are stored, all reads after this point
         // will know to not check the cache anymore
-        let mut reclaims =
-            self.update_index(infos, &accounts, reclaim, update_index_thread_selection);
+        let mut reclaims = self.update_index(
+            infos,
+            &accounts,
+            reclaim,
+            update_index_thread_selection,
+            thread_pool,
+        );
 
         // For each updated account, `reclaims` should only have at most one
         // item (if the account was previously updated in this slot).

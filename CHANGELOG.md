@@ -13,14 +13,23 @@ Release channels have their own copy of this changelog:
 * [stable - v2.0](https://github.com/anza-xyz/agave/blob/v2.0/CHANGELOG.md)
 
 <a name="edge-channel"></a>
-## [2.2.0] - Unreleased
+## 2.2.0 - Unreleased
+* Breaking:
+  * Blockstore Index column format change
+    * The Blockstore Index column format has been updated. The column format written in v2.2 is compatible with v2.1, but incompatible with v2.0 and older.
+  * Snapshot format change
+    * The snapshot format has been modified to implement SIMD-215. Since only adjacent versions are guaranteed to maintain snapshot compatibility, this means snapshots created with v2.2 are compatible with v2.1 and incompatible with v2.0 and older.
 * Changes
   * CLI:
     * Add global `--skip-preflight` option for skipping preflight checks on all transactions sent through RPC. This flag, along with `--use-rpc`, can improve success rate with program deployments using the public RPC nodes.
+    * Add new command `solana feature revoke` for revoking pending feature activations. When a feature is activated, `solana feature revoke <feature-keypair> <cluster>` can be used to deallocate and reassign the account to the System program, undoing the operation. This can only be done before the feature becomes active.
   * Unhide `--accounts-db-access-storages-method` for agave-validator and agave-ledger-tool and change default to `file`
   * Remove tracer stats from banking-trace. `banking-trace` directory should be cleared when restarting on v2.2 for first time. It will not break if not cleared, but the file will be a mix of new/old format. (#4043)
+  * Add `--snapshot-zstd-compression-level` to set the compression level when archiving snapshots with zstd.
+  * SDK:
+    * `cargo-build-sbf`: add `--skip-tools-install` flag to avoid downloading platform tools and `--no-rustup-override` flag to not use rustup when invoking `cargo`. Useful for immutable environments like Nix.
 
-## [2.1.0]
+## 2.1.0
 * Breaking:
   * SDK:
     * `cargo-build-bpf` and `cargo-test-bpf` have been deprecated for two years and have now been definitely removed.
@@ -66,7 +75,7 @@ solana_pubkey::declare_id!("MyProgram1111111111111111111111111111111111");
   * `unified-scheduler` as default option for `--block-verification-method` (#2653)
   * warn that `thread-local-multi-iterator` option for `--block-production-method` is deprecated (#3113)
 
-## [2.0.0]
+## 2.0.0
 * Breaking
   * SDK:
     * Support for Borsh v0.9 removed, please use v1 or v0.10 (#1440)
@@ -107,7 +116,7 @@ solana_pubkey::declare_id!("MyProgram1111111111111111111111111111111111");
   * Deprecate the `fifo` option for `--rocksdb-shred-compaction` (#1882)
     * `fifo` will remain supported in v2.0 with plans to fully remove in v2.1
 
-## [1.18.0]
+## 1.18.0
 * Changes
   * Added a github check to support `changelog` label
   * The default for `--use-snapshot-archives-at-startup` is now `when-newest` (#33883)
@@ -134,7 +143,7 @@ limited backward compatibility for v0.10 and v0.9. Please upgrade to Borsh v1.
   * Operators running their own bigtable instances need to create the `entries`
     table before upgrading their warehouse nodes
 
-## [1.17.0]
+## 1.17.0
 * Changes
   * Added a changelog.
   * Added `--use-snapshot-archives-at-startup` for faster validator restarts

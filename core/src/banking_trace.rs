@@ -59,6 +59,11 @@ pub struct BankingTracer {
     active_tracer: Option<ActiveTracer>,
 }
 
+#[cfg_attr(
+    feature = "frozen-abi",
+    derive(AbiExample),
+    frozen_abi(digest = "DAdZnX6ijBWaxKAyksq4nJa6PAZqT4RShZqLWTtNvyAM")
+)]
 #[derive(Serialize, Deserialize, Debug)]
 pub struct TimedTracedEvent(pub std::time::SystemTime, pub TracedEvent);
 
@@ -262,7 +267,7 @@ impl BankingTracer {
         Self::channel(label, self.active_tracer.as_ref().cloned())
     }
 
-    fn create_channel_non_vote(&self) -> (BankingPacketSender, BankingPacketReceiver) {
+    pub fn create_channel_non_vote(&self) -> (BankingPacketSender, BankingPacketReceiver) {
         self.create_channel(ChannelLabel::NonVote)
     }
 

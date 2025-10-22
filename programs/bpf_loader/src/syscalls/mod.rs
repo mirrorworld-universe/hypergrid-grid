@@ -14,13 +14,13 @@ pub use self::{
 use {
     solana_account_info::AccountInfo,
     solana_bn254::prelude::{
-        alt_bn128_addition, alt_bn128_multiplication, alt_bn128_pairing, AltBn128Error,
-        ALT_BN128_ADDITION_OUTPUT_LEN, ALT_BN128_MULTIPLICATION_OUTPUT_LEN,
-        ALT_BN128_PAIRING_ELEMENT_LEN, ALT_BN128_PAIRING_OUTPUT_LEN,
+        alt_bn128_addition, alt_bn128_multiplication, alt_bn128_multiplication_128,
+        alt_bn128_pairing, AltBn128Error, ALT_BN128_ADDITION_OUTPUT_LEN,
+        ALT_BN128_MULTIPLICATION_OUTPUT_LEN, ALT_BN128_PAIRING_ELEMENT_LEN,
+        ALT_BN128_PAIRING_OUTPUT_LEN,
     },
     solana_compute_budget::compute_budget::ComputeBudget,
     solana_cpi::MAX_RETURN_DATA,
-    solana_define_syscall::codes,
     solana_feature_set::{
         self as feature_set, abort_on_invalid_curve, blake3_syscall_enabled,
         bpf_account_data_direct_mapping, curve25519_syscall_enabled,
@@ -49,7 +49,7 @@ use {
     solana_sbpf::{
         declare_builtin_function,
         memory_region::{AccessType, MemoryMapping},
-        program::{BuiltinProgram, FunctionRegistry, SBPFVersion},
+        program::{BuiltinProgram, SBPFVersion},
         vm::Config,
     },
     solana_sdk_ids::{bpf_loader, bpf_loader_deprecated, native_loader},
@@ -64,6 +64,7 @@ use {
     solana_type_overrides::sync::Arc,
     std::{
         alloc::Layout,
+        marker::PhantomData,
         mem::{align_of, size_of},
         slice::from_raw_parts_mut,
         str::{from_utf8, Utf8Error},
@@ -77,7 +78,7 @@ mod mem_ops;
 mod sysvar;
 
 /// Maximum signers
-pub const MAX_SIGNERS: usize = 16;
+const MAX_SIGNERS: usize = 16;
 
 /// Error definitions
 #[derive(Debug, ThisError, PartialEq, Eq)]
@@ -134,7 +135,7 @@ pub enum SyscallError {
 
 type Error = Box<dyn std::error::Error>;
 
-pub trait HasherImpl {
+trait HasherImpl {
     const NAME: &'static str;
     type Output: AsRef<[u8]>;
 
@@ -146,9 +147,9 @@ pub trait HasherImpl {
     fn get_max_slices(compute_budget: &ComputeBudget) -> u64;
 }
 
-pub struct Sha256Hasher(Hasher);
-pub struct Blake3Hasher(blake3::Hasher);
-pub struct Keccak256Hasher(keccak::Hasher);
+struct Sha256Hasher(Hasher);
+struct Blake3Hasher(blake3::Hasher);
+struct Keccak256Hasher(keccak::Hasher);
 
 impl HasherImpl for Sha256Hasher {
     const NAME: &'static str = "Sha256";
@@ -231,22 +232,84 @@ impl HasherImpl for Keccak256Hasher {
     }
 }
 
+// The VmSlice class is used for cases when you need a slice that is stored in the BPF
+// interpreter's virtual address space. Because this source code can be compiled with
+// addresses of different bit depths, we cannot assume that the 64-bit BPF interpreter's
+// pointer sizes can be mapped to physical pointer sizes. In particular, if you need a
+// slice-of-slices in the virtual space, the inner slices will be different sizes in a
+// 32-bit app build than in the 64-bit virtual space. Therefore instead of a slice-of-slices,
+// you should implement a slice-of-VmSlices, which can then use VmSlice::translate() to
+// map to the physical address.
+// This class must consist only of 16 bytes: a u64 ptr and a u64 len, to match the 64-bit
+// implementation of a slice in Rust. The PhantomData entry takes up 0 bytes.
+
+#[repr(C)]
+pub struct VmSlice<T> {
+    ptr: u64,
+    len: u64,
+    resource_type: PhantomData<T>,
+}
+
+impl<T> VmSlice<T> {
+    pub fn new(ptr: u64, len: u64) -> Self {
+        VmSlice {
+            ptr,
+            len,
+            resource_type: PhantomData,
+        }
+    }
+
+    pub fn ptr(&self) -> u64 {
+        self.ptr
+    }
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Adjust the length of the vector. This is unchecked, and it assumes that the pointer
+    /// points to valid memory of the correct length after vm-translation.
+    pub fn resize(&mut self, len: u64) {
+        self.len = len;
+    }
+
+    /// Returns a slice using a mapped physical address
+    pub fn translate(
+        &self,
+        memory_mapping: &MemoryMapping,
+        check_aligned: bool,
+    ) -> Result<&[T], Error> {
+        translate_slice::<T>(memory_mapping, self.ptr, self.len, check_aligned)
+    }
+
+    pub fn translate_mut(
+        &mut self,
+        memory_mapping: &MemoryMapping,
+        check_aligned: bool,
+    ) -> Result<&mut [T], Error> {
+        translate_slice_mut::<T>(memory_mapping, self.ptr, self.len, check_aligned)
+    }
+}
+
 fn consume_compute_meter(invoke_context: &InvokeContext, amount: u64) -> Result<(), Error> {
     invoke_context.consume_checked(amount)?;
     Ok(())
 }
 
 macro_rules! register_feature_gated_function {
-    ($result:expr, $is_feature_active:expr, $name:expr, $key:expr, $call:expr $(,)?) => {
+    ($result:expr, $is_feature_active:expr, $name:expr, $call:expr $(,)?) => {
         if $is_feature_active {
-            $result.register_function($name, $key, $call)
+            $result.register_function($name, $call)
         } else {
             Ok(())
         }
     };
 }
 
-pub fn morph_into_deployment_environment_v1(
+pub(crate) fn morph_into_deployment_environment_v1(
     from: Arc<BuiltinProgram<InvokeContext>>,
 ) -> Result<BuiltinProgram<InvokeContext>, Error> {
     let mut config = from.get_config().clone();
@@ -256,12 +319,12 @@ pub fn morph_into_deployment_environment_v1(
     // config.enabled_sbpf_versions =
     //     *config.enabled_sbpf_versions.end()..=*config.enabled_sbpf_versions.end();
 
-    let mut result = BuiltinProgram::new_loader_with_dense_registration(config);
+    let mut result = BuiltinProgram::new_loader(config);
 
-    for (key, (name, value)) in from.get_function_registry(SBPFVersion::V3).iter() {
+    for (_key, (name, value)) in from.get_function_registry().iter() {
         // Deployment of programs with sol_alloc_free is disabled. So do not register the syscall.
         if name != *b"sol_alloc_free_" {
-            result.register_function(unsafe { std::str::from_utf8_unchecked(name) }, key, value)?;
+            result.register_function(unsafe { std::str::from_utf8_unchecked(name) }, value)?;
         }
     }
 
@@ -326,67 +389,44 @@ pub fn create_program_runtime_environment_v1<'a>(
         aligned_memory_mapping: !feature_set.is_active(&bpf_account_data_direct_mapping::id()),
         // Warning, do not use `Config::default()` so that configuration here is explicit.
     };
-    let mut result = BuiltinProgram::new_loader_with_dense_registration(config);
+    let mut result = BuiltinProgram::new_loader(config);
 
     // Abort
-    result.register_function("abort", codes::ABORT, SyscallAbort::vm)?;
+    result.register_function("abort", SyscallAbort::vm)?;
 
     // Panic
-    result.register_function("sol_panic_", codes::SOL_PANIC, SyscallPanic::vm)?;
+    result.register_function("sol_panic_", SyscallPanic::vm)?;
 
     // Logging
-    result.register_function("sol_log_", codes::SOL_LOG_, SyscallLog::vm)?;
-    result.register_function("sol_log_64_", codes::SOL_LOG_64_, SyscallLogU64::vm)?;
-    result.register_function(
-        "sol_log_pubkey",
-        codes::SOL_LOG_PUBKEY,
-        SyscallLogPubkey::vm,
-    )?;
-    result.register_function(
-        "sol_log_compute_units_",
-        codes::SOL_LOG_COMPUTE_UNITS_,
-        SyscallLogBpfComputeUnits::vm,
-    )?;
+    result.register_function("sol_log_", SyscallLog::vm)?;
+    result.register_function("sol_log_64_", SyscallLogU64::vm)?;
+    result.register_function("sol_log_pubkey", SyscallLogPubkey::vm)?;
+    result.register_function("sol_log_compute_units_", SyscallLogBpfComputeUnits::vm)?;
 
     // Program defined addresses (PDA)
     result.register_function(
         "sol_create_program_address",
-        codes::SOL_CREATE_PROGRAM_ADDRESS,
         SyscallCreateProgramAddress::vm,
     )?;
     result.register_function(
         "sol_try_find_program_address",
-        codes::SOL_TRY_FIND_PROGRAM_ADDRESS,
         SyscallTryFindProgramAddress::vm,
     )?;
 
     // Sha256
-    result.register_function(
-        "sol_sha256",
-        codes::SOL_SHA256,
-        SyscallHash::vm::<Sha256Hasher>,
-    )?;
+    result.register_function("sol_sha256", SyscallHash::vm::<Sha256Hasher>)?;
 
     // Keccak256
-    result.register_function(
-        "sol_keccak256",
-        codes::SOL_KECCAK256,
-        SyscallHash::vm::<Keccak256Hasher>,
-    )?;
+    result.register_function("sol_keccak256", SyscallHash::vm::<Keccak256Hasher>)?;
 
     // Secp256k1 Recover
-    result.register_function(
-        "sol_secp256k1_recover",
-        codes::SOL_SECP256K1_RECOVER,
-        SyscallSecp256k1Recover::vm,
-    )?;
+    result.register_function("sol_secp256k1_recover", SyscallSecp256k1Recover::vm)?;
 
     // Blake3
     register_feature_gated_function!(
         result,
         blake3_syscall_enabled,
         "sol_blake3",
-        codes::SOL_BLAKE3,
         SyscallHash::vm::<Blake3Hasher>,
     )?;
 
@@ -395,112 +435,75 @@ pub fn create_program_runtime_environment_v1<'a>(
         result,
         curve25519_syscall_enabled,
         "sol_curve_validate_point",
-        codes::SOL_CURVE_VALIDATE_POINT,
         SyscallCurvePointValidation::vm,
     )?;
     register_feature_gated_function!(
         result,
         curve25519_syscall_enabled,
         "sol_curve_group_op",
-        codes::SOL_CURVE_GROUP_OP,
         SyscallCurveGroupOps::vm,
     )?;
     register_feature_gated_function!(
         result,
         curve25519_syscall_enabled,
         "sol_curve_multiscalar_mul",
-        codes::SOL_CURVE_MULTISCALAR_MUL,
         SyscallCurveMultiscalarMultiplication::vm,
     )?;
 
     // Sysvars
-    result.register_function(
-        "sol_get_clock_sysvar",
-        codes::SOL_GET_CLOCK_SYSVAR,
-        SyscallGetClockSysvar::vm,
-    )?;
+    result.register_function("sol_get_clock_sysvar", SyscallGetClockSysvar::vm)?;
     result.register_function(
         "sol_get_epoch_schedule_sysvar",
-        codes::SOL_GET_EPOCH_SCHEDULE_SYSVAR,
         SyscallGetEpochScheduleSysvar::vm,
     )?;
     register_feature_gated_function!(
         result,
         !disable_fees_sysvar,
         "sol_get_fees_sysvar",
-        codes::SOL_GET_FEES_SYSVAR,
         SyscallGetFeesSysvar::vm,
     )?;
-    result.register_function(
-        "sol_get_rent_sysvar",
-        codes::SOL_GET_RENT_SYSVAR,
-        SyscallGetRentSysvar::vm,
-    )?;
+    result.register_function("sol_get_rent_sysvar", SyscallGetRentSysvar::vm)?;
 
     register_feature_gated_function!(
         result,
         last_restart_slot_syscall_enabled,
         "sol_get_last_restart_slot",
-        codes::SOL_GET_LAST_RESTART_SLOT,
         SyscallGetLastRestartSlotSysvar::vm,
     )?;
 
     result.register_function(
         "sol_get_epoch_rewards_sysvar",
-        codes::SOL_GET_EPOCH_REWARDS_SYSVAR,
         SyscallGetEpochRewardsSysvar::vm,
     )?;
 
     // Memory ops
-    result.register_function("sol_memcpy_", codes::SOL_MEMCPY_, SyscallMemcpy::vm)?;
-    result.register_function("sol_memmove_", codes::SOL_MEMMOVE_, SyscallMemmove::vm)?;
-    result.register_function("sol_memset_", codes::SOL_MEMSET_, SyscallMemset::vm)?;
-    result.register_function("sol_memcmp_", codes::SOL_MEMCMP_, SyscallMemcmp::vm)?;
+    result.register_function("sol_memcpy_", SyscallMemcpy::vm)?;
+    result.register_function("sol_memmove_", SyscallMemmove::vm)?;
+    result.register_function("sol_memset_", SyscallMemset::vm)?;
+    result.register_function("sol_memcmp_", SyscallMemcmp::vm)?;
 
     // Processed sibling instructions
     result.register_function(
         "sol_get_processed_sibling_instruction",
-        codes::SOL_GET_PROCESSED_SIBLING_INSTRUCTION,
         SyscallGetProcessedSiblingInstruction::vm,
     )?;
 
     // Stack height
-    result.register_function(
-        "sol_get_stack_height",
-        codes::SOL_GET_STACK_HEIGHT,
-        SyscallGetStackHeight::vm,
-    )?;
+    result.register_function("sol_get_stack_height", SyscallGetStackHeight::vm)?;
 
     // Return data
-    result.register_function(
-        "sol_set_return_data",
-        codes::SOL_SET_RETURN_DATA,
-        SyscallSetReturnData::vm,
-    )?;
-    result.register_function(
-        "sol_get_return_data",
-        codes::SOL_GET_RETURN_DATA,
-        SyscallGetReturnData::vm,
-    )?;
+    result.register_function("sol_set_return_data", SyscallSetReturnData::vm)?;
+    result.register_function("sol_get_return_data", SyscallGetReturnData::vm)?;
 
     // Cross-program invocation
-    result.register_function(
-        "sol_invoke_signed_c",
-        codes::SOL_INVOKE_SIGNED_C,
-        SyscallInvokeSignedC::vm,
-    )?;
-    result.register_function(
-        "sol_invoke_signed_rust",
-        codes::SOL_INVOKE_SIGNED_RUST,
-        SyscallInvokeSignedRust::vm,
-    )?;
+    result.register_function("sol_invoke_signed_c", SyscallInvokeSignedC::vm)?;
+    result.register_function("sol_invoke_signed_rust", SyscallInvokeSignedRust::vm)?;
 
     // Memory allocator
     register_feature_gated_function!(
         result,
         !disable_deploy_of_alloc_free_syscall,
         "sol_alloc_free_",
-        codes::SOL_ALLOC_FREE_,
         SyscallAllocFree::vm,
     )?;
 
@@ -509,7 +512,6 @@ pub fn create_program_runtime_environment_v1<'a>(
         result,
         enable_alt_bn128_syscall,
         "sol_alt_bn128_group_op",
-        codes::SOL_ALT_BN128_GROUP_OP,
         SyscallAltBn128::vm,
     )?;
 
@@ -518,7 +520,6 @@ pub fn create_program_runtime_environment_v1<'a>(
         result,
         enable_big_mod_exp_syscall,
         "sol_big_mod_exp",
-        codes::SOL_BIG_MOD_EXP,
         SyscallBigModExp::vm,
     )?;
 
@@ -527,7 +528,6 @@ pub fn create_program_runtime_environment_v1<'a>(
         result,
         enable_poseidon_syscall,
         "sol_poseidon",
-        codes::SOL_POSEIDON,
         SyscallPoseidon::vm,
     )?;
 
@@ -536,7 +536,6 @@ pub fn create_program_runtime_environment_v1<'a>(
         result,
         remaining_compute_units_syscall_enabled,
         "sol_remaining_compute_units",
-        codes::SOL_REMAINING_COMPUTE_UNITS,
         SyscallRemainingComputeUnits::vm
     )?;
 
@@ -545,7 +544,6 @@ pub fn create_program_runtime_environment_v1<'a>(
         result,
         enable_alt_bn128_compression_syscall,
         "sol_alt_bn128_compression",
-        codes::SOL_ALT_BN128_COMPRESSION,
         SyscallAltBn128Compression::vm,
     )?;
 
@@ -554,7 +552,6 @@ pub fn create_program_runtime_environment_v1<'a>(
         result,
         get_sysvar_syscall_enabled,
         "sol_get_sysvar",
-        codes::SOL_GET_SYSVAR,
         SyscallGetSysvar::vm,
     )?;
 
@@ -563,12 +560,11 @@ pub fn create_program_runtime_environment_v1<'a>(
         result,
         enable_get_epoch_stake_syscall,
         "sol_get_epoch_stake",
-        codes::SOL_GET_EPOCH_STAKE,
         SyscallGetEpochStake::vm,
     )?;
 
     // Log data
-    result.register_function("sol_log_data", codes::SOL_LOG_DATA, SyscallLogData::vm)?;
+    result.register_function("sol_log_data", SyscallLogData::vm)?;
 
     Ok(result)
 }
@@ -594,7 +590,7 @@ pub fn create_program_runtime_environment_v2<'a>(
         aligned_memory_mapping: true,
         // Warning, do not use `Config::default()` so that configuration here is explicit.
     };
-    BuiltinProgram::new_loader(config, FunctionRegistry::default())
+    BuiltinProgram::new_loader(config)
 }
 
 fn address_is_aligned<T>(address: u64) -> bool {
@@ -691,6 +687,62 @@ fn translate_slice<'a, T>(
     check_aligned: bool,
 ) -> Result<&'a [T], Error> {
     translate_slice_inner::<T>(
+        memory_mapping,
+        AccessType::Load,
+        vm_addr,
+        len,
+        check_aligned,
+    )
+    .map(|value| &*value)
+}
+
+fn translate_slice_of_slices_inner<'a, T>(
+    memory_mapping: &MemoryMapping,
+    access_type: AccessType,
+    vm_addr: u64,
+    len: u64,
+    check_aligned: bool,
+) -> Result<&'a mut [VmSlice<T>], Error> {
+    if len == 0 {
+        return Ok(&mut []);
+    }
+
+    let total_size = len.saturating_mul(size_of::<VmSlice<T>>() as u64);
+    if isize::try_from(total_size).is_err() {
+        return Err(SyscallError::InvalidLength.into());
+    }
+
+    let host_addr = translate(memory_mapping, access_type, vm_addr, total_size)?;
+
+    if check_aligned && !address_is_aligned::<VmSlice<T>>(host_addr) {
+        return Err(SyscallError::UnalignedPointer.into());
+    }
+    Ok(unsafe { from_raw_parts_mut(host_addr as *mut VmSlice<T>, len as usize) })
+}
+
+#[allow(dead_code)]
+fn translate_slice_of_slices_mut<'a, T>(
+    memory_mapping: &MemoryMapping,
+    vm_addr: u64,
+    len: u64,
+    check_aligned: bool,
+) -> Result<&'a mut [VmSlice<T>], Error> {
+    translate_slice_of_slices_inner::<T>(
+        memory_mapping,
+        AccessType::Store,
+        vm_addr,
+        len,
+        check_aligned,
+    )
+}
+
+fn translate_slice_of_slices<'a, T>(
+    memory_mapping: &MemoryMapping,
+    vm_addr: u64,
+    len: u64,
+    check_aligned: bool,
+) -> Result<&'a [VmSlice<T>], Error> {
+    translate_slice_of_slices_inner::<T>(
         memory_mapping,
         AccessType::Load,
         vm_addr,
@@ -806,22 +858,17 @@ fn translate_and_check_program_address_inputs<'a>(
     check_aligned: bool,
 ) -> Result<(Vec<&'a [u8]>, &'a Pubkey), Error> {
     let untranslated_seeds =
-        translate_slice::<&[u8]>(memory_mapping, seeds_addr, seeds_len, check_aligned)?;
+        translate_slice_of_slices::<u8>(memory_mapping, seeds_addr, seeds_len, check_aligned)?;
     if untranslated_seeds.len() > MAX_SEEDS {
         return Err(SyscallError::BadSeeds(PubkeyError::MaxSeedLengthExceeded).into());
     }
     let seeds = untranslated_seeds
         .iter()
         .map(|untranslated_seed| {
-            if untranslated_seed.len() > MAX_SEED_LEN {
+            if untranslated_seed.len() > MAX_SEED_LEN as u64 {
                 return Err(SyscallError::BadSeeds(PubkeyError::MaxSeedLengthExceeded).into());
             }
-            translate_slice::<u8>(
-                memory_mapping,
-                untranslated_seed.as_ptr() as *const _ as u64,
-                untranslated_seed.len() as u64,
-                check_aligned,
-            )
+            untranslated_seed.translate(memory_mapping, check_aligned)
         })
         .collect::<Result<Vec<_>, Error>>()?;
     let program_id = translate_type::<Pubkey>(memory_mapping, program_id_addr, check_aligned)?;
@@ -1728,7 +1775,16 @@ declare_builtin_function!(
 
         let calculation = match group_op {
             ALT_BN128_ADD => alt_bn128_addition,
-            ALT_BN128_MUL => alt_bn128_multiplication,
+            ALT_BN128_MUL => {
+                let fix_alt_bn128_multiplication_input_length = invoke_context
+                    .get_feature_set()
+                    .is_active(&feature_set::fix_alt_bn128_multiplication_input_length::id());
+                if fix_alt_bn128_multiplication_input_length {
+                    alt_bn128_multiplication
+                } else {
+                    alt_bn128_multiplication_128
+                }
+            }
             ALT_BN128_PAIRING => alt_bn128_pairing,
             _ => {
                 return Err(SyscallError::InvalidAttribute.into());
@@ -1877,7 +1933,7 @@ declare_builtin_function!(
             poseidon::HASH_BYTES as u64,
             invoke_context.get_check_aligned(),
         )?;
-        let inputs = translate_slice::<&[u8]>(
+        let inputs = translate_slice_of_slices::<u8>(
             memory_mapping,
             vals_addr,
             vals_len,
@@ -1885,14 +1941,7 @@ declare_builtin_function!(
         )?;
         let inputs = inputs
             .iter()
-            .map(|input| {
-                translate_slice::<u8>(
-                    memory_mapping,
-                    input.as_ptr() as *const _ as u64,
-                    input.len() as u64,
-                    invoke_context.get_check_aligned(),
-                )
-            })
+            .map(|input| input.translate(memory_mapping, invoke_context.get_check_aligned()))
             .collect::<Result<Vec<_>, Error>>()?;
 
         let simplify_alt_bn128_syscall_error_codes = invoke_context
@@ -2093,22 +2142,18 @@ declare_builtin_function!(
         )?;
         let mut hasher = H::create_hasher();
         if vals_len > 0 {
-            let vals = translate_slice::<&[u8]>(
+            let vals = translate_slice_of_slices::<u8>(
                 memory_mapping,
                 vals_addr,
                 vals_len,
                 invoke_context.get_check_aligned(),
             )?;
+
             for val in vals.iter() {
-                let bytes = translate_slice::<u8>(
-                    memory_mapping,
-                    val.as_ptr() as u64,
-                    val.len() as u64,
-                    invoke_context.get_check_aligned(),
-                )?;
+                let bytes = val.translate(memory_mapping, invoke_context.get_check_aligned())?;
                 let cost = compute_budget.mem_op_base_cost.max(
                     hash_byte_cost.saturating_mul(
-                        (val.len() as u64)
+                        val.len()
                             .checked_div(2)
                             .expect("div by non-zero literal"),
                     ),
@@ -2257,8 +2302,8 @@ mod tests {
 
     #[allow(dead_code)]
     struct MockSlice {
-        pub vm_addr: u64,
-        pub len: usize,
+        vm_addr: u64,
+        len: usize,
     }
 
     #[test]
@@ -5040,12 +5085,12 @@ mod tests {
         unsafe { slice::from_raw_parts_mut(slice::from_mut(val).as_mut_ptr().cast(), size) }
     }
 
-    pub fn bytes_of_slice<T>(val: &[T]) -> &[u8] {
+    fn bytes_of_slice<T>(val: &[T]) -> &[u8] {
         let size = val.len().wrapping_mul(mem::size_of::<T>());
         unsafe { slice::from_raw_parts(val.as_ptr().cast(), size) }
     }
 
-    pub fn bytes_of_slice_mut<T>(val: &mut [T]) -> &mut [u8] {
+    fn bytes_of_slice_mut<T>(val: &mut [T]) -> &mut [u8] {
         let size = val.len().wrapping_mul(mem::size_of::<T>());
         unsafe { slice::from_raw_parts_mut(val.as_mut_ptr().cast(), size) }
     }

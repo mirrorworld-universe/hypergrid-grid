@@ -351,15 +351,9 @@ impl LocalCluster {
             None, // rpc_to_plugin_manager_receiver
             Arc::new(RwLock::new(ValidatorStartProgress::default())),
             socket_addr_space,
-            ValidatorTpuConfig {
-                use_quic: DEFAULT_TPU_USE_QUIC,
-                vote_use_quic: DEFAULT_VOTE_USE_QUIC,
-                tpu_connection_pool_size: DEFAULT_TPU_CONNECTION_POOL_SIZE,
-                // We are turning tpu_enable_udp to true in order to prevent concurrent local cluster tests
-                // to use the same QUIC ports due to SO_REUSEPORT.
-                tpu_enable_udp: true,
-                tpu_max_connections_per_ipaddr_per_minute: 32, // max connections per IpAddr per minute
-            },
+            // We are turning tpu_enable_udp to true in order to prevent concurrent local cluster tests
+            // to use the same QUIC ports due to SO_REUSEPORT.
+            ValidatorTpuConfig::new_for_tests(true),
             Arc::new(RwLock::new(None)),
         )
         .expect("assume successful validator start");
@@ -525,12 +519,17 @@ impl LocalCluster {
             // setup as a listener
             info!("listener {} ", validator_pubkey,);
         } else if should_create_vote_pubkey {
-            let validator_balance = Self::transfer_with_client(
+            Self::transfer_with_client(
                 &client,
                 &self.funding_keypair,
                 &validator_pubkey,
                 Self::required_validator_funding(stake),
             );
+            let validator_balance = client
+                .rpc_client()
+                .get_balance_with_commitment(&validator_pubkey, CommitmentConfig::processed())
+                .expect("received response")
+                .value;
             info!(
                 "validator {} balance {}",
                 validator_pubkey, validator_balance
@@ -563,13 +562,7 @@ impl LocalCluster {
             None, // rpc_to_plugin_manager_receiver
             Arc::new(RwLock::new(ValidatorStartProgress::default())),
             socket_addr_space,
-            ValidatorTpuConfig {
-                use_quic: DEFAULT_TPU_USE_QUIC,
-                vote_use_quic: DEFAULT_VOTE_USE_QUIC,
-                tpu_connection_pool_size: DEFAULT_TPU_CONNECTION_POOL_SIZE,
-                tpu_enable_udp: DEFAULT_TPU_ENABLE_UDP,
-                tpu_max_connections_per_ipaddr_per_minute: 32, // max connections per IpAddr per mintute
-            },
+            ValidatorTpuConfig::new_for_tests(DEFAULT_TPU_ENABLE_UDP),
             Arc::new(RwLock::new(None)),
         )
         .expect("assume successful validator start");
@@ -603,11 +596,11 @@ impl LocalCluster {
         self.close_preserve_ledgers();
     }
 
-    pub fn transfer(&self, source_keypair: &Keypair, dest_pubkey: &Pubkey, lamports: u64) -> u64 {
+    pub fn transfer(&self, source_keypair: &Keypair, dest_pubkey: &Pubkey, lamports: u64) {
         let client = self
             .build_validator_tpu_quic_client(self.entry_point_info.pubkey())
             .expect("new tpu quic client");
-        Self::transfer_with_client(&client, source_keypair, dest_pubkey, lamports)
+        Self::transfer_with_client(&client, source_keypair, dest_pubkey, lamports);
     }
 
     fn discover_nodes(
@@ -751,7 +744,7 @@ impl LocalCluster {
         source_keypair: &Keypair,
         dest_pubkey: &Pubkey,
         lamports: u64,
-    ) -> u64 {
+    ) {
         trace!("getting leader blockhash");
         let (blockhash, _) = client
             .rpc_client()
@@ -767,14 +760,6 @@ impl LocalCluster {
 
         LocalCluster::send_transaction_with_retries(client, &[source_keypair], &mut tx, 10, 0)
             .expect("client transfer should succeed");
-        client
-            .rpc_client()
-            .wait_for_balance_with_commitment(
-                dest_pubkey,
-                Some(lamports),
-                CommitmentConfig::processed(),
-            )
-            .expect("get balance should succeed")
     }
 
     fn setup_vote_and_stake_accounts(
@@ -1103,13 +1088,7 @@ impl Cluster for LocalCluster {
             None, // rpc_to_plugin_manager_receiver
             Arc::new(RwLock::new(ValidatorStartProgress::default())),
             socket_addr_space,
-            ValidatorTpuConfig {
-                use_quic: DEFAULT_TPU_USE_QUIC,
-                vote_use_quic: DEFAULT_VOTE_USE_QUIC,
-                tpu_connection_pool_size: DEFAULT_TPU_CONNECTION_POOL_SIZE,
-                tpu_enable_udp: DEFAULT_TPU_ENABLE_UDP,
-                tpu_max_connections_per_ipaddr_per_minute: 32, // max connections per IpAddr per minute, use higher value because of tests
-            },
+            ValidatorTpuConfig::new_for_tests(DEFAULT_TPU_ENABLE_UDP),
             Arc::new(RwLock::new(None)),
         )
         .expect("assume successful validator start");

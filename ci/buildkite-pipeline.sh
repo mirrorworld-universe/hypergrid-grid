@@ -217,8 +217,8 @@ all_test_steps() {
              ^ci/test-local-cluster.sh \
              ^core/build.rs \
              ^fetch-perf-libs.sh \
+             ^platform-tools-sdk/ \
              ^programs/ \
-             ^sdk/ \
              cargo-build-sbf$ \
              cargo-test-sbf$ \
       ; then
@@ -259,8 +259,8 @@ EOF
              ^ci/test-local-cluster.sh \
              ^core/build.rs \
              ^fetch-perf-libs.sh \
+             ^platform-tools-sdk/ \
              ^programs/ \
-             ^sdk/ \
              cargo-build-sbf$ \
              cargo-test-sbf$ \
              ^ci/downstream-projects \
@@ -270,18 +270,6 @@ EOF
   else
     annotate --style info \
       "downstream-projects skipped as no relevant files were modified"
-  fi
-
-  # Wasm support
-  if affects \
-             ^ci/test-wasm.sh \
-             ^ci/test-stable.sh \
-             ^sdk/ \
-      ; then
-    command_step wasm "ci/docker-run-default-image.sh ci/test-wasm.sh" 20
-  else
-    annotate --style info \
-      "wasm skipped as no relevant files were modified"
   fi
 
   # Coverage...
