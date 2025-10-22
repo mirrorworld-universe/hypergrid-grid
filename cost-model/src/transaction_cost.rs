@@ -1,9 +1,8 @@
 #[cfg(feature = "dev-context-only-utils")]
-use solana_runtime_transaction::compute_budget_instruction_details::ComputeBudgetInstructionDetails;
+use solana_compute_budget_instruction::compute_budget_instruction_details::ComputeBudgetInstructionDetails;
 use {
-    crate::block_cost_limits,
-    solana_runtime_transaction::transaction_with_meta::TransactionWithMeta,
-    solana_sdk::pubkey::Pubkey,
+    crate::block_cost_limits, solana_runtime_transaction::transaction_meta::StaticMeta,
+    solana_sdk::pubkey::Pubkey, solana_svm_transaction::svm_message::SVMMessage,
 };
 
 /// TransactionCost is used to represent resources required to process
@@ -17,12 +16,12 @@ use {
 const SIMPLE_VOTE_USAGE_COST: u64 = 3428;
 
 #[derive(Debug)]
-pub enum TransactionCost<'a, Tx: TransactionWithMeta> {
+pub enum TransactionCost<'a, Tx> {
     SimpleVote { transaction: &'a Tx },
     Transaction(UsageCostDetails<'a, Tx>),
 }
 
-impl<'a, Tx: TransactionWithMeta> TransactionCost<'a, Tx> {
+impl<'a, Tx> TransactionCost<'a, Tx> {
     pub fn sum(&self) -> u64 {
         #![allow(clippy::assertions_on_constants)]
         match self {
@@ -90,7 +89,9 @@ impl<'a, Tx: TransactionWithMeta> TransactionCost<'a, Tx> {
             Self::Transaction(usage_cost) => usage_cost.write_lock_cost,
         }
     }
+}
 
+impl<Tx: SVMMessage> TransactionCost<'_, Tx> {
     pub fn writable_accounts(&self) -> impl Iterator<Item = &Pubkey> {
         let transaction = match self {
             Self::SimpleVote { transaction } => transaction,
@@ -102,7 +103,9 @@ impl<'a, Tx: TransactionWithMeta> TransactionCost<'a, Tx> {
             .enumerate()
             .filter_map(|(index, key)| transaction.is_writable(index).then_some(key))
     }
+}
 
+impl<Tx: StaticMeta> TransactionCost<'_, Tx> {
     pub fn num_transaction_signatures(&self) -> u64 {
         match self {
             Self::SimpleVote { .. } => 1,
@@ -136,7 +139,7 @@ impl<'a, Tx: TransactionWithMeta> TransactionCost<'a, Tx> {
 
 // costs are stored in number of 'compute unit's
 #[derive(Debug)]
-pub struct UsageCostDetails<'a, Tx: TransactionWithMeta> {
+pub struct UsageCostDetails<'a, Tx> {
     pub transaction: &'a Tx,
     pub signature_cost: u64,
     pub write_lock_cost: u64,
@@ -146,7 +149,7 @@ pub struct UsageCostDetails<'a, Tx: TransactionWithMeta> {
     pub allocated_accounts_data_size: u64,
 }
 
-impl<'a, Tx: TransactionWithMeta> UsageCostDetails<'a, Tx> {
+impl<'a, Tx> UsageCostDetails<'a, Tx> {
     pub fn sum(&self) -> u64 {
         self.signature_cost
             .saturating_add(self.write_lock_cost)
@@ -186,7 +189,8 @@ impl solana_svm_transaction::svm_message::SVMMessage for WritableKeysTransaction
 
     fn program_instructions_iter(
         &self,
-    ) -> impl Iterator<Item = (&Pubkey, solana_svm_transaction::instruction::SVMInstruction)> {
+    ) -> impl Iterator<Item = (&Pubkey, solana_svm_transaction::instruction::SVMInstruction)> + Clone
+    {
         core::iter::empty()
     }
 
@@ -256,7 +260,9 @@ impl solana_runtime_transaction::transaction_meta::StaticMeta for WritableKeysTr
 }
 
 #[cfg(feature = "dev-context-only-utils")]
-impl TransactionWithMeta for WritableKeysTransaction {
+impl solana_runtime_transaction::transaction_with_meta::TransactionWithMeta
+    for WritableKeysTransaction
+{
     #[allow(refining_impl_trait)]
     fn as_sanitized_transaction(
         &self,
@@ -323,8 +329,8 @@ mod tests {
 
         // expected vote tx cost: 2 write locks, 1 sig, 1 vote ix, 8cu of loaded accounts size,
         let expected_vote_cost = SIMPLE_VOTE_USAGE_COST;
-        // expected non-vote tx cost would include default loaded accounts size cost (16384) additionally
-        let expected_none_vote_cost = 20543;
+        // expected non-vote tx cost would include default loaded accounts size cost (16384) additionally, and 3_000 for instruction
+        let expected_none_vote_cost = 21443;
 
         let vote_cost = CostModel::calculate_cost(&vote_transaction, &FeatureSet::all_enabled());
         let none_vote_cost =

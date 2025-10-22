@@ -10,11 +10,9 @@
 //!    ALT, RuntimeTransaction<SanitizedMessage> transits into Dynamically Loaded state,
 //!    with its dynamic metadata loaded.
 use {
-    crate::{
-        compute_budget_instruction_details::*,
-        transaction_meta::{DynamicMeta, StaticMeta, TransactionMeta},
-    },
+    crate::transaction_meta::{DynamicMeta, StaticMeta, TransactionMeta},
     core::ops::Deref,
+    solana_compute_budget_instruction::compute_budget_instruction_details::*,
     solana_sdk::{
         hash::Hash,
         message::{AccountKeys, TransactionSignatureDetails},
@@ -86,7 +84,7 @@ impl<T: SVMMessage> SVMMessage for RuntimeTransaction<T> {
         self.transaction.instructions_iter()
     }
 
-    fn program_instructions_iter(&self) -> impl Iterator<Item = (&Pubkey, SVMInstruction)> {
+    fn program_instructions_iter(&self) -> impl Iterator<Item = (&Pubkey, SVMInstruction)> + Clone {
         self.transaction.program_instructions_iter()
     }
 

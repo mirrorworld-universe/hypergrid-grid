@@ -268,7 +268,7 @@ mod tests {
         super::*,
         solana_program_runtime::{
             loaded_programs::{BlockRelation, ForkGraph, ProgramRuntimeEnvironments},
-            solana_rbpf::program::BuiltinProgram,
+            solana_sbpf::program::BuiltinProgram,
         },
         solana_sdk::{account::WritableAccount, bpf_loader, bpf_loader_upgradeable},
         std::{

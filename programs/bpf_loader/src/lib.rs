@@ -22,7 +22,7 @@ use {
         stable_log,
         sysvar_cache::get_sysvar_with_account_check,
     },
-    solana_rbpf::{
+    solana_sbpf::{
         declare_builtin_function,
         ebpf::{self, MM_HEAP_START},
         elf::Executable,
@@ -43,7 +43,6 @@ use {
         loader_v4, native_loader,
         program_utils::limited_deserialize,
         pubkey::Pubkey,
-        saturating_add_assign,
         system_instruction::{self, MAX_PERMITTED_DATA_LENGTH},
         transaction_context::{IndexOfAccount, InstructionContext, TransactionContext},
     },
@@ -327,16 +326,16 @@ macro_rules! create_vm {
 macro_rules! mock_create_vm {
     ($vm:ident, $additional_regions:expr, $accounts_metadata:expr, $invoke_context:expr $(,)?) => {
         let loader = solana_type_overrides::sync::Arc::new(BuiltinProgram::new_mock());
-        let function_registry = solana_rbpf::program::FunctionRegistry::default();
-        let executable = solana_rbpf::elf::Executable::<InvokeContext>::from_text_bytes(
-            &[0x95, 0, 0, 0, 0, 0, 0, 0],
+        let function_registry = solana_sbpf::program::FunctionRegistry::default();
+        let executable = solana_sbpf::elf::Executable::<InvokeContext>::from_text_bytes(
+            &[0x9D, 0, 0, 0, 0, 0, 0, 0],
             loader,
-            SBPFVersion::V2,
+            SBPFVersion::V3,
             function_registry,
         )
         .unwrap();
         executable
-            .verify::<solana_rbpf::verifier::RequisiteVerifier>()
+            .verify::<solana_sbpf::verifier::RequisiteVerifier>()
             .unwrap();
         $crate::create_vm!(
             $vm,
@@ -469,10 +468,7 @@ pub fn process_instruction_inner(
         })?;
     drop(program_account);
     get_or_create_executor_time.stop();
-    saturating_add_assign!(
-        invoke_context.timings.get_or_create_executor_us,
-        get_or_create_executor_time.as_us()
-    );
+    invoke_context.timings.get_or_create_executor_us += get_or_create_executor_time.as_us();
 
     executor.ix_usage_counter.fetch_add(1, Ordering::Relaxed);
     match &executor.program {
@@ -1452,7 +1448,7 @@ pub fn execute<'a, 'b: 'a>(
         drop(vm);
         if let Some(execute_time) = invoke_context.execute_time.as_mut() {
             execute_time.stop();
-            saturating_add_assign!(invoke_context.timings.execute_us, execute_time.as_us());
+            invoke_context.timings.execute_us += execute_time.as_us();
         }
 
         ic_logger_msg!(
@@ -1473,6 +1469,24 @@ pub fn execute<'a, 'b: 'a>(
                 Err(Box::new(error) as Box<dyn std::error::Error>)
             }
             ProgramResult::Err(mut error) => {
+                if invoke_context
+                    .get_feature_set()
+                    .is_active(&solana_feature_set::deplete_cu_meter_on_vm_failure::id())
+                    && !matches!(error, EbpfError::SyscallError(_))
+                {
+                    // when an exception is thrown during the execution of a
+                    // Basic Block (e.g., a null memory dereference or other
+                    // faults), determining the exact number of CUs consumed
+                    // up to the point of failure requires additional effort
+                    // and is unnecessary since these cases are rare.
+                    //
+                    // In order to simplify CU tracking, simply consume all
+                    // remaining compute units so that the block cost
+                    // tracker uses the full requested compute unit cost for
+                    // this failed transaction.
+                    invoke_context.consume(invoke_context.get_remaining());
+                }
+
                 if direct_mapping {
                     if let EbpfError::AccessViolation(
                         AccessType::Store,
@@ -1549,12 +1563,9 @@ pub fn execute<'a, 'b: 'a>(
     deserialize_time.stop();
 
     // Update the timings
-    saturating_add_assign!(invoke_context.timings.serialize_us, serialize_time.as_us());
-    saturating_add_assign!(invoke_context.timings.create_vm_us, create_vm_time.as_us());
-    saturating_add_assign!(
-        invoke_context.timings.deserialize_us,
-        deserialize_time.as_us()
-    );
+    invoke_context.timings.serialize_us += serialize_time.as_us();
+    invoke_context.timings.create_vm_us += create_vm_time.as_us();
+    invoke_context.timings.deserialize_us += deserialize_time.as_us();
 
     execute_or_deserialize_result
 }
@@ -1685,7 +1696,7 @@ mod tests {
         let loader_id = bpf_loader::id();
         let program_id = Pubkey::new_unique();
         let program_account =
-            load_program_account_from_elf(&loader_id, "test_elfs/out/noop_aligned.so");
+            load_program_account_from_elf(&loader_id, "test_elfs/out/sbpfv3_return_ok.so");
         let parameter_id = Pubkey::new_unique();
         let parameter_account = AccountSharedData::new(1, 0, &loader_id);
         let parameter_meta = AccountMeta {
@@ -2173,10 +2184,10 @@ mod tests {
 
     #[test]
     fn test_bpf_loader_upgradeable_upgrade() {
-        let mut file = File::open("test_elfs/out/noop_aligned.so").expect("file open failed");
+        let mut file = File::open("test_elfs/out/sbpfv3_return_ok.so").expect("file open failed");
         let mut elf_orig = Vec::new();
         file.read_to_end(&mut elf_orig).unwrap();
-        let mut file = File::open("test_elfs/out/noop_unaligned.so").expect("file open failed");
+        let mut file = File::open("test_elfs/out/sbpfv3_return_err.so").expect("file open failed");
         let mut elf_new = Vec::new();
         file.read_to_end(&mut elf_new).unwrap();
         assert_ne!(elf_orig.len(), elf_new.len());
@@ -3772,7 +3783,7 @@ mod tests {
         let program_id = Pubkey::new_unique();
 
         // Create program account
-        let mut file = File::open("test_elfs/out/noop_aligned.so").expect("file open failed");
+        let mut file = File::open("test_elfs/out/sbpfv3_return_ok.so").expect("file open failed");
         let mut elf = Vec::new();
         file.read_to_end(&mut elf).unwrap();
 
@@ -3822,7 +3833,7 @@ mod tests {
         invoke_context: &mut InvokeContext,
         program_id: Pubkey,
     ) -> Result<(), InstructionError> {
-        let mut file = File::open("test_elfs/out/noop_unaligned.so").expect("file open failed");
+        let mut file = File::open("test_elfs/out/sbpfv3_return_ok.so").expect("file open failed");
         let mut elf = Vec::new();
         file.read_to_end(&mut elf).unwrap();
         deploy_program!(

@@ -24,10 +24,7 @@ use {
         transaction_batch::TransactionBatch,
         verify_precompiles::verify_precompiles,
     },
-    solana_runtime_transaction::{
-        instructions_processor::process_compute_budget_instructions,
-        transaction_with_meta::TransactionWithMeta,
-    },
+    solana_runtime_transaction::transaction_with_meta::TransactionWithMeta,
     solana_sdk::{
         clock::{FORWARD_TRANSACTIONS_TO_LEADER_AT_SLOT_OFFSET, MAX_PROCESSING_AGE},
         fee::FeeBudgetLimits,
@@ -41,9 +38,9 @@ use {
         transaction_processing_result::TransactionProcessingResultExtensions,
         transaction_processor::{ExecutionRecordingConfig, TransactionProcessingConfig},
     },
-    solana_svm_transaction::svm_message::SVMMessage,
     solana_timings::ExecuteTimings,
     std::{
+        num::Saturating,
         sync::{atomic::Ordering, Arc},
         time::Instant,
     },
@@ -578,7 +575,7 @@ impl Consumer {
             .filter_map(|transaction| {
                 transaction
                     .compute_budget_instruction_details()
-                    .sanitize_and_convert_to_compute_budget_limits()
+                    .sanitize_and_convert_to_compute_budget_limits(&bank.feature_set)
                     .ok()
                     .map(|limits| limits.compute_unit_price)
             })
@@ -754,15 +751,17 @@ impl Consumer {
 
     pub fn check_fee_payer_unlocked(
         bank: &Bank,
-        message: &impl SVMMessage,
+        transaction: &impl TransactionWithMeta,
         error_counters: &mut TransactionErrorMetrics,
     ) -> Result<(), TransactionError> {
-        let fee_payer = message.fee_payer();
-        let fee_budget_limits = FeeBudgetLimits::from(process_compute_budget_instructions(
-            message.program_instructions_iter(),
-        )?);
+        let fee_payer = transaction.fee_payer();
+        let fee_budget_limits = FeeBudgetLimits::from(
+            transaction
+                .compute_budget_instruction_details()
+                .sanitize_and_convert_to_compute_budget_limits(&bank.feature_set)?,
+        );
         let fee = solana_fee::calculate_fee(
-            message,
+            transaction,
             bank.get_lamports_per_signature() == 0,
             bank.fee_structure().lamports_per_signature,
             fee_budget_limits.prioritization_fee,
@@ -791,10 +790,11 @@ impl Consumer {
             (0, 0),
             |(units, times), program_timings| {
                 (
-                    units
-                        .saturating_add(program_timings.accumulated_units)
-                        .saturating_add(program_timings.total_errored_units),
-                    times.saturating_add(program_timings.accumulated_us),
+                    (Saturating(units)
+                        + program_timings.accumulated_units
+                        + program_timings.total_errored_units)
+                        .0,
+                    (Saturating(times) + program_timings.accumulated_us).0,
                 )
             },
         )
@@ -2521,11 +2521,11 @@ mod tests {
             execute_timings.details.per_program_timings.insert(
                 Pubkey::new_unique(),
                 ProgramTiming {
-                    accumulated_us: n * 100,
-                    accumulated_units: n * 1000,
-                    count: n as u32,
+                    accumulated_us: Saturating(n * 100),
+                    accumulated_units: Saturating(n * 1000),
+                    count: Saturating(n as u32),
                     errored_txs_compute_consumed: vec![],
-                    total_errored_units: 0,
+                    total_errored_units: Saturating(0),
                 },
             );
             expected_us += n * 100;

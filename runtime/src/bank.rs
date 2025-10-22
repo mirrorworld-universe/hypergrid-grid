@@ -37,7 +37,6 @@ use {
     crate::{
         account_saver::collect_accounts_to_store,
         bank::{
-            builtins::{BuiltinPrototype, BUILTINS, STATELESS_BUILTINS},
             metrics::*,
             partitioned_epoch_rewards::{EpochRewardStatus, StakeRewards, VoteRewardsAccounts},
         },
@@ -95,8 +94,10 @@ use {
     solana_bpf_loader_program::syscalls::{
         create_program_runtime_environment_v1, create_program_runtime_environment_v2,
     },
+    solana_builtins::{prototype::BuiltinPrototype, BUILTINS, STATELESS_BUILTINS},
     solana_compute_budget::compute_budget::ComputeBudget,
-    solana_cost_model::cost_tracker::CostTracker,
+    solana_compute_budget_instruction::instructions_processor::process_compute_budget_instructions,
+    solana_cost_model::{block_cost_limits::simd_0207_block_limits, cost_tracker::CostTracker},
     solana_feature_set::{
         self as feature_set, remove_rounding_in_fee_calculation, reward_full_priority_fee,
         FeatureSet,
@@ -107,7 +108,6 @@ use {
         invoke_context::BuiltinFunctionWithContext, loaded_programs::ProgramCacheEntry,
     },
     solana_runtime_transaction::{
-        instructions_processor::process_compute_budget_instructions,
         runtime_transaction::RuntimeTransaction, transaction_with_meta::TransactionWithMeta,
     },
     solana_sdk::{
@@ -467,6 +467,7 @@ pub struct BankFieldsToDeserialize {
     pub(crate) epoch_accounts_hash: Option<Hash>,
     // When removing the accounts lt hash featurization code, also remove this Option wrapper
     pub(crate) accounts_lt_hash: Option<AccountsLtHash>,
+    pub(crate) bank_hash_stats: BankHashStats,
 }
 
 /// Bank's common fields shared by all supported snapshot versions for serialization.
@@ -592,6 +593,7 @@ impl PartialEq for Bank {
             cache_for_accounts_lt_hash: _,
             stats_for_accounts_lt_hash: _,
             block_id,
+            bank_hash_stats: _,
             // Ignore new fields explicitly if they do not impact PartialEq.
             // Adding ".." will remove compile-time checks that if a new field
             // is added to the struct, this PartialEq is accordingly updated.
@@ -951,6 +953,9 @@ pub struct Bank {
     /// None for banks that have not yet completed replay or for leader banks as we cannot populate block_id
     /// until bankless leader. Can be computed directly from shreds without needing to execute transactions.
     block_id: RwLock<Option<Hash>>,
+
+    /// Accounts stats for computing the bank hash
+    bank_hash_stats: AtomicBankHashStats,
 }
 
 struct VoteWithStakeDelegations {
@@ -1013,6 +1018,87 @@ pub struct ProcessedTransactionCounts {
     pub processed_non_vote_transactions_count: u64,
     pub processed_with_successful_result_count: u64,
     pub signature_count: u64,
+}
+
+/// Account stats for computing the bank hash
+/// This struct is serialized and stored in the snapshot.
+#[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
+#[derive(Clone, Default, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BankHashStats {
+    pub num_updated_accounts: u64,
+    pub num_removed_accounts: u64,
+    pub num_lamports_stored: u64,
+    pub total_data_len: u64,
+    pub num_executable_accounts: u64,
+}
+
+impl BankHashStats {
+    pub fn update<T: ReadableAccount>(&mut self, account: &T) {
+        if account.lamports() == 0 {
+            self.num_removed_accounts += 1;
+        } else {
+            self.num_updated_accounts += 1;
+        }
+        self.total_data_len = self
+            .total_data_len
+            .wrapping_add(account.data().len() as u64);
+        if account.executable() {
+            self.num_executable_accounts += 1;
+        }
+        self.num_lamports_stored = self.num_lamports_stored.wrapping_add(account.lamports());
+    }
+    pub fn accumulate(&mut self, other: &BankHashStats) {
+        self.num_updated_accounts += other.num_updated_accounts;
+        self.num_removed_accounts += other.num_removed_accounts;
+        self.total_data_len = self.total_data_len.wrapping_add(other.total_data_len);
+        self.num_lamports_stored = self
+            .num_lamports_stored
+            .wrapping_add(other.num_lamports_stored);
+        self.num_executable_accounts += other.num_executable_accounts;
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct AtomicBankHashStats {
+    pub num_updated_accounts: AtomicU64,
+    pub num_removed_accounts: AtomicU64,
+    pub num_lamports_stored: AtomicU64,
+    pub total_data_len: AtomicU64,
+    pub num_executable_accounts: AtomicU64,
+}
+
+impl AtomicBankHashStats {
+    pub fn new(stat: &BankHashStats) -> Self {
+        AtomicBankHashStats {
+            num_updated_accounts: AtomicU64::new(stat.num_updated_accounts),
+            num_removed_accounts: AtomicU64::new(stat.num_removed_accounts),
+            num_lamports_stored: AtomicU64::new(stat.num_lamports_stored),
+            total_data_len: AtomicU64::new(stat.total_data_len),
+            num_executable_accounts: AtomicU64::new(stat.num_executable_accounts),
+        }
+    }
+
+    pub fn accumulate(&self, other: &BankHashStats) {
+        self.num_updated_accounts
+            .fetch_add(other.num_updated_accounts, Relaxed);
+        self.num_removed_accounts
+            .fetch_add(other.num_removed_accounts, Relaxed);
+        self.total_data_len.fetch_add(other.total_data_len, Relaxed);
+        self.num_lamports_stored
+            .fetch_add(other.num_lamports_stored, Relaxed);
+        self.num_executable_accounts
+            .fetch_add(other.num_executable_accounts, Relaxed);
+    }
+
+    pub fn load(&self) -> BankHashStats {
+        BankHashStats {
+            num_updated_accounts: self.num_updated_accounts.load(Relaxed),
+            num_removed_accounts: self.num_removed_accounts.load(Relaxed),
+            num_lamports_stored: self.num_lamports_stored.load(Relaxed),
+            total_data_len: self.total_data_len.load(Relaxed),
+            num_executable_accounts: self.num_executable_accounts.load(Relaxed),
+        }
+    }
 }
 
 impl Bank {
@@ -1086,6 +1172,7 @@ impl Bank {
             cache_for_accounts_lt_hash: RwLock::new(AHashMap::new()),
             stats_for_accounts_lt_hash: AccountsLtHashStats::default(),
             block_id: RwLock::new(None),
+            bank_hash_stats: AtomicBankHashStats::default(),
         };
 
         bank.transaction_processor = TransactionBatchProcessor::new_uninitialized(
@@ -1221,7 +1308,6 @@ impl Bank {
 
         let (rc, bank_rc_creation_time_us) = measure_us!({
             let accounts_db = Arc::clone(&parent.rc.accounts.accounts_db);
-            accounts_db.insert_default_bank_hash_stats(slot, parent.slot());
             BankRc {
                 accounts: Arc::new(Accounts::new(accounts_db)),
                 parent: RwLock::new(Some(Arc::clone(&parent))),
@@ -1358,6 +1444,7 @@ impl Bank {
             cache_for_accounts_lt_hash: RwLock::new(AHashMap::new()),
             stats_for_accounts_lt_hash: AccountsLtHashStats::default(),
             block_id: RwLock::new(None),
+            bank_hash_stats: AtomicBankHashStats::default(),
         };
 
         let (_, ancestors_time_us) = measure_us!({
@@ -1771,6 +1858,7 @@ impl Bank {
             cache_for_accounts_lt_hash: RwLock::new(AHashMap::new()),
             stats_for_accounts_lt_hash: AccountsLtHashStats::default(),
             block_id: RwLock::new(None),
+            bank_hash_stats: AtomicBankHashStats::new(&fields.bank_hash_stats),
         };
 
         bank.transaction_processor = TransactionBatchProcessor::new_uninitialized(
@@ -2813,9 +2901,11 @@ impl Bank {
         );
         assert!(!self.freeze_started());
         thread_pool.install(|| {
-            stake_rewards
-                .par_chunks(512)
-                .for_each(|chunk| self.rc.accounts.store_accounts_cached((slot, chunk)))
+            stake_rewards.par_chunks(512).for_each(|chunk| {
+                let to_store = (slot, chunk);
+                self.update_bank_hash_stats(&to_store);
+                self.rc.accounts.store_accounts_cached(to_store);
+            })
         });
         metrics
             .store_stake_accounts_us
@@ -3366,8 +3456,11 @@ impl Bank {
         lamports_per_signature: u64,
     ) -> u64 {
         let fee_budget_limits = FeeBudgetLimits::from(
-            process_compute_budget_instructions(message.program_instructions_iter())
-                .unwrap_or_default(),
+            process_compute_budget_instructions(
+                message.program_instructions_iter(),
+                &self.feature_set,
+            )
+            .unwrap_or_default(),
         );
         solana_fee::calculate_fee(
             message,
@@ -3703,8 +3796,10 @@ impl Bank {
                 .per_program_timings
                 .iter()
                 .fold(0, |acc: u64, (_, program_timing)| {
-                    acc.saturating_add(program_timing.accumulated_units)
-                        .saturating_add(program_timing.total_errored_units)
+                    (std::num::Saturating(acc)
+                        + program_timing.accumulated_units
+                        + program_timing.total_errored_units)
+                        .0
                 });
 
         debug!("simulate_transaction: {:?}", timings);
@@ -3894,7 +3989,7 @@ impl Bank {
                     processed_counts.processed_with_successful_result_count += 1;
                 }
                 Err(err) => {
-                    if *err_count == 0 {
+                    if err_count.0 == 0 {
                         debug!("tx error: {:?} {:?}", err, tx);
                     }
                     *err_count += 1;
@@ -4100,6 +4195,16 @@ impl Bank {
             .accumulate(&accumulated_fee_details);
     }
 
+    fn update_bank_hash_stats<'a>(&self, accounts: &impl StorableAccounts<'a>) {
+        let mut stats = BankHashStats::default();
+        (0..accounts.len()).for_each(|i| {
+            accounts.account(i, |account| {
+                stats.update(&account);
+            })
+        });
+        self.bank_hash_stats.accumulate(&stats);
+    }
+
     pub fn commit_transactions(
         &self,
         sanitized_txs: &[impl TransactionWithMeta],
@@ -4157,10 +4262,12 @@ impl Bank {
                 &maybe_transaction_refs,
                 &processing_results,
             );
-            self.rc.accounts.store_cached(
-                (self.slot(), accounts_to_store.as_slice()),
-                transactions.as_deref(),
-            );
+
+            let to_store = (self.slot(), accounts_to_store.as_slice());
+            self.update_bank_hash_stats(&to_store);
+            self.rc
+                .accounts
+                .store_cached(to_store, transactions.as_deref());
         });
 
         self.collect_rent(&processing_results);
@@ -5127,6 +5234,7 @@ impl Bank {
         assert!(!self.freeze_started());
         let mut m = Measure::start("stakes_cache.check_and_store");
         let new_warmup_cooldown_rate_epoch = self.new_warmup_cooldown_rate_epoch();
+
         (0..accounts.len()).for_each(|i| {
             accounts.account(i, |account| {
                 self.stakes_cache.check_and_store(
@@ -5136,6 +5244,7 @@ impl Bank {
                 )
             })
         });
+        self.update_bank_hash_stats(&accounts);
         self.rc.accounts.store_accounts_cached(accounts);
         m.stop();
         self.rc
@@ -5242,6 +5351,22 @@ impl Bank {
             ApplyFeatureActivationsCaller::FinishInit,
             debug_do_not_add_builtins,
         );
+
+        // Cost-Tracker is not serialized in snapshot or any configs.
+        // We must apply previously activated features related to limits here
+        // so that the initial bank state is consistent with the feature set.
+        // Cost-tracker limits are propagated through children banks.
+        if self
+            .feature_set
+            .is_active(&feature_set::raise_block_limits_to_50m::id())
+        {
+            let (account_cost_limit, block_cost_limit, vote_cost_limit) = simd_0207_block_limits();
+            self.write_cost_tracker().unwrap().set_limits(
+                account_cost_limit,
+                block_cost_limit,
+                vote_cost_limit,
+            );
+        }
 
         if !debug_do_not_add_builtins {
             for builtin in BUILTINS
@@ -5677,12 +5802,7 @@ impl Bank {
         #[cfg(feature = "dev-context-only-utils")]
         let hash = hash_override.unwrap_or(std::hint::black_box(hash));
 
-        let bank_hash_stats = self
-            .rc
-            .accounts
-            .accounts_db
-            .get_bank_hash_stats(slot)
-            .expect("No bank hash stats were found for this bank, that should not be possible");
+        let bank_hash_stats = self.bank_hash_stats.load();
 
         let total_us = measure_total.end_as_us();
         datapoint_info!(
@@ -6864,6 +6984,15 @@ impl Bank {
                 );
             }
         }
+
+        if new_feature_activations.contains(&feature_set::raise_block_limits_to_50m::id()) {
+            let (account_cost_limit, block_cost_limit, vote_cost_limit) = simd_0207_block_limits();
+            self.write_cost_tracker().unwrap().set_limits(
+                account_cost_limit,
+                block_cost_limit,
+                vote_cost_limit,
+            );
+        }
     }
 
     fn apply_updated_hashes_per_tick(&mut self, hashes_per_tick: u64) {
@@ -7154,6 +7283,10 @@ impl Bank {
     pub fn add_builtin(&self, program_id: Pubkey, name: &str, builtin: ProgramCacheEntry) {
         self.transaction_processor
             .add_builtin(self, program_id, name, builtin)
+    }
+
+    pub fn get_bank_hash_stats(&self) -> BankHashStats {
+        self.bank_hash_stats.load()
     }
 }
 

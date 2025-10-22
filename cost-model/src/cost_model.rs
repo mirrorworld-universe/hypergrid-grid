@@ -12,7 +12,9 @@ use {
         DEFAULT_HEAP_COST, DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT, MAX_COMPUTE_UNIT_LIMIT,
     },
     solana_feature_set::{self as feature_set, FeatureSet},
-    solana_runtime_transaction::transaction_with_meta::TransactionWithMeta,
+    solana_runtime_transaction::{
+        transaction_meta::StaticMeta, transaction_with_meta::TransactionWithMeta,
+    },
     solana_sdk::{
         borsh1::try_from_slice_unchecked,
         compute_budget::{self, ComputeBudgetInstruction},
@@ -46,24 +48,22 @@ impl CostModel {
         if transaction.is_simple_vote_transaction() {
             TransactionCost::SimpleVote { transaction }
         } else {
-            let signature_cost = Self::get_signature_cost(transaction, feature_set);
-            let write_lock_cost = Self::get_write_lock_cost(transaction, feature_set);
+            let num_write_locks = Self::num_write_locks(transaction, feature_set);
             let (programs_execution_cost, loaded_accounts_data_size_cost, data_bytes_cost) =
-                Self::get_transaction_cost(transaction, feature_set);
-            let allocated_accounts_data_size =
-                Self::calculate_allocated_accounts_data_size(transaction);
-
-            let usage_cost_details = UsageCostDetails {
+                Self::get_transaction_cost(
+                    transaction,
+                    transaction.program_instructions_iter(),
+                    feature_set,
+                );
+            Self::calculate_non_vote_transaction_cost(
                 transaction,
-                signature_cost,
-                write_lock_cost,
-                data_bytes_cost,
+                transaction.program_instructions_iter(),
+                num_write_locks,
                 programs_execution_cost,
                 loaded_accounts_data_size_cost,
-                allocated_accounts_data_size,
-            };
-
-            TransactionCost::Transaction(usage_cost_details)
+                data_bytes_cost,
+                feature_set,
+            )
         }
     }
 
@@ -78,35 +78,82 @@ impl CostModel {
         if transaction.is_simple_vote_transaction() {
             TransactionCost::SimpleVote { transaction }
         } else {
-            let signature_cost = Self::get_signature_cost(transaction, feature_set);
-            let write_lock_cost = Self::get_write_lock_cost(transaction, feature_set);
-
-            let instructions_data_cost = Self::get_instructions_data_cost(transaction);
-            let allocated_accounts_data_size =
-                Self::calculate_allocated_accounts_data_size(transaction);
-
-            let programs_execution_cost = actual_programs_execution_cost;
+            let num_write_locks = Self::num_write_locks(transaction, feature_set);
             let loaded_accounts_data_size_cost = Self::calculate_loaded_accounts_data_size_cost(
                 actual_loaded_accounts_data_size_bytes,
                 feature_set,
             );
+            let instructions_data_cost =
+                Self::get_instructions_data_cost(transaction.program_instructions_iter());
 
-            let usage_cost_details = UsageCostDetails {
+            Self::calculate_non_vote_transaction_cost(
                 transaction,
-                signature_cost,
-                write_lock_cost,
-                data_bytes_cost: instructions_data_cost,
-                programs_execution_cost,
+                transaction.program_instructions_iter(),
+                num_write_locks,
+                actual_programs_execution_cost,
                 loaded_accounts_data_size_cost,
-                allocated_accounts_data_size,
-            };
-
-            TransactionCost::Transaction(usage_cost_details)
+                instructions_data_cost,
+                feature_set,
+            )
         }
     }
 
+    /// Return an estimated total cost for a transaction given its':
+    /// - `meta` - transaction meta
+    /// - `instructions` - transaction instructions
+    /// - `num_write_locks` - number of requested write locks
+    pub fn estimate_cost<'a, Tx: StaticMeta>(
+        transaction: &'a Tx,
+        instructions: impl Iterator<Item = (&'a Pubkey, SVMInstruction<'a>)> + Clone,
+        num_write_locks: u64,
+        feature_set: &FeatureSet,
+    ) -> TransactionCost<'a, Tx> {
+        if transaction.is_simple_vote_transaction() {
+            return TransactionCost::SimpleVote { transaction };
+        }
+        let (programs_execution_cost, loaded_accounts_data_size_cost, data_bytes_cost) =
+            Self::get_transaction_cost(transaction, instructions.clone(), feature_set);
+        Self::calculate_non_vote_transaction_cost(
+            transaction,
+            instructions,
+            num_write_locks,
+            programs_execution_cost,
+            loaded_accounts_data_size_cost,
+            data_bytes_cost,
+            feature_set,
+        )
+    }
+
+    fn calculate_non_vote_transaction_cost<'a, Tx: StaticMeta>(
+        transaction: &'a Tx,
+        instructions: impl Iterator<Item = (&'a Pubkey, SVMInstruction<'a>)> + Clone,
+        num_write_locks: u64,
+        programs_execution_cost: u64,
+        loaded_accounts_data_size_cost: u64,
+        data_bytes_cost: u64,
+        feature_set: &FeatureSet,
+    ) -> TransactionCost<'a, Tx> {
+        let signature_cost = Self::get_signature_cost(transaction, feature_set);
+        let write_lock_cost = Self::get_write_lock_cost(num_write_locks);
+
+        let allocated_accounts_data_size =
+            Self::calculate_allocated_accounts_data_size(instructions);
+
+        let usage_cost_details = UsageCostDetails {
+            transaction,
+            signature_cost,
+            write_lock_cost,
+            data_bytes_cost,
+            programs_execution_cost,
+            loaded_accounts_data_size_cost,
+            allocated_accounts_data_size,
+        };
+
+        TransactionCost::Transaction(usage_cost_details)
+    }
+
     /// Returns signature details and the total signature cost
-    fn get_signature_cost(transaction: &impl TransactionWithMeta, feature_set: &FeatureSet) -> u64 {
+    fn get_signature_cost(transaction: &impl StaticMeta, feature_set: &FeatureSet) -> u64 {
         let signatures_count_detail = transaction.signature_details();
 
         let ed25519_verify_cost =
@@ -139,20 +186,43 @@ impl CostModel {
             .filter_map(|(i, k)| message.is_writable(i).then_some(k))
     }
 
+    /// Return the number of write-locks for a transaction.
+    fn num_write_locks(transaction: &impl SVMMessage, feature_set: &FeatureSet) -> u64 {
+        if feature_set.is_active(&feature_set::cost_model_requested_write_lock_cost::id()) {
+            transaction.num_write_locks()
+        } else {
+            Self::get_writable_accounts(transaction).count() as u64
+        }
+    }
+
     /// Returns the total write-lock cost.
-    fn get_write_lock_cost(transaction: &impl SVMMessage, feature_set: &FeatureSet) -> u64 {
-        let num_write_locks =
-            if feature_set.is_active(&feature_set::cost_model_requested_write_lock_cost::id()) {
-                transaction.num_write_locks()
-            } else {
-                Self::get_writable_accounts(transaction).count() as u64
-            };
+    fn get_write_lock_cost(num_write_locks: u64) -> u64 {
         WRITE_LOCK_UNITS.saturating_mul(num_write_locks)
     }
 
     /// Return (programs_execution_cost, loaded_accounts_data_size_cost, data_bytes_cost)
-    fn get_transaction_cost(
-        transaction: &impl TransactionWithMeta,
+    fn get_transaction_cost<'a>(
+        meta: &impl StaticMeta,
+        instructions: impl Iterator<Item = (&'a Pubkey, SVMInstruction<'a>)>,
+        feature_set: &FeatureSet,
+    ) -> (u64, u64, u64) {
+        if feature_set.is_active(&feature_set::reserve_minimal_cus_for_builtin_instructions::id()) {
+            let data_bytes_cost = Self::get_instructions_data_cost(instructions);
+            let (programs_execution_cost, loaded_accounts_data_size_cost) =
+                Self::get_estimated_execution_cost(meta, feature_set);
+            (
+                programs_execution_cost,
+                loaded_accounts_data_size_cost,
+                data_bytes_cost,
+            )
+        } else {
+            Self::get_transaction_cost_without_minimal_builtin_cus(meta, instructions, feature_set)
+        }
+    }
+
+    fn get_transaction_cost_without_minimal_builtin_cus<'a>(
+        meta: &impl StaticMeta,
+        instructions: impl Iterator<Item = (&'a Pubkey, SVMInstruction<'a>)>,
         feature_set: &FeatureSet,
     ) -> (u64, u64, u64) {
         let mut programs_execution_costs = 0u64;
@@ -161,7 +231,7 @@ impl CostModel {
         let mut compute_unit_limit_is_set = false;
         let mut has_user_space_instructions = false;
 
-        for (program_id, instruction) in transaction.program_instructions_iter() {
+        for (program_id, instruction) in instructions {
             let ix_execution_cost =
                 if let Some(builtin_cost) = get_builtin_instruction_cost(program_id, feature_set) {
                     builtin_cost
@@ -189,9 +259,9 @@ impl CostModel {
         // if failed to process compute budget instructions, the transaction
         // will not be executed by `bank`, therefore it should be considered
         // as no execution cost by cost model.
-        match transaction
+        match meta
             .compute_budget_instruction_details()
-            .sanitize_and_convert_to_compute_budget_limits()
+            .sanitize_and_convert_to_compute_budget_limits(feature_set)
         {
             Ok(compute_budget_limits) => {
                 // if tx contained user-space instructions and a more accurate
@@ -224,11 +294,36 @@ impl CostModel {
         )
     }
 
+    /// Return (programs_execution_cost, loaded_accounts_data_size_cost)
+    fn get_estimated_execution_cost(
+        transaction: &impl StaticMeta,
+        feature_set: &FeatureSet,
+    ) -> (u64, u64) {
+        // if failed to process compute_budget instructions, the transaction will not be executed
+        // by `bank`, therefore it should be considered as no execution cost by cost model.
+        let (programs_execution_costs, loaded_accounts_data_size_cost) = match transaction
+            .compute_budget_instruction_details()
+            .sanitize_and_convert_to_compute_budget_limits(feature_set)
+        {
+            Ok(compute_budget_limits) => (
+                u64::from(compute_budget_limits.compute_unit_limit),
+                Self::calculate_loaded_accounts_data_size_cost(
+                    compute_budget_limits.loaded_accounts_bytes.get(),
+                    feature_set,
+                ),
+            ),
+            Err(_) => (0, 0),
+        };
+
+        (programs_execution_costs, loaded_accounts_data_size_cost)
+    }
+
     /// Return the instruction data bytes cost.
-    fn get_instructions_data_cost(transaction: &impl SVMMessage) -> u64 {
-        let ix_data_bytes_len_total: u64 = transaction
-            .instructions_iter()
-            .map(|instruction| instruction.data.len() as u64)
+    fn get_instructions_data_cost<'a>(
+        instructions: impl Iterator<Item = (&'a Pubkey, SVMInstruction<'a>)>,
+    ) -> u64 {
+        let ix_data_bytes_len_total: u64 = instructions
+            .map(|(_, instruction)| instruction.data.len() as u64)
             .sum();
 
         ix_data_bytes_len_total / INSTRUCTION_DATA_BYTES_COST
@@ -276,9 +371,11 @@ impl CostModel {
 
     /// eventually, potentially determine account data size of all writable accounts
     /// at the moment, calculate account data size of account creation
-    fn calculate_allocated_accounts_data_size(transaction: &impl SVMMessage) -> u64 {
+    fn calculate_allocated_accounts_data_size<'a>(
+        instructions: impl Iterator<Item = (&'a Pubkey, SVMInstruction<'a>)>,
+    ) -> u64 {
         let mut tx_attempted_allocation_size: u64 = 0;
-        for (program_id, instruction) in transaction.program_instructions_iter() {
+        for (program_id, instruction) in instructions {
             match Self::calculate_account_data_size_on_instruction(program_id, instruction) {
                 SystemProgramAccountAllocation::Failed => {
                     // If any system program instructions can be statically
@@ -316,7 +413,9 @@ mod tests {
     use {
         super::*,
         itertools::Itertools,
-        log::debug,
+        solana_compute_budget::compute_budget_limits::{
+            DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT, MAX_BUILTIN_ALLOCATION_COMPUTE_UNIT_LIMIT,
+        },
         solana_runtime_transaction::runtime_transaction::RuntimeTransaction,
         solana_sdk::{
             compute_budget::{self, ComputeBudgetInstruction},
@@ -349,7 +448,9 @@ mod tests {
         let sanitized_tx = RuntimeTransaction::from_transaction_for_tests(transaction);
 
         assert_eq!(
-            CostModel::calculate_allocated_accounts_data_size(&sanitized_tx),
+            CostModel::calculate_allocated_accounts_data_size(
+                sanitized_tx.program_instructions_iter()
+            ),
             0
         );
     }
@@ -374,7 +475,9 @@ mod tests {
         let sanitized_tx = RuntimeTransaction::from_transaction_for_tests(transaction);
 
         assert_eq!(
-            CostModel::calculate_allocated_accounts_data_size(&sanitized_tx),
+            CostModel::calculate_allocated_accounts_data_size(
+                sanitized_tx.program_instructions_iter()
+            ),
             space1 + space2
         );
     }
@@ -415,7 +518,9 @@ mod tests {
         let sanitized_tx = RuntimeTransaction::from_transaction_for_tests(transaction);
 
         assert_eq!(
-            CostModel::calculate_allocated_accounts_data_size(&sanitized_tx),
+            CostModel::calculate_allocated_accounts_data_size(
+                sanitized_tx.program_instructions_iter()
+            ),
             MAX_PERMITTED_ACCOUNTS_DATA_ALLOCATIONS_PER_TRANSACTION as u64,
         );
     }
@@ -439,7 +544,9 @@ mod tests {
 
         assert_eq!(
             0, // SystemProgramAccountAllocation::Failed,
-            CostModel::calculate_allocated_accounts_data_size(&sanitized_tx),
+            CostModel::calculate_allocated_accounts_data_size(
+                sanitized_tx.program_instructions_iter()
+            ),
         );
     }
 
@@ -456,7 +563,9 @@ mod tests {
 
         assert_eq!(
             0, // SystemProgramAccountAllocation::Failed,
-            CostModel::calculate_allocated_accounts_data_size(&sanitized_tx),
+            CostModel::calculate_allocated_accounts_data_size(
+                sanitized_tx.program_instructions_iter()
+            ),
         );
     }
 
@@ -515,20 +624,26 @@ mod tests {
         let simple_transaction = RuntimeTransaction::from_transaction_for_tests(
             system_transaction::transfer(&mint_keypair, &keypair.pubkey(), 2, start_hash),
         );
-        debug!(
-            "system_transaction simple_transaction {:?}",
-            simple_transaction
-        );
 
-        // expected cost for one system transfer instructions
-        let expected_execution_cost =
-            solana_system_program::system_processor::DEFAULT_COMPUTE_UNITS;
+        for (feature_set, expected_execution_cost) in [
+            (
+                FeatureSet::default(),
+                solana_system_program::system_processor::DEFAULT_COMPUTE_UNITS,
+            ),
+            (
+                FeatureSet::all_enabled(),
+                u64::from(MAX_BUILTIN_ALLOCATION_COMPUTE_UNIT_LIMIT),
+            ),
+        ] {
+            let (program_execution_cost, _loaded_accounts_data_size_cost, _data_bytes_cost) =
+                CostModel::get_transaction_cost(
+                    &simple_transaction,
+                    simple_transaction.program_instructions_iter(),
+                    &feature_set,
+                );
 
-        let (program_execution_cost, _loaded_accounts_data_size_cost, data_bytes_cost) =
-            CostModel::get_transaction_cost(&simple_transaction, &FeatureSet::all_enabled());
-
-        assert_eq!(expected_execution_cost, program_execution_cost);
-        assert_eq!(3, data_bytes_cost);
+            assert_eq!(expected_execution_cost, program_execution_cost);
+        }
     }
 
     #[test]
@@ -547,15 +662,27 @@ mod tests {
             instructions,
         );
         let token_transaction = RuntimeTransaction::from_transaction_for_tests(tx);
-        debug!("token_transaction {:?}", token_transaction);
 
-        let (program_execution_cost, _loaded_accounts_data_size_cost, data_bytes_cost) =
-            CostModel::get_transaction_cost(&token_transaction, &FeatureSet::all_enabled());
-        assert_eq!(
-            DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT as u64,
-            program_execution_cost
-        );
-        assert_eq!(0, data_bytes_cost);
+        for (feature_set, expected_execution_cost) in [
+            (
+                FeatureSet::default(),
+                DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT as u64,
+            ),
+            (
+                FeatureSet::all_enabled(),
+                DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT as u64,
+            ),
+        ] {
+            let (program_execution_cost, _loaded_accounts_data_size_cost, data_bytes_cost) =
+                CostModel::get_transaction_cost(
+                    &token_transaction,
+                    token_transaction.program_instructions_iter(),
+                    &feature_set,
+                );
+
+            assert_eq!(expected_execution_cost, program_execution_cost);
+            assert_eq!(0, data_bytes_cost);
+        }
     }
 
     #[test]
@@ -587,12 +714,13 @@ mod tests {
     #[test]
     fn test_cost_model_compute_budget_transaction() {
         let (mint_keypair, start_hash) = test_setup();
+        let expected_cu_limit = 12_345;
 
         let instructions = vec![
             CompiledInstruction::new(3, &(), vec![1, 2, 0]),
             CompiledInstruction::new_from_raw_parts(
                 4,
-                ComputeBudgetInstruction::SetComputeUnitLimit(12_345)
+                ComputeBudgetInstruction::SetComputeUnitLimit(expected_cu_limit)
                     .pack()
                     .unwrap(),
                 vec![],
@@ -610,12 +738,21 @@ mod tests {
         );
         let token_transaction = RuntimeTransaction::from_transaction_for_tests(tx);
 
-        let (program_execution_cost, _loaded_accounts_data_size_cost, data_bytes_cost) =
-            CostModel::get_transaction_cost(&token_transaction, &FeatureSet::all_enabled());
-
         // If cu-limit is specified, that would the cost for all programs
-        assert_eq!(12_345, program_execution_cost);
-        assert_eq!(1, data_bytes_cost);
+        for (feature_set, expected_execution_cost) in [
+            (FeatureSet::default(), expected_cu_limit as u64),
+            (FeatureSet::all_enabled(), expected_cu_limit as u64),
+        ] {
+            let (program_execution_cost, _loaded_accounts_data_size_cost, data_bytes_cost) =
+                CostModel::get_transaction_cost(
+                    &token_transaction,
+                    token_transaction.program_instructions_iter(),
+                    &feature_set,
+                );
+
+            assert_eq!(expected_execution_cost, program_execution_cost);
+            assert_eq!(1, data_bytes_cost);
+        }
     }
 
     #[test]
@@ -652,9 +789,15 @@ mod tests {
         );
         let token_transaction = RuntimeTransaction::from_transaction_for_tests(tx);
 
-        let (program_execution_cost, _loaded_accounts_data_size_cost, _data_bytes_cost) =
-            CostModel::get_transaction_cost(&token_transaction, &FeatureSet::all_enabled());
-        assert_eq!(0, program_execution_cost);
+        for feature_set in [FeatureSet::default(), FeatureSet::all_enabled()] {
+            let (program_execution_cost, _loaded_accounts_data_size_cost, _data_bytes_cost) =
+                CostModel::get_transaction_cost(
+                    &token_transaction,
+                    token_transaction.program_instructions_iter(),
+                    &feature_set,
+                );
+            assert_eq!(0, program_execution_cost);
+        }
     }
 
     #[test]
@@ -671,16 +814,23 @@ mod tests {
             message,
             start_hash,
         ));
-        debug!("many transfer transaction {:?}", tx);
 
         // expected cost for two system transfer instructions
-        let program_cost = solana_system_program::system_processor::DEFAULT_COMPUTE_UNITS;
-        let expected_cost = program_cost * 2;
-
-        let (program_execution_cost, _loaded_accounts_data_size_cost, data_bytes_cost) =
-            CostModel::get_transaction_cost(&tx, &FeatureSet::all_enabled());
-        assert_eq!(expected_cost, program_execution_cost);
-        assert_eq!(6, data_bytes_cost);
+        for (feature_set, expected_execution_cost) in [
+            (
+                FeatureSet::default(),
+                2 * solana_system_program::system_processor::DEFAULT_COMPUTE_UNITS,
+            ),
+            (
+                FeatureSet::all_enabled(),
+                2 * u64::from(MAX_BUILTIN_ALLOCATION_COMPUTE_UNIT_LIMIT),
+            ),
+        ] {
+            let (programs_execution_cost, _loaded_accounts_data_size_cost, data_bytes_cost) =
+                CostModel::get_transaction_cost(&tx, tx.program_instructions_iter(), &feature_set);
+            assert_eq!(expected_execution_cost, programs_execution_cost);
+            assert_eq!(6, data_bytes_cost);
+        }
     }
 
     #[test]
@@ -705,13 +855,22 @@ mod tests {
                 instructions,
             ),
         );
-        debug!("many random transaction {:?}", tx);
 
-        let expected_cost = DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT as u64 * 2;
-        let (program_execution_cost, _loaded_accounts_data_size_cost, data_bytes_cost) =
-            CostModel::get_transaction_cost(&tx, &FeatureSet::all_enabled());
-        assert_eq!(expected_cost, program_execution_cost);
-        assert_eq!(0, data_bytes_cost);
+        for (feature_set, expected_cost) in [
+            (
+                FeatureSet::default(),
+                DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT as u64 * 2,
+            ),
+            (
+                FeatureSet::all_enabled(),
+                DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT as u64 * 2,
+            ),
+        ] {
+            let (program_execution_cost, _loaded_accounts_data_size_cost, data_bytes_cost) =
+                CostModel::get_transaction_cost(&tx, tx.program_instructions_iter(), &feature_set);
+            assert_eq!(expected_cost, program_execution_cost);
+            assert_eq!(0, data_bytes_cost);
+        }
     }
 
     #[test]
@@ -757,23 +916,32 @@ mod tests {
         ));
 
         let expected_account_cost = WRITE_LOCK_UNITS * 2;
-        let expected_execution_cost =
-            solana_system_program::system_processor::DEFAULT_COMPUTE_UNITS;
-        const DEFAULT_PAGE_COST: u64 = 8;
-        let expected_loaded_accounts_data_size_cost =
-            solana_compute_budget::compute_budget_limits::MAX_LOADED_ACCOUNTS_DATA_SIZE_BYTES.get()
-                as u64
-                / ACCOUNT_DATA_COST_PAGE_SIZE
-                * DEFAULT_PAGE_COST;
+        for (feature_set, expected_execution_cost) in [
+            (
+                FeatureSet::default(),
+                solana_system_program::system_processor::DEFAULT_COMPUTE_UNITS,
+            ),
+            (
+                FeatureSet::all_enabled(),
+                u64::from(MAX_BUILTIN_ALLOCATION_COMPUTE_UNIT_LIMIT),
+            ),
+        ] {
+            const DEFAULT_PAGE_COST: u64 = 8;
+            let expected_loaded_accounts_data_size_cost =
+                solana_compute_budget::compute_budget_limits::MAX_LOADED_ACCOUNTS_DATA_SIZE_BYTES
+                    .get() as u64
+                    / ACCOUNT_DATA_COST_PAGE_SIZE
+                    * DEFAULT_PAGE_COST;
 
-        let tx_cost = CostModel::calculate_cost(&tx, &FeatureSet::all_enabled());
-        assert_eq!(expected_account_cost, tx_cost.write_lock_cost());
-        assert_eq!(expected_execution_cost, tx_cost.programs_execution_cost());
-        assert_eq!(2, tx_cost.writable_accounts().count());
-        assert_eq!(
-            expected_loaded_accounts_data_size_cost,
-            tx_cost.loaded_accounts_data_size_cost()
-        );
+            let tx_cost = CostModel::calculate_cost(&tx, &feature_set);
+            assert_eq!(expected_account_cost, tx_cost.write_lock_cost());
+            assert_eq!(expected_execution_cost, tx_cost.programs_execution_cost());
+            assert_eq!(2, tx_cost.writable_accounts().count());
+            assert_eq!(
+                expected_loaded_accounts_data_size_cost,
+                tx_cost.loaded_accounts_data_size_cost()
+            );
+        }
     }
 
     #[test]
@@ -792,20 +960,29 @@ mod tests {
                 start_hash,
             ));
 
-        let feature_set = FeatureSet::all_enabled();
         let expected_account_cost = WRITE_LOCK_UNITS * 2;
-        let expected_execution_cost = solana_system_program::system_processor::DEFAULT_COMPUTE_UNITS
-            + solana_compute_budget_program::DEFAULT_COMPUTE_UNITS;
-        let expected_loaded_accounts_data_size_cost = (data_limit as u64) / (32 * 1024) * 8;
+        for (feature_set, expected_execution_cost) in [
+            (
+                FeatureSet::default(),
+                solana_system_program::system_processor::DEFAULT_COMPUTE_UNITS
+                    + solana_compute_budget_program::DEFAULT_COMPUTE_UNITS,
+            ),
+            (
+                FeatureSet::all_enabled(),
+                2 * u64::from(MAX_BUILTIN_ALLOCATION_COMPUTE_UNIT_LIMIT),
+            ),
+        ] {
+            let expected_loaded_accounts_data_size_cost = (data_limit as u64) / (32 * 1024) * 8;
 
-        let tx_cost = CostModel::calculate_cost(&tx, &feature_set);
-        assert_eq!(expected_account_cost, tx_cost.write_lock_cost());
-        assert_eq!(expected_execution_cost, tx_cost.programs_execution_cost());
-        assert_eq!(2, tx_cost.writable_accounts().count());
-        assert_eq!(
-            expected_loaded_accounts_data_size_cost,
-            tx_cost.loaded_accounts_data_size_cost()
-        );
+            let tx_cost = CostModel::calculate_cost(&tx, &feature_set);
+            assert_eq!(expected_account_cost, tx_cost.write_lock_cost());
+            assert_eq!(expected_execution_cost, tx_cost.programs_execution_cost());
+            assert_eq!(2, tx_cost.writable_accounts().count());
+            assert_eq!(
+                expected_loaded_accounts_data_size_cost,
+                tx_cost.loaded_accounts_data_size_cost()
+            );
+        }
     }
 
     #[test]
@@ -823,38 +1000,60 @@ mod tests {
                 start_hash,
             ));
         // transaction has one builtin instruction, and one bpf instruction, no ComputeBudget::compute_unit_limit
-        let expected_builtin_cost = solana_system_program::system_processor::DEFAULT_COMPUTE_UNITS;
-        let expected_bpf_cost = DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT;
+        for (feature_set, expected_execution_cost) in [
+            (
+                FeatureSet::default(),
+                solana_system_program::system_processor::DEFAULT_COMPUTE_UNITS
+                    + DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT as u64,
+            ),
+            (
+                FeatureSet::all_enabled(),
+                u64::from(MAX_BUILTIN_ALLOCATION_COMPUTE_UNIT_LIMIT)
+                    + u64::from(DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT),
+            ),
+        ] {
+            let (programs_execution_cost, _loaded_accounts_data_size_cost, _data_bytes_cost) =
+                CostModel::get_transaction_cost(
+                    &transaction,
+                    transaction.program_instructions_iter(),
+                    &feature_set,
+                );
 
-        let (program_execution_cost, _loaded_accounts_data_size_cost, _data_bytes_cost) =
-            CostModel::get_transaction_cost(&transaction, &FeatureSet::all_enabled());
-
-        assert_eq!(
-            expected_builtin_cost + expected_bpf_cost as u64,
-            program_execution_cost
-        );
+            assert_eq!(expected_execution_cost, programs_execution_cost);
+        }
     }
 
     #[test]
     fn test_transaction_cost_with_mix_instruction_with_cu_limit() {
         let (mint_keypair, start_hash) = test_setup();
+        let cu_limit: u32 = 12_345;
 
         let transaction =
             RuntimeTransaction::from_transaction_for_tests(Transaction::new_signed_with_payer(
                 &[
                     system_instruction::transfer(&mint_keypair.pubkey(), &Pubkey::new_unique(), 2),
-                    ComputeBudgetInstruction::set_compute_unit_limit(12_345),
+                    ComputeBudgetInstruction::set_compute_unit_limit(cu_limit),
                 ],
                 Some(&mint_keypair.pubkey()),
                 &[&mint_keypair],
                 start_hash,
             ));
-        // transaction has one builtin instruction, and one ComputeBudget::compute_unit_limit
-        let expected_cost = solana_system_program::system_processor::DEFAULT_COMPUTE_UNITS
-            + solana_compute_budget_program::DEFAULT_COMPUTE_UNITS;
+        for (feature_set, expected_execution_cost) in [
+            (
+                FeatureSet::default(),
+                solana_system_program::system_processor::DEFAULT_COMPUTE_UNITS
+                    + solana_compute_budget_program::DEFAULT_COMPUTE_UNITS,
+            ),
+            (FeatureSet::all_enabled(), cu_limit as u64),
+        ] {
+            let (programs_execution_cost, _loaded_accounts_data_size_cost, _data_bytes_cost) =
+                CostModel::get_transaction_cost(
+                    &transaction,
+                    transaction.program_instructions_iter(),
+                    &feature_set,
+                );
 
-        let (program_execution_cost, _loaded_accounts_data_size_cost, _data_bytes_cost) =
-            CostModel::get_transaction_cost(&transaction, &FeatureSet::all_enabled());
-        assert_eq!(expected_cost, program_execution_cost);
+            assert_eq!(expected_execution_cost, programs_execution_cost);
+        }
     }
 }
