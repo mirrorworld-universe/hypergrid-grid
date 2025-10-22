@@ -32,7 +32,7 @@ pub struct FeeStructure {
     /// Compute unit fee bins
     pub compute_fee_bins: Vec<FeeBin>,
     ///Sonic: congestion multiplier
-    pub fee_multiplier: u32,
+    pub fee_multiplier: u64,
 }
 
 #[cfg_attr(
@@ -154,7 +154,11 @@ impl FeeStructure {
             .total_fee();
 
         // Sonic: custom fee
-        fee * (self.fee_multiplier as u64) / 10000
+        if let Some(res) = fee.checked_mul(self.fee_multiplier) {
+            res / 10_000
+        } else {
+            fee
+        }
     }
 
     /// Calculate fee details for `SanitizedMessage`
