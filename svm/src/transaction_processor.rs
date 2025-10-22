@@ -25,7 +25,8 @@ use {
     },
     solana_compute_budget::compute_budget::ComputeBudget,
     solana_feature_set::{
-        enable_transaction_loading_failure_fees, remove_rounding_in_fee_calculation, FeatureSet,
+        enable_transaction_loading_failure_fees, remove_accounts_executable_flag_checks,
+        remove_rounding_in_fee_calculation, FeatureSet,
     },
     solana_log_collector::LogCollector,
     solana_measure::{measure::Measure, measure_us},
@@ -313,13 +314,15 @@ impl<FG: ForkGraph, A: AccountsDb> TransactionBatchProcessor<FG, A> {
             &mut error_metrics
         ));
 
-        let (mut program_cache_for_tx_batch, program_cache_us) = measure_us!({
-            let mut program_accounts_map = Self::filter_executable_program_accounts(
+        let (mut program_accounts_map, filter_executable_us) =
+            measure_us!(Self::filter_executable_program_accounts(
                 callbacks,
                 sanitized_txs,
                 &validation_results,
-                PROGRAM_OWNERS,
-            );
+                PROGRAM_OWNERS
+            ));
+
+        let (mut program_cache_for_tx_batch, program_cache_us) = measure_us!({
             for builtin_program in self.builtin_program_ids.read().unwrap().iter() {
                 program_accounts_map.insert(*builtin_program, 0);
             }
@@ -419,6 +422,8 @@ impl<FG: ForkGraph, A: AccountsDb> TransactionBatchProcessor<FG, A> {
 
         execute_timings
             .saturating_add_in_place(ExecuteTimingType::ValidateFeesUs, validate_fees_us);
+        execute_timings
+            .saturating_add_in_place(ExecuteTimingType::FilterExecutableUs, filter_executable_us);
         execute_timings
             .saturating_add_in_place(ExecuteTimingType::ProgramCacheUs, program_cache_us);
         execute_timings.saturating_add_in_place(ExecuteTimingType::LoadUs, load_accounts_us);
@@ -953,6 +958,11 @@ impl<FG: ForkGraph, A: AccountsDb> TransactionBatchProcessor<FG, A> {
             rent_collector.get_rent().clone(),
             compute_budget.max_instruction_stack_depth,
             compute_budget.max_instruction_trace_length,
+        );
+        transaction_context.set_remove_accounts_executable_flag_checks(
+            environment
+                .feature_set
+                .is_active(&remove_accounts_executable_flag_checks::id()),
         );
         #[cfg(debug_assertions)]
         transaction_context.set_signature(tx.signature());

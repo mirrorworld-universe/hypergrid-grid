@@ -5,15 +5,15 @@ use {
     rayon::{prelude::*, ThreadPool, ThreadPoolBuilder},
     serial_test::serial,
     solana_gossip::{
-        cluster_info,
         cluster_info_metrics::GossipStats,
         contact_info::ContactInfo,
         crds::GossipRoute,
+        crds_data::CrdsData,
         crds_gossip::*,
         crds_gossip_error::CrdsGossipError,
         crds_gossip_pull::{CrdsTimeouts, ProcessPullStats, CRDS_GOSSIP_PULL_CRDS_TIMEOUT_MS},
         crds_gossip_push::CRDS_GOSSIP_PUSH_MSG_TIMEOUT_MS,
-        crds_value::{CrdsData, CrdsValue, CrdsValueLabel},
+        crds_value::{CrdsValue, CrdsValueLabel},
         ping_pong::PingCache,
     },
     solana_rayon_threadlimit::get_thread_count,
@@ -100,7 +100,7 @@ fn star_network_create(num: usize) -> Network {
     let gossip_port_offset = 9000;
     let node_keypair = Arc::new(Keypair::new());
     let contact_info = ContactInfo::new_localhost(&node_keypair.pubkey(), 0);
-    let entry = CrdsValue::new_unsigned(CrdsData::ContactInfo(contact_info.clone()));
+    let entry = CrdsValue::new(CrdsData::ContactInfo(contact_info.clone()), &node_keypair);
     let mut network: HashMap<_, _> = (1..num)
         .map(|k| {
             let node_keypair = Arc::new(Keypair::new());
@@ -111,7 +111,7 @@ fn star_network_create(num: usize) -> Network {
             contact_info
                 .set_gossip((Ipv4Addr::LOCALHOST, gossip_port))
                 .unwrap();
-            let new = CrdsValue::new_unsigned(CrdsData::ContactInfo(contact_info.clone()));
+            let new = CrdsValue::new(CrdsData::ContactInfo(contact_info.clone()), &node_keypair);
             let node = CrdsGossip::default();
             {
                 let mut node_crds = node.crds.write().unwrap();
@@ -141,7 +141,7 @@ fn star_network_create(num: usize) -> Network {
 fn rstar_network_create(num: usize) -> Network {
     let node_keypair = Arc::new(Keypair::new());
     let contact_info = ContactInfo::new_localhost(&node_keypair.pubkey(), 0);
-    let entry = CrdsValue::new_unsigned(CrdsData::ContactInfo(contact_info.clone()));
+    let entry = CrdsValue::new(CrdsData::ContactInfo(contact_info.clone()), &node_keypair);
     let origin = CrdsGossip::default();
     let id = entry.label().pubkey();
     origin
@@ -154,7 +154,7 @@ fn rstar_network_create(num: usize) -> Network {
         .map(|_| {
             let node_keypair = Arc::new(Keypair::new());
             let contact_info = ContactInfo::new_localhost(&node_keypair.pubkey(), 0);
-            let new = CrdsValue::new_unsigned(CrdsData::ContactInfo(contact_info.clone()));
+            let new = CrdsValue::new(CrdsData::ContactInfo(contact_info.clone()), &node_keypair);
             let node = CrdsGossip::default();
             node.crds
                 .write()
@@ -181,7 +181,7 @@ fn ring_network_create(num: usize) -> Network {
         .map(|_| {
             let node_keypair = Arc::new(Keypair::new());
             let contact_info = ContactInfo::new_localhost(&node_keypair.pubkey(), 0);
-            let new = CrdsValue::new_unsigned(CrdsData::ContactInfo(contact_info.clone()));
+            let new = CrdsValue::new(CrdsData::ContactInfo(contact_info.clone()), &node_keypair);
             let node = CrdsGossip::default();
             node.crds
                 .write()
@@ -216,7 +216,7 @@ fn connected_staked_network_create(stakes: &[u64]) -> Network {
         .map(|n| {
             let node_keypair = Arc::new(Keypair::new());
             let contact_info = ContactInfo::new_localhost(&node_keypair.pubkey(), 0);
-            let new = CrdsValue::new_unsigned(CrdsData::ContactInfo(contact_info.clone()));
+            let new = CrdsValue::new(CrdsData::ContactInfo(contact_info.clone()), &node_keypair);
             let node = CrdsGossip::default();
             node.crds
                 .write()
@@ -318,7 +318,7 @@ fn network_simulator(thread_pool: &ThreadPool, network: &mut Network, max_conver
             node.gossip.process_push_message(
                 vec![(
                     Pubkey::default(),
-                    vec![CrdsValue::new_unsigned(CrdsData::ContactInfo(m))],
+                    vec![CrdsValue::new(CrdsData::ContactInfo(m), &Keypair::new())],
                 )],
                 now,
             );
@@ -530,7 +530,7 @@ fn network_run_pull(
                             now,
                             None,
                             &HashMap::new(),
-                            cluster_info::MAX_BLOOM_SIZE,
+                            992, // max_bloom_filter_bytes
                             from.ping_cache.deref(),
                             &mut pings,
                             &SocketAddrSpace::Unspecified,
@@ -761,7 +761,7 @@ fn test_prune_errors() {
         .write()
         .unwrap()
         .insert(
-            CrdsValue::new_unsigned(CrdsData::ContactInfo(ci.clone())),
+            CrdsValue::new(CrdsData::ContactInfo(ci.clone()), &Keypair::new()),
             0,
             GossipRoute::LocalMessage,
         )
