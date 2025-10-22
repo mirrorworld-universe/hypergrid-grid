@@ -1,3 +1,5 @@
+#[cfg(feature = "frozen-abi")]
+use solana_frozen_abi_macro::{AbiEnumVisitor, AbiExample};
 use {
     serde::{Deserialize, Serialize},
     solana_program::pubkey::Pubkey,
@@ -13,7 +15,7 @@ pub enum MigratedAccountsState {
     MigratedAccounts(Vec<MigratedAccount>),
 }
 
-#[cfg_attr(feature = "frozen-abi", derive(AbiExample, AbiEnumVisitor))]
+#[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub struct MigratedAccount {
     pub address: Pubkey,
