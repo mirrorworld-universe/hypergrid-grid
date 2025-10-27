@@ -177,7 +177,7 @@ impl CiphertextCommitmentEqualityProof {
             vec![
                 &self.z_s,           // z_s
                 &(-&c),              // -c
-                &(-&Scalar::one()),  // -identity
+                &(-&Scalar::ONE),    // -identity
                 &(&w * &self.z_x),   // w * z_x
                 &(&w * &self.z_s),   // w * z_s
                 &(&w_negated * &c),  // -w * c
@@ -309,7 +309,7 @@ mod test {
     #[test]
     fn test_ciphertext_commitment_equality_proof_edge_cases() {
         // if ElGamal public key zero (public key is invalid), then the proof should always reject
-        let public = ElGamalPubkey::from_bytes(&[0u8; 32]).unwrap();
+        let public = ElGamalPubkey::try_from([0u8; 32].as_slice()).unwrap();
         let secret = ElGamalSecretKey::new_rand();
 
         let elgamal_keypair = ElGamalKeypair::new_for_tests(public, secret);

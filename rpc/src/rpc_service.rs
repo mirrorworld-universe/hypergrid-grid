@@ -5,10 +5,7 @@ use {
         cluster_tpu_info::ClusterTpuInfo,
         max_slots::MaxSlots,
         optimistically_confirmed_bank_tracker::OptimisticallyConfirmedBank,
-        rpc::{
-            rpc_accounts::*, rpc_accounts_scan::*, rpc_bank::*, rpc_deprecated_v1_7::*,
-            rpc_deprecated_v1_9::*, rpc_full::*, rpc_minimal::*, rpc_obsolete_v1_7::*, *,
-        },
+        rpc::{rpc_accounts::*, rpc_accounts_scan::*, rpc_bank::*, rpc_full::*, rpc_minimal::*, *},
         rpc_cache::LargestAccountsCache,
         rpc_health::*,
     },
@@ -113,7 +110,6 @@ impl RpcRequestMiddleware {
             .unwrap()
     }
 
-    #[allow(dead_code)]
     fn internal_server_error() -> hyper::Response<hyper::Body> {
         hyper::Response::builder()
             .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
@@ -453,7 +449,6 @@ impl JsonRpcService {
             };
 
         let full_api = config.full_api;
-        let obsolete_v1_7_api = config.obsolete_v1_7_api;
         let max_request_body_size = config
             .max_request_body_size
             .unwrap_or(MAX_REQUEST_BODY_SIZE);
@@ -508,11 +503,6 @@ impl JsonRpcService {
                     io.extend_with(rpc_accounts::AccountsDataImpl.to_delegate());
                     io.extend_with(rpc_accounts_scan::AccountsScanImpl.to_delegate());
                     io.extend_with(rpc_full::FullImpl.to_delegate());
-                    io.extend_with(rpc_deprecated_v1_7::DeprecatedV1_7Impl.to_delegate());
-                    io.extend_with(rpc_deprecated_v1_9::DeprecatedV1_9Impl.to_delegate());
-                }
-                if obsolete_v1_7_api {
-                    io.extend_with(rpc_obsolete_v1_7::ObsoleteV1_7Impl.to_delegate());
                 }
 
                 let request_middleware = RpcRequestMiddleware::new(
@@ -523,7 +513,14 @@ impl JsonRpcService {
                 );
                 let server = ServerBuilder::with_meta_extractor(
                     io,
-                    move |_req: &hyper::Request<hyper::Body>| request_processor.clone(),
+                    move |req: &hyper::Request<hyper::Body>| {
+                        let xbigtable = req.headers().get("x-bigtable");
+                        if xbigtable.is_some_and(|v| v == "disabled") {
+                            request_processor.clone_without_bigtable()
+                        } else {
+                            request_processor.clone()
+                        }
+                    },
                 )
                 .event_loop_executor(runtime.handle().clone())
                 .threads(1)
@@ -869,24 +866,21 @@ mod tests {
             panic!("Unexpected RequestMiddlewareAction variant");
         }
 
-        #[cfg(unix)]
+        std::fs::remove_file(&genesis_path).unwrap();
         {
-            std::fs::remove_file(&genesis_path).unwrap();
-            {
-                let mut file = std::fs::File::create(ledger_path.path().join("wrong")).unwrap();
-                file.write_all(b"wrong file").unwrap();
-            }
-            symlink::symlink_file("wrong", &genesis_path).unwrap();
+            let mut file = std::fs::File::create(ledger_path.path().join("wrong")).unwrap();
+            file.write_all(b"wrong file").unwrap();
+        }
+        symlink::symlink_file("wrong", &genesis_path).unwrap();
 
-            // File is a symbolic link => request should fail.
-            let action = rrm.process_file_get(DEFAULT_GENESIS_DOWNLOAD_PATH);
-            if let RequestMiddlewareAction::Respond { response, .. } = action {
-                let response = runtime.block_on(response);
-                let response = response.unwrap();
-                assert_ne!(response.status(), 200);
-            } else {
-                panic!("Unexpected RequestMiddlewareAction variant");
-            }
+        // File is a symbolic link => request should fail.
+        let action = rrm.process_file_get(DEFAULT_GENESIS_DOWNLOAD_PATH);
+        if let RequestMiddlewareAction::Respond { response, .. } = action {
+            let response = runtime.block_on(response);
+            let response = response.unwrap();
+            assert_ne!(response.status(), 200);
+        } else {
+            panic!("Unexpected RequestMiddlewareAction variant");
         }
     }
 }

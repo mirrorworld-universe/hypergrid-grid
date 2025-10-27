@@ -5,10 +5,11 @@ use {
         scheduler_messages::{ConsumeWork, FinishedConsumeWork},
     },
     crossbeam_channel::{Receiver, RecvError, SendError, Sender},
-    solana_accounts_db::transaction_error_metrics::TransactionErrorMetrics,
+    solana_measure::measure_us,
     solana_poh::leader_bank_notifier::LeaderBankNotifier,
     solana_runtime::bank::Bank,
-    solana_sdk::timing::AtomicInterval,
+    solana_sdk::clock::Slot,
+    solana_svm::transaction_error_metrics::TransactionErrorMetrics,
     std::{
         sync::{
             atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -36,7 +37,6 @@ pub(crate) struct ConsumeWorker {
     metrics: Arc<ConsumeWorkerMetrics>,
 }
 
-#[allow(dead_code)]
 impl ConsumeWorker {
     pub fn new(
         id: u32,
@@ -66,15 +66,33 @@ impl ConsumeWorker {
     }
 
     fn consume_loop(&self, work: ConsumeWork) -> Result<(), ConsumeWorkerError> {
-        let Some(mut bank) = self.get_consume_bank() else {
+        let (maybe_consume_bank, get_bank_us) = measure_us!(self.get_consume_bank());
+        let Some(mut bank) = maybe_consume_bank else {
+            self.metrics
+                .timing_metrics
+                .wait_for_bank_failure_us
+                .fetch_add(get_bank_us, Ordering::Relaxed);
             return self.retry_drain(work);
         };
+        self.metrics
+            .timing_metrics
+            .wait_for_bank_success_us
+            .fetch_add(get_bank_us, Ordering::Relaxed);
 
         for work in try_drain_iter(work, &self.consume_receiver) {
             if bank.is_complete() {
-                if let Some(new_bank) = self.get_consume_bank() {
+                let (maybe_new_bank, get_bank_us) = measure_us!(self.get_consume_bank());
+                if let Some(new_bank) = maybe_new_bank {
+                    self.metrics
+                        .timing_metrics
+                        .wait_for_bank_success_us
+                        .fetch_add(get_bank_us, Ordering::Relaxed);
                     bank = new_bank;
                 } else {
+                    self.metrics
+                        .timing_metrics
+                        .wait_for_bank_failure_us
+                        .fetch_add(get_bank_us, Ordering::Relaxed);
                     return self.retry_drain(work);
                 }
             }
@@ -89,7 +107,7 @@ impl ConsumeWorker {
         let output = self.consumer.process_and_record_aged_transactions(
             bank,
             &work.transactions,
-            &work.max_age_slots,
+            &work.max_ages,
         );
 
         self.metrics.update_for_consume(&output);
@@ -151,9 +169,9 @@ fn try_drain_iter<T>(work: T, receiver: &Receiver<T>) -> impl Iterator<Item = T>
 /// since the consume worker thread is sleeping unless there is work to be
 /// done.
 pub(crate) struct ConsumeWorkerMetrics {
-    id: u32,
-    interval: AtomicInterval,
+    id: String,
     has_data: AtomicBool,
+    slot: AtomicU64,
 
     count_metrics: ConsumeWorkerCountMetrics,
     error_metrics: ConsumeWorkerTransactionErrorMetrics,
@@ -161,23 +179,34 @@ pub(crate) struct ConsumeWorkerMetrics {
 }
 
 impl ConsumeWorkerMetrics {
-    /// Report and reset metrics iff the interval has elapsed and the worker did some work.
-    pub fn maybe_report_and_reset(&self) {
-        const REPORT_INTERVAL_MS: u64 = 1000;
-        if self.interval.should_update(REPORT_INTERVAL_MS)
-            && self.has_data.swap(false, Ordering::Relaxed)
-        {
-            self.count_metrics.report_and_reset(self.id);
-            self.timing_metrics.report_and_reset(self.id);
-            self.error_metrics.report_and_reset(self.id);
+    /// Report and reset metrics when the worker did some work and:
+    /// a) (when a leader) Previous slot is not the same as current.
+    /// b) (when not a leader) report the metrics accumulated so far.
+    pub fn maybe_report_and_reset(&self, slot: Option<Slot>) {
+        let prev_slot_id: u64 = self.slot.load(Ordering::Relaxed);
+        if let Some(slot) = slot {
+            if slot != prev_slot_id {
+                if !self.has_data.swap(false, Ordering::Relaxed) {
+                    return;
+                }
+                self.count_metrics.report_and_reset(&self.id, slot);
+                self.timing_metrics.report_and_reset(&self.id, slot);
+                self.error_metrics.report_and_reset(&self.id, slot);
+                self.slot.swap(slot, Ordering::Relaxed);
+            }
+        } else if prev_slot_id != 0 {
+            self.count_metrics.report_and_reset(&self.id, prev_slot_id);
+            self.timing_metrics.report_and_reset(&self.id, prev_slot_id);
+            self.error_metrics.report_and_reset(&self.id, prev_slot_id);
+            self.slot.swap(0, Ordering::Relaxed);
         }
     }
 
     fn new(id: u32) -> Self {
         Self {
-            id,
-            interval: AtomicInterval::default(),
+            id: id.to_string(),
             has_data: AtomicBool::new(false),
+            slot: AtomicU64::new(0),
             count_metrics: ConsumeWorkerCountMetrics::default(),
             error_metrics: ConsumeWorkerTransactionErrorMetrics::default(),
             timing_metrics: ConsumeWorkerTimingMetrics::default(),
@@ -206,28 +235,47 @@ impl ConsumeWorkerMetrics {
     fn update_on_execute_and_commit_transactions_output(
         &self,
         ExecuteAndCommitTransactionsOutput {
-            transactions_attempted_execution_count,
-            executed_transactions_count,
-            executed_with_successful_result_count,
+            transaction_counts,
             retryable_transaction_indexes,
             execute_and_commit_timings,
             error_counters,
+            min_prioritization_fees,
+            max_prioritization_fees,
             ..
         }: &ExecuteAndCommitTransactionsOutput,
     ) {
         self.count_metrics
-            .transactions_attempted_execution_count
-            .fetch_add(*transactions_attempted_execution_count, Ordering::Relaxed);
+            .transactions_attempted_processing_count
+            .fetch_add(
+                transaction_counts.attempted_processing_count,
+                Ordering::Relaxed,
+            );
         self.count_metrics
-            .executed_transactions_count
-            .fetch_add(*executed_transactions_count, Ordering::Relaxed);
+            .processed_transactions_count
+            .fetch_add(transaction_counts.processed_count, Ordering::Relaxed);
         self.count_metrics
-            .executed_with_successful_result_count
-            .fetch_add(*executed_with_successful_result_count, Ordering::Relaxed);
+            .processed_with_successful_result_count
+            .fetch_add(
+                transaction_counts.processed_with_successful_result_count,
+                Ordering::Relaxed,
+            );
         self.count_metrics
             .retryable_transaction_count
             .fetch_add(retryable_transaction_indexes.len(), Ordering::Relaxed);
-
+        let min_prioritization_fees = self
+            .count_metrics
+            .min_prioritization_fees
+            .fetch_min(*min_prioritization_fees, Ordering::Relaxed);
+        let max_prioritization_fees = self
+            .count_metrics
+            .max_prioritization_fees
+            .fetch_max(*max_prioritization_fees, Ordering::Relaxed);
+        self.count_metrics
+            .min_prioritization_fees
+            .swap(min_prioritization_fees, Ordering::Relaxed);
+        self.count_metrics
+            .max_prioritization_fees
+            .swap(max_prioritization_fees, Ordering::Relaxed);
         self.update_on_execute_and_commit_timings(execute_and_commit_timings);
         self.update_on_error_counters(error_counters);
     }
@@ -238,7 +286,6 @@ impl ConsumeWorkerMetrics {
             collect_balances_us,
             load_execute_us,
             freeze_lock_us,
-            last_blockhash_us,
             record_us,
             commit_us,
             find_and_send_votes_us,
@@ -254,9 +301,6 @@ impl ConsumeWorkerMetrics {
         self.timing_metrics
             .freeze_lock_us
             .fetch_add(*freeze_lock_us, Ordering::Relaxed);
-        self.timing_metrics
-            .last_blockhash_us
-            .fetch_add(*last_blockhash_us, Ordering::Relaxed);
         self.timing_metrics
             .record_us
             .fetch_add(*record_us, Ordering::Relaxed);
@@ -285,6 +329,7 @@ impl ConsumeWorkerMetrics {
             invalid_account_for_fee,
             invalid_account_index,
             invalid_program_for_execution,
+            invalid_compute_budget,
             not_allowed_during_cluster_maintenance,
             invalid_writable_account,
             invalid_rent_paying_account,
@@ -339,6 +384,9 @@ impl ConsumeWorkerMetrics {
             .invalid_program_for_execution
             .fetch_add(*invalid_program_for_execution, Ordering::Relaxed);
         self.error_metrics
+            .invalid_compute_budget
+            .fetch_add(*invalid_compute_budget, Ordering::Relaxed);
+        self.error_metrics
             .not_allowed_during_cluster_maintenance
             .fetch_add(*not_allowed_during_cluster_maintenance, Ordering::Relaxed);
         self.error_metrics
@@ -368,35 +416,51 @@ impl ConsumeWorkerMetrics {
     }
 }
 
-#[derive(Default)]
 struct ConsumeWorkerCountMetrics {
-    transactions_attempted_execution_count: AtomicUsize,
-    executed_transactions_count: AtomicUsize,
-    executed_with_successful_result_count: AtomicUsize,
+    transactions_attempted_processing_count: AtomicU64,
+    processed_transactions_count: AtomicU64,
+    processed_with_successful_result_count: AtomicU64,
     retryable_transaction_count: AtomicUsize,
     retryable_expired_bank_count: AtomicUsize,
-    cost_model_throttled_transactions_count: AtomicUsize,
+    cost_model_throttled_transactions_count: AtomicU64,
+    min_prioritization_fees: AtomicU64,
+    max_prioritization_fees: AtomicU64,
+}
+
+impl Default for ConsumeWorkerCountMetrics {
+    fn default() -> Self {
+        Self {
+            transactions_attempted_processing_count: AtomicU64::default(),
+            processed_transactions_count: AtomicU64::default(),
+            processed_with_successful_result_count: AtomicU64::default(),
+            retryable_transaction_count: AtomicUsize::default(),
+            retryable_expired_bank_count: AtomicUsize::default(),
+            cost_model_throttled_transactions_count: AtomicU64::default(),
+            min_prioritization_fees: AtomicU64::new(u64::MAX),
+            max_prioritization_fees: AtomicU64::default(),
+        }
+    }
 }
 
 impl ConsumeWorkerCountMetrics {
-    fn report_and_reset(&self, id: u32) {
+    fn report_and_reset(&self, id: &str, slot: u64) {
         datapoint_info!(
             "banking_stage_worker_counts",
-            ("id", id, i64),
+            "id" => id,
             (
-                "transactions_attempted_execution_count",
-                self.transactions_attempted_execution_count
+                "transactions_attempted_processing_count",
+                self.transactions_attempted_processing_count
                     .swap(0, Ordering::Relaxed),
                 i64
             ),
             (
-                "executed_transactions_count",
-                self.executed_transactions_count.swap(0, Ordering::Relaxed),
+                "processed_transactions_count",
+                self.processed_transactions_count.swap(0, Ordering::Relaxed),
                 i64
             ),
             (
-                "executed_with_successful_result_count",
-                self.executed_with_successful_result_count
+                "processed_with_successful_result_count",
+                self.processed_with_successful_result_count
                     .swap(0, Ordering::Relaxed),
                 i64
             ),
@@ -416,6 +480,22 @@ impl ConsumeWorkerCountMetrics {
                     .swap(0, Ordering::Relaxed),
                 i64
             ),
+            (
+                "min_prioritization_fees",
+                self.min_prioritization_fees
+                    .swap(u64::MAX, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "max_prioritization_fees",
+                self.max_prioritization_fees.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "slot",
+                slot,
+                i64
+            ),
         );
     }
 }
@@ -426,17 +506,18 @@ struct ConsumeWorkerTimingMetrics {
     collect_balances_us: AtomicU64,
     load_execute_us: AtomicU64,
     freeze_lock_us: AtomicU64,
-    last_blockhash_us: AtomicU64,
     record_us: AtomicU64,
     commit_us: AtomicU64,
     find_and_send_votes_us: AtomicU64,
+    wait_for_bank_success_us: AtomicU64,
+    wait_for_bank_failure_us: AtomicU64,
 }
 
 impl ConsumeWorkerTimingMetrics {
-    fn report_and_reset(&self, id: u32) {
+    fn report_and_reset(&self, id: &str, slot: u64) {
         datapoint_info!(
             "banking_stage_worker_timing",
-            ("id", id, i64),
+            "id" => id,
             (
                 "cost_model_us",
                 self.cost_model_us.swap(0, Ordering::Relaxed),
@@ -457,16 +538,26 @@ impl ConsumeWorkerTimingMetrics {
                 self.freeze_lock_us.swap(0, Ordering::Relaxed),
                 i64
             ),
-            (
-                "last_blockhash_us",
-                self.last_blockhash_us.swap(0, Ordering::Relaxed),
-                i64
-            ),
             ("record_us", self.record_us.swap(0, Ordering::Relaxed), i64),
             ("commit_us", self.commit_us.swap(0, Ordering::Relaxed), i64),
             (
                 "find_and_send_votes_us",
                 self.find_and_send_votes_us.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "wait_for_bank_success_us",
+                self.wait_for_bank_success_us.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "wait_for_bank_failure_us",
+                self.wait_for_bank_failure_us.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "slot",
+                slot,
                 i64
             ),
         );
@@ -489,6 +580,7 @@ struct ConsumeWorkerTransactionErrorMetrics {
     invalid_account_for_fee: AtomicUsize,
     invalid_account_index: AtomicUsize,
     invalid_program_for_execution: AtomicUsize,
+    invalid_compute_budget: AtomicUsize,
     not_allowed_during_cluster_maintenance: AtomicUsize,
     invalid_writable_account: AtomicUsize,
     invalid_rent_paying_account: AtomicUsize,
@@ -501,10 +593,10 @@ struct ConsumeWorkerTransactionErrorMetrics {
 }
 
 impl ConsumeWorkerTransactionErrorMetrics {
-    fn report_and_reset(&self, id: u32) {
+    fn report_and_reset(&self, id: &str, slot: u64) {
         datapoint_info!(
             "banking_stage_worker_error_metrics",
-            ("id", id, i64),
+            "id" => id,
             ("total", self.total.swap(0, Ordering::Relaxed), i64),
             (
                 "account_in_use",
@@ -573,6 +665,12 @@ impl ConsumeWorkerTransactionErrorMetrics {
                 i64
             ),
             (
+                "invalid_compute_budget",
+                self.invalid_compute_budget
+                    .swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
                 "not_allowed_during_cluster_maintenance",
                 self.not_allowed_during_cluster_maintenance
                     .swap(0, Ordering::Relaxed),
@@ -606,6 +704,11 @@ impl ConsumeWorkerTransactionErrorMetrics {
                     .swap(0, Ordering::Relaxed),
                 i64
             ),
+            (
+                "slot",
+                slot,
+                i64
+            ),
         );
     }
 }
@@ -617,7 +720,7 @@ mod tests {
         crate::banking_stage::{
             committer::Committer,
             qos_service::QosService,
-            scheduler_messages::{TransactionBatchId, TransactionId},
+            scheduler_messages::{MaxAge, TransactionBatchId, TransactionId},
             tests::{create_slow_genesis_config, sanitize_transactions, simulate_poh},
         },
         crossbeam_channel::unbounded,
@@ -626,13 +729,30 @@ mod tests {
             get_tmp_ledger_path_auto_delete, leader_schedule_cache::LeaderScheduleCache,
         },
         solana_poh::poh_recorder::{PohRecorder, WorkingBankEntry},
-        solana_runtime::prioritization_fee_cache::PrioritizationFeeCache,
-        solana_sdk::{
-            genesis_config::GenesisConfig, poh_config::PohConfig, pubkey::Pubkey,
-            signature::Keypair, system_transaction,
+        solana_runtime::{
+            bank_forks::BankForks, prioritization_fee_cache::PrioritizationFeeCache,
+            vote_sender_types::ReplayVoteReceiver,
         },
-        solana_vote::vote_sender_types::ReplayVoteReceiver,
+        solana_sdk::{
+            address_lookup_table::AddressLookupTableAccount,
+            clock::{Slot, MAX_PROCESSING_AGE},
+            genesis_config::GenesisConfig,
+            message::{
+                v0::{self, LoadedAddresses},
+                SimpleAddressLoader, VersionedMessage,
+            },
+            poh_config::PohConfig,
+            pubkey::Pubkey,
+            signature::Keypair,
+            signer::Signer,
+            system_instruction, system_transaction,
+            transaction::{
+                MessageHash, SanitizedTransaction, TransactionError, VersionedTransaction,
+            },
+        },
+        solana_svm_transaction::svm_message::SVMMessage,
         std::{
+            collections::HashSet,
             sync::{atomic::AtomicBool, RwLock},
             thread::JoinHandle,
         },
@@ -645,6 +765,7 @@ mod tests {
         mint_keypair: Keypair,
         genesis_config: GenesisConfig,
         bank: Arc<Bank>,
+        _bank_forks: Arc<RwLock<BankForks>>,
         _ledger_path: TempDir,
         _entry_receiver: Receiver<WorkingBankEntry>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
@@ -661,7 +782,8 @@ mod tests {
             mint_keypair,
             ..
         } = create_slow_genesis_config(10_000);
-        let bank = Bank::new_no_wallclock_throttle_for_tests(&genesis_config).0;
+        let (bank, bank_forks) = Bank::new_no_wallclock_throttle_for_tests(&genesis_config);
+        let bank = Arc::new(Bank::new_from_parent(bank, &Pubkey::new_unique(), 1));
 
         let ledger_path = get_tmp_ledger_path_auto_delete!();
         let blockstore = Blockstore::open(ledger_path.path())
@@ -672,7 +794,6 @@ mod tests {
             bank.clone(),
             Some((4, 4)),
             bank.ticks_per_slot(),
-            &Pubkey::new_unique(),
             Arc::new(blockstore),
             &Arc::new(LeaderScheduleCache::new_from_bank(&bank)),
             &PohConfig::default(),
@@ -705,6 +826,7 @@ mod tests {
                 mint_keypair,
                 genesis_config,
                 bank,
+                _bank_forks: bank_forks,
                 _ledger_path: ledger_path,
                 _entry_receiver: entry_receiver,
                 poh_recorder,
@@ -740,17 +862,21 @@ mod tests {
         )]);
         let bid = TransactionBatchId::new(0);
         let id = TransactionId::new(0);
+        let max_age = MaxAge {
+            epoch_invalidation_slot: bank.slot(),
+            alt_invalidation_slot: bank.slot(),
+        };
         let work = ConsumeWork {
             batch_id: bid,
             ids: vec![id],
             transactions,
-            max_age_slots: vec![bank.slot()],
+            max_ages: vec![max_age],
         };
         consume_sender.send(work).unwrap();
         let consumed = consumed_receiver.recv().unwrap();
         assert_eq!(consumed.work.batch_id, bid);
         assert_eq!(consumed.work.ids, vec![id]);
-        assert_eq!(consumed.work.max_age_slots, vec![bank.slot()]);
+        assert_eq!(consumed.work.max_ages, vec![max_age]);
         assert_eq!(consumed.retryable_indexes, vec![0]);
 
         drop(test_frame);
@@ -785,17 +911,21 @@ mod tests {
         )]);
         let bid = TransactionBatchId::new(0);
         let id = TransactionId::new(0);
+        let max_age = MaxAge {
+            epoch_invalidation_slot: bank.slot(),
+            alt_invalidation_slot: bank.slot(),
+        };
         let work = ConsumeWork {
             batch_id: bid,
             ids: vec![id],
             transactions,
-            max_age_slots: vec![bank.slot()],
+            max_ages: vec![max_age],
         };
         consume_sender.send(work).unwrap();
         let consumed = consumed_receiver.recv().unwrap();
         assert_eq!(consumed.work.batch_id, bid);
         assert_eq!(consumed.work.ids, vec![id]);
-        assert_eq!(consumed.work.max_age_slots, vec![bank.slot()]);
+        assert_eq!(consumed.work.max_ages, vec![max_age]);
         assert_eq!(consumed.retryable_indexes, Vec::<usize>::new());
 
         drop(test_frame);
@@ -831,19 +961,23 @@ mod tests {
         let bid = TransactionBatchId::new(0);
         let id1 = TransactionId::new(1);
         let id2 = TransactionId::new(0);
+        let max_age = MaxAge {
+            epoch_invalidation_slot: bank.slot(),
+            alt_invalidation_slot: bank.slot(),
+        };
         consume_sender
             .send(ConsumeWork {
                 batch_id: bid,
                 ids: vec![id1, id2],
                 transactions: txs,
-                max_age_slots: vec![bank.slot(), bank.slot()],
+                max_ages: vec![max_age, max_age],
             })
             .unwrap();
 
         let consumed = consumed_receiver.recv().unwrap();
         assert_eq!(consumed.work.batch_id, bid);
         assert_eq!(consumed.work.ids, vec![id1, id2]);
-        assert_eq!(consumed.work.max_age_slots, vec![bank.slot(), bank.slot()]);
+        assert_eq!(consumed.work.max_ages, vec![max_age, max_age]);
         assert_eq!(consumed.retryable_indexes, vec![1]); // id2 is retryable since lock conflict
 
         drop(test_frame);
@@ -888,12 +1022,16 @@ mod tests {
         let bid2 = TransactionBatchId::new(1);
         let id1 = TransactionId::new(1);
         let id2 = TransactionId::new(0);
+        let max_age = MaxAge {
+            epoch_invalidation_slot: bank.slot(),
+            alt_invalidation_slot: bank.slot(),
+        };
         consume_sender
             .send(ConsumeWork {
                 batch_id: bid1,
                 ids: vec![id1],
                 transactions: txs1,
-                max_age_slots: vec![bank.slot()],
+                max_ages: vec![max_age],
             })
             .unwrap();
 
@@ -902,20 +1040,183 @@ mod tests {
                 batch_id: bid2,
                 ids: vec![id2],
                 transactions: txs2,
-                max_age_slots: vec![bank.slot()],
+                max_ages: vec![max_age],
             })
             .unwrap();
         let consumed = consumed_receiver.recv().unwrap();
         assert_eq!(consumed.work.batch_id, bid1);
         assert_eq!(consumed.work.ids, vec![id1]);
-        assert_eq!(consumed.work.max_age_slots, vec![bank.slot()]);
+        assert_eq!(consumed.work.max_ages, vec![max_age]);
         assert_eq!(consumed.retryable_indexes, Vec::<usize>::new());
 
         let consumed = consumed_receiver.recv().unwrap();
         assert_eq!(consumed.work.batch_id, bid2);
         assert_eq!(consumed.work.ids, vec![id2]);
-        assert_eq!(consumed.work.max_age_slots, vec![bank.slot()]);
+        assert_eq!(consumed.work.max_ages, vec![max_age]);
         assert_eq!(consumed.retryable_indexes, Vec::<usize>::new());
+
+        drop(test_frame);
+        let _ = worker_thread.join().unwrap();
+    }
+
+    #[test]
+    fn test_worker_ttl() {
+        let (test_frame, worker) = setup_test_frame();
+        let TestFrame {
+            mint_keypair,
+            genesis_config,
+            bank,
+            poh_recorder,
+            consume_sender,
+            consumed_receiver,
+            ..
+        } = &test_frame;
+        let worker_thread = std::thread::spawn(move || worker.run());
+        poh_recorder
+            .write()
+            .unwrap()
+            .set_bank_for_test(bank.clone());
+        assert!(bank.slot() > 0);
+
+        // No conflicts between transactions. Test 6 cases.
+        // 1. Epoch expiration, before slot => still succeeds due to resanitizing
+        // 2. Epoch expiration, on slot => succeeds normally
+        // 3. Epoch expiration, after slot => succeeds normally
+        // 4. ALT expiration, before slot => fails
+        // 5. ALT expiration, on slot => succeeds normally
+        // 6. ALT expiration, after slot => succeeds normally
+        let simple_transfer = || {
+            system_transaction::transfer(
+                &Keypair::new(),
+                &Pubkey::new_unique(),
+                1,
+                genesis_config.hash(),
+            )
+        };
+        let simple_v0_transfer = || {
+            let payer = Keypair::new();
+            let to_pubkey = Pubkey::new_unique();
+            let loaded_addresses = LoadedAddresses {
+                writable: vec![to_pubkey],
+                readonly: vec![],
+            };
+            let loader = SimpleAddressLoader::Enabled(loaded_addresses);
+            SanitizedTransaction::try_create(
+                VersionedTransaction::try_new(
+                    VersionedMessage::V0(
+                        v0::Message::try_compile(
+                            &payer.pubkey(),
+                            &[system_instruction::transfer(&payer.pubkey(), &to_pubkey, 1)],
+                            &[AddressLookupTableAccount {
+                                key: Pubkey::new_unique(), // will fail if using **bank** to lookup
+                                addresses: vec![to_pubkey],
+                            }],
+                            genesis_config.hash(),
+                        )
+                        .unwrap(),
+                    ),
+                    &[&payer],
+                )
+                .unwrap(),
+                MessageHash::Compute,
+                None,
+                loader,
+                &HashSet::default(),
+            )
+            .unwrap()
+        };
+
+        let mut txs = sanitize_transactions(vec![
+            simple_transfer(),
+            simple_transfer(),
+            simple_transfer(),
+        ]);
+        txs.push(simple_v0_transfer());
+        txs.push(simple_v0_transfer());
+        txs.push(simple_v0_transfer());
+        let sanitized_txs = txs.clone();
+
+        // Fund the keypairs.
+        for tx in &txs {
+            bank.process_transaction(&system_transaction::transfer(
+                mint_keypair,
+                &tx.account_keys()[0],
+                2,
+                genesis_config.hash(),
+            ))
+            .unwrap();
+        }
+
+        consume_sender
+            .send(ConsumeWork {
+                batch_id: TransactionBatchId::new(1),
+                ids: vec![
+                    TransactionId::new(0),
+                    TransactionId::new(1),
+                    TransactionId::new(2),
+                    TransactionId::new(3),
+                    TransactionId::new(4),
+                    TransactionId::new(5),
+                ],
+                transactions: txs,
+                max_ages: vec![
+                    MaxAge {
+                        epoch_invalidation_slot: bank.slot() - 1,
+                        alt_invalidation_slot: Slot::MAX,
+                    },
+                    MaxAge {
+                        epoch_invalidation_slot: bank.slot(),
+                        alt_invalidation_slot: Slot::MAX,
+                    },
+                    MaxAge {
+                        epoch_invalidation_slot: bank.slot() + 1,
+                        alt_invalidation_slot: Slot::MAX,
+                    },
+                    MaxAge {
+                        epoch_invalidation_slot: u64::MAX,
+                        alt_invalidation_slot: bank.slot() - 1,
+                    },
+                    MaxAge {
+                        epoch_invalidation_slot: u64::MAX,
+                        alt_invalidation_slot: bank.slot(),
+                    },
+                    MaxAge {
+                        epoch_invalidation_slot: u64::MAX,
+                        alt_invalidation_slot: bank.slot() + 1,
+                    },
+                ],
+            })
+            .unwrap();
+
+        let consumed = consumed_receiver.recv().unwrap();
+        assert_eq!(consumed.retryable_indexes, Vec::<usize>::new());
+        // all but one succeed. 6 for initial funding
+        assert_eq!(bank.transaction_count(), 6 + 5);
+
+        let already_processed_results = bank
+            .check_transactions(
+                &sanitized_txs,
+                &vec![Ok(()); sanitized_txs.len()],
+                MAX_PROCESSING_AGE,
+                &mut TransactionErrorMetrics::default(),
+            )
+            .into_iter()
+            .map(|r| match r {
+                Ok(_) => Ok(()),
+                Err(err) => Err(err),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            already_processed_results,
+            vec![
+                Err(TransactionError::AlreadyProcessed),
+                Err(TransactionError::AlreadyProcessed),
+                Err(TransactionError::AlreadyProcessed),
+                Ok(()), // <--- this transaction was not processed
+                Err(TransactionError::AlreadyProcessed),
+                Err(TransactionError::AlreadyProcessed)
+            ]
+        );
 
         drop(test_frame);
         let _ = worker_thread.join().unwrap();

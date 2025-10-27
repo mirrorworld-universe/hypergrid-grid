@@ -1,8 +1,7 @@
 use {
     itertools::Itertools,
     solana_gossip::{
-        cluster_info::ClusterInfo, crds::Cursor, epoch_slots::EpochSlots,
-        legacy_contact_info::LegacyContactInfo as ContactInfo,
+        cluster_info::ClusterInfo, contact_info::ContactInfo, crds::Cursor, epoch_slots::EpochSlots,
     },
     solana_runtime::{bank::Bank, epoch_stakes::NodeIdToVoteAccounts},
     solana_sdk::{
@@ -279,27 +278,23 @@ mod tests {
     #[test]
     fn test_best_peer_2() {
         let cs = ClusterSlots::default();
-        let mut c1 = ContactInfo::default();
-        let mut c2 = ContactInfo::default();
         let mut map = HashMap::new();
         let k1 = solana_sdk::pubkey::new_rand();
         let k2 = solana_sdk::pubkey::new_rand();
-        map.insert(k1, std::u64::MAX / 2);
+        map.insert(k1, u64::MAX / 2);
         map.insert(k2, 0);
         cs.cluster_slots
             .write()
             .unwrap()
             .insert(0, Arc::new(RwLock::new(map)));
-        c1.set_pubkey(k1);
-        c2.set_pubkey(k2);
-        assert_eq!(cs.compute_weights(0, &[c1, c2]), vec![std::u64::MAX / 4, 1]);
+        let c1 = ContactInfo::new(k1, /*wallclock:*/ 0, /*shred_version:*/ 0);
+        let c2 = ContactInfo::new(k2, /*wallclock:*/ 0, /*shred_version:*/ 0);
+        assert_eq!(cs.compute_weights(0, &[c1, c2]), vec![u64::MAX / 4, 1]);
     }
 
     #[test]
     fn test_best_peer_3() {
         let cs = ClusterSlots::default();
-        let mut c1 = ContactInfo::default();
-        let mut c2 = ContactInfo::default();
         let mut map = HashMap::new();
         let k1 = solana_sdk::pubkey::new_rand();
         let k2 = solana_sdk::pubkey::new_rand();
@@ -312,28 +307,30 @@ mod tests {
         let validator_stakes: HashMap<_, _> = vec![(
             k1,
             NodeVoteAccounts {
-                total_stake: std::u64::MAX / 2,
+                total_stake: u64::MAX / 2,
                 vote_accounts: vec![Pubkey::default()],
             },
         )]
         .into_iter()
         .collect();
         *cs.validator_stakes.write().unwrap() = Arc::new(validator_stakes);
-        c1.set_pubkey(k1);
-        c2.set_pubkey(k2);
-        assert_eq!(
-            cs.compute_weights(0, &[c1, c2]),
-            vec![std::u64::MAX / 4 + 1, 1]
-        );
+        let c1 = ContactInfo::new(k1, /*wallclock:*/ 0, /*shred_version:*/ 0);
+        let c2 = ContactInfo::new(k2, /*wallclock:*/ 0, /*shred_version:*/ 0);
+        assert_eq!(cs.compute_weights(0, &[c1, c2]), vec![u64::MAX / 4 + 1, 1]);
     }
 
     #[test]
     fn test_best_completed_slot_peer() {
         let cs = ClusterSlots::default();
-        let mut contact_infos = vec![ContactInfo::default(); 2];
-        for ci in contact_infos.iter_mut() {
-            ci.set_pubkey(solana_sdk::pubkey::new_rand());
-        }
+        let contact_infos: Vec<_> = std::iter::repeat_with(|| {
+            ContactInfo::new(
+                solana_sdk::pubkey::new_rand(),
+                0, // wallclock
+                0, // shred_version
+            )
+        })
+        .take(2)
+        .collect();
         let slot = 9;
 
         // None of these validators have completed slot 9, so should
@@ -346,7 +343,7 @@ mod tests {
         let validator_stakes: HashMap<_, _> = vec![(
             *contact_infos[1].pubkey(),
             NodeVoteAccounts {
-                total_stake: std::u64::MAX / 2,
+                total_stake: u64::MAX / 2,
                 vote_accounts: vec![Pubkey::default()],
             },
         )]

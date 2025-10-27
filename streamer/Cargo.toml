@@ -13,26 +13,32 @@ edition = { workspace = true }
 async-channel = { workspace = true }
 bytes = { workspace = true }
 crossbeam-channel = { workspace = true }
+dashmap = { workspace = true }
+futures  = { workspace = true }
 futures-util = { workspace = true }
+governor = { workspace = true }
 histogram = { workspace = true }
 indexmap = { workspace = true }
 itertools = { workspace = true }
 libc = { workspace = true }
 log = { workspace = true }
-nix = { workspace = true }
+nix = { workspace = true, features = ["net"] }
 pem = { workspace = true }
 percentage = { workspace = true }
-pkcs8 = { workspace = true, features = ["alloc"] }
 quinn = { workspace = true }
 quinn-proto = { workspace = true }
 rand = { workspace = true }
-rcgen = { workspace = true }
-rustls = { workspace = true, features = ["dangerous_configuration"] }
+rustls = { workspace = true }
+smallvec = { workspace = true }
+socket2 = { workspace = true }
+solana-measure = { workspace = true }
 solana-metrics = { workspace = true }
 solana-perf = { workspace = true }
 solana-sdk = { workspace = true }
+solana-transaction-metrics-tracker = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
+tokio-util = { workspace = true }
 x509-parser = { workspace = true }
 
 [dev-dependencies]

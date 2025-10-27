@@ -1,5 +1,7 @@
 use {
-    solana_program_runtime::{declare_process_instruction, ic_msg, invoke_context::InvokeContext},
+    solana_feature_set as feature_set,
+    solana_log_collector::ic_msg,
+    solana_program_runtime::{declare_process_instruction, invoke_context::InvokeContext},
     solana_sdk::{
         address_lookup_table::{
             instruction::ProgramInstruction,
@@ -10,7 +12,6 @@ use {
             },
         },
         clock::Slot,
-        feature_set,
         instruction::InstructionError,
         program_utils::limited_deserialize,
         pubkey::{Pubkey, PUBKEY_BYTES},
@@ -61,7 +62,7 @@ impl Processor {
         let table_key = *lookup_table_account.get_key();
         let lookup_table_owner = *lookup_table_account.get_owner();
         if !invoke_context
-            .feature_set
+            .get_feature_set()
             .is_active(&feature_set::relax_authority_signer_check_for_lookup_table_creation::id())
             && !lookup_table_account.get_data().is_empty()
         {
@@ -74,7 +75,7 @@ impl Processor {
             instruction_context.try_borrow_instruction_account(transaction_context, 1)?;
         let authority_key = *authority_account.get_key();
         if !invoke_context
-            .feature_set
+            .get_feature_set()
             .is_active(&feature_set::relax_authority_signer_check_for_lookup_table_creation::id())
             && !authority_account.is_signer()
         {
@@ -127,7 +128,7 @@ impl Processor {
         }
 
         if invoke_context
-            .feature_set
+            .get_feature_set()
             .is_active(&feature_set::relax_authority_signer_check_for_lookup_table_creation::id())
             && check_id(&lookup_table_owner)
         {
@@ -162,10 +163,9 @@ impl Processor {
         let instruction_context = transaction_context.get_current_instruction_context()?;
         let mut lookup_table_account =
             instruction_context.try_borrow_instruction_account(transaction_context, 0)?;
-        lookup_table_account.set_state(
-            &ProgramState::LookupTable(LookupTableMeta::new(authority_key)),
-            &invoke_context.feature_set,
-        )?;
+        lookup_table_account.set_state(&ProgramState::LookupTable(LookupTableMeta::new(
+            authority_key,
+        )))?;
 
         Ok(())
     }
@@ -214,7 +214,7 @@ impl Processor {
         let mut lookup_table_meta = lookup_table.meta;
         lookup_table_meta.authority = None;
         AddressLookupTable::overwrite_meta_data(
-            lookup_table_account.get_data_mut(&invoke_context.feature_set)?,
+            lookup_table_account.get_data_mut()?,
             lookup_table_meta,
         )?;
 
@@ -306,12 +306,11 @@ impl Processor {
         )?;
         {
             AddressLookupTable::overwrite_meta_data(
-                lookup_table_account.get_data_mut(&invoke_context.feature_set)?,
+                lookup_table_account.get_data_mut()?,
                 lookup_table_meta,
             )?;
             for new_address in new_addresses {
-                lookup_table_account
-                    .extend_from_slice(new_address.as_ref(), &invoke_context.feature_set)?;
+                lookup_table_account.extend_from_slice(new_address.as_ref())?;
             }
         }
         drop(lookup_table_account);
@@ -383,7 +382,7 @@ impl Processor {
         lookup_table_meta.deactivation_slot = clock.slot;
 
         AddressLookupTable::overwrite_meta_data(
-            lookup_table_account.get_data_mut(&invoke_context.feature_set)?,
+            lookup_table_account.get_data_mut()?,
             lookup_table_meta,
         )?;
 
@@ -458,13 +457,13 @@ impl Processor {
 
         let mut recipient_account =
             instruction_context.try_borrow_instruction_account(transaction_context, 2)?;
-        recipient_account.checked_add_lamports(withdrawn_lamports, &invoke_context.feature_set)?;
+        recipient_account.checked_add_lamports(withdrawn_lamports)?;
         drop(recipient_account);
 
         let mut lookup_table_account =
             instruction_context.try_borrow_instruction_account(transaction_context, 0)?;
-        lookup_table_account.set_data_length(0, &invoke_context.feature_set)?;
-        lookup_table_account.set_lamports(0, &invoke_context.feature_set)?;
+        lookup_table_account.set_data_length(0)?;
+        lookup_table_account.set_lamports(0)?;
 
         Ok(())
     }

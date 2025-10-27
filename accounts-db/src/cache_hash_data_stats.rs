@@ -11,10 +11,15 @@ pub struct CacheHashDataStats {
     pub save_us: AtomicU64,
     pub saved_to_cache: AtomicUsize,
     pub write_to_mmap_us: AtomicU64,
+    pub flush_mmap_us: AtomicU64,
     pub create_save_us: AtomicU64,
     pub load_us: AtomicU64,
     pub read_us: AtomicU64,
     pub unused_cache_files: AtomicUsize,
+    /// the number of hash data files that were found in the cache and reused
+    pub hits: AtomicUsize,
+    /// the number of hash data files that were not found in the cache
+    pub misses: AtomicUsize,
 }
 
 impl CacheHashDataStats {
@@ -58,6 +63,11 @@ impl CacheHashDataStats {
                 i64
             ),
             (
+                "flush_mmap_us",
+                self.flush_mmap_us.load(Ordering::Relaxed),
+                i64
+            ),
+            (
                 "create_save_us",
                 self.create_save_us.load(Ordering::Relaxed),
                 i64
@@ -69,6 +79,8 @@ impl CacheHashDataStats {
                 self.unused_cache_files.load(Ordering::Relaxed),
                 i64
             ),
+            ("hits", self.hits.load(Ordering::Relaxed), i64),
+            ("misses", self.misses.load(Ordering::Relaxed), i64),
         );
     }
 }

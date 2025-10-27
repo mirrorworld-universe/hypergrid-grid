@@ -10,18 +10,22 @@ use {
     console::style,
     serde::{Deserialize, Serialize},
     solana_clap_utils::{
-        fee_payer::*, hidden_unless_forced, input_parsers::*, input_validators::*, keypair::*,
+        compute_budget::ComputeUnitLimit, fee_payer::*, hidden_unless_forced, input_parsers::*,
+        input_validators::*, keypair::*,
     },
     solana_cli_output::{cli_version::CliVersion, QuietDisplay, VerboseDisplay},
+    solana_feature_set::FEATURE_NAMES,
     solana_remote_wallet::remote_wallet::RemoteWalletManager,
     solana_rpc_client::rpc_client::RpcClient,
-    solana_rpc_client_api::{client_error::Error as ClientError, request::MAX_MULTIPLE_ACCOUNTS},
+    solana_rpc_client_api::{
+        client_error::Error as ClientError, request::MAX_MULTIPLE_ACCOUNTS,
+        response::RpcVoteAccountInfo,
+    },
     solana_sdk::{
         account::Account,
         clock::Slot,
         epoch_schedule::EpochSchedule,
         feature::{self, Feature},
-        feature_set::FEATURE_NAMES,
         genesis_config::ClusterType,
         message::Message,
         pubkey::Pubkey,
@@ -145,7 +149,11 @@ impl fmt::Display for CliFeatures {
                     CliFeatureStatus::Inactive => style("inactive".to_string()).red(),
                     CliFeatureStatus::Pending => {
                         let current_epoch = self.epoch_schedule.get_epoch(self.current_slot);
-                        style(format!("pending until epoch {}", current_epoch + 1)).yellow()
+                        style(format!(
+                            "pending until epoch {}",
+                            current_epoch.saturating_add(1)
+                        ))
+                        .yellow()
                     }
                     CliFeatureStatus::Active(activation_slot) => {
                         let activation_epoch = self.epoch_schedule.get_epoch(activation_slot);
@@ -538,13 +546,10 @@ pub fn parse_feature_subcommand(
             let display_all =
                 matches.is_present("display_all") || features.len() < FEATURE_NAMES.len();
             features.sort();
-            CliCommandInfo {
-                command: CliCommand::Feature(FeatureCliCommand::Status {
-                    features,
-                    display_all,
-                }),
-                signers: vec![],
-            }
+            CliCommandInfo::without_signers(CliCommand::Feature(FeatureCliCommand::Status {
+                features,
+                display_all,
+            }))
         }
         _ => unreachable!(),
     };
@@ -651,27 +656,36 @@ fn cluster_info_stats(rpc_client: &RpcClient) -> Result<ClusterInfoStats, Client
     let vote_stakes = vote_accounts
         .current
         .into_iter()
-        .map(|vote_account| {
-            total_active_stake += vote_account.activated_stake;
-            (vote_account.node_pubkey, vote_account.activated_stake)
-        })
+        .map(
+            |RpcVoteAccountInfo {
+                 node_pubkey,
+                 activated_stake,
+                 ..
+             }| {
+                total_active_stake = total_active_stake.saturating_add(activated_stake);
+                (node_pubkey.clone(), activated_stake)
+            },
+        )
         .collect::<HashMap<_, _>>();
 
     let mut cluster_info_stats: HashMap<(u32, CliVersion), StatsEntry> = HashMap::new();
-    let mut total_rpc_nodes = 0;
+    let mut total_rpc_nodes: u64 = 0;
     for (node_id, feature_set, is_rpc, version) in cluster_info_list {
         let feature_set = feature_set.unwrap_or(0);
-        let stats_entry = cluster_info_stats
+        let StatsEntry {
+            stake_lamports,
+            rpc_nodes_count,
+        } = cluster_info_stats
             .entry((feature_set, version))
             .or_default();
 
         if let Some(vote_stake) = vote_stakes.get(&node_id) {
-            stats_entry.stake_lamports += *vote_stake;
+            *stake_lamports = stake_lamports.saturating_add(*vote_stake);
         }
 
         if is_rpc {
-            stats_entry.rpc_nodes_count += 1;
-            total_rpc_nodes += 1;
+            *rpc_nodes_count = rpc_nodes_count.saturating_add(1);
+            total_rpc_nodes = total_rpc_nodes.saturating_add(1);
         }
     }
 
@@ -806,7 +820,7 @@ fn feature_activation_allowed(
     ))
 }
 
-fn status_from_account(account: Account) -> Option<CliFeatureStatus> {
+pub(super) fn status_from_account(account: Account) -> Option<CliFeatureStatus> {
     feature::from_account(&account).map(|feature| match feature.activated_at {
         None => CliFeatureStatus::Pending,
         Some(activation_slot) => CliFeatureStatus::Active(activation_slot),
@@ -959,6 +973,7 @@ fn process_activate(
         SpendAmount::Some(rent),
         &blockhash,
         &fee_payer.pubkey(),
+        ComputeUnitLimit::Default,
         |lamports| {
             Message::new(
                 &feature::activate_with_lamports(&feature_id, &fee_payer.pubkey(), lamports),

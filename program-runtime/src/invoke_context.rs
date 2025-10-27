@@ -1,13 +1,15 @@
 use {
     crate::{
-        compute_budget::ComputeBudget,
-        ic_msg,
-        loaded_programs::{LoadedProgram, LoadedProgramType, LoadedProgramsForTxBatch},
-        log_collector::LogCollector,
+        loaded_programs::{
+            ProgramCacheEntry, ProgramCacheEntryType, ProgramCacheForTxBatch,
+            ProgramRuntimeEnvironments,
+        },
         stable_log,
         sysvar_cache::SysvarCache,
-        timings::{ExecuteDetailsTimings, ExecuteTimings},
     },
+    solana_compute_budget::compute_budget::ComputeBudget,
+    solana_feature_set::{move_precompile_verification_to_svm, FeatureSet},
+    solana_log_collector::{ic_msg, LogCollector},
     solana_measure::measure::Measure,
     solana_rbpf::{
         ebpf::MM_HEAP_START,
@@ -17,25 +19,30 @@ use {
         vm::{Config, ContextObject, EbpfVm},
     },
     solana_sdk::{
-        account::AccountSharedData,
+        account::{create_account_shared_data_for_test, AccountSharedData},
         bpf_loader_deprecated,
-        feature_set::FeatureSet,
+        clock::Slot,
+        epoch_schedule::EpochSchedule,
         hash::Hash,
         instruction::{AccountMeta, InstructionError},
         native_loader,
+        precompiles::Precompile,
         pubkey::Pubkey,
         saturating_add_assign,
         stable_layout::stable_instruction::StableInstruction,
+        sysvar,
         transaction_context::{
             IndexOfAccount, InstructionAccount, TransactionAccount, TransactionContext,
         },
     },
+    solana_timings::{ExecuteDetailsTimings, ExecuteTimings},
+    solana_type_overrides::sync::{atomic::Ordering, Arc},
+    solana_vote::vote_account::VoteAccountsHashMap,
     std::{
         alloc::Layout,
         cell::RefCell,
         fmt::{self, Debug},
         rc::Rc,
-        sync::{atomic::Ordering, Arc},
     },
 };
 
@@ -138,6 +145,34 @@ impl BpfAllocator {
     }
 }
 
+pub struct EnvironmentConfig<'a> {
+    pub blockhash: Hash,
+    epoch_total_stake: Option<u64>,
+    epoch_vote_accounts: Option<&'a VoteAccountsHashMap>,
+    pub feature_set: Arc<FeatureSet>,
+    pub lamports_per_signature: u64,
+    sysvar_cache: &'a SysvarCache,
+}
+impl<'a> EnvironmentConfig<'a> {
+    pub fn new(
+        blockhash: Hash,
+        epoch_total_stake: Option<u64>,
+        epoch_vote_accounts: Option<&'a VoteAccountsHashMap>,
+        feature_set: Arc<FeatureSet>,
+        lamports_per_signature: u64,
+        sysvar_cache: &'a SysvarCache,
+    ) -> Self {
+        Self {
+            blockhash,
+            epoch_total_stake,
+            epoch_vote_accounts,
+            feature_set,
+            lamports_per_signature,
+            sysvar_cache,
+        }
+    }
+}
+
 pub struct SyscallContext {
     pub allocator: BpfAllocator,
     pub accounts_metadata: Vec<SerializedAccountMetadata>,
@@ -153,19 +188,23 @@ pub struct SerializedAccountMetadata {
     pub vm_owner_addr: u64,
 }
 
+/// Main pipeline from runtime to program execution.
 pub struct InvokeContext<'a> {
+    /// Information about the currently executing transaction.
     pub transaction_context: &'a mut TransactionContext,
-    sysvar_cache: &'a SysvarCache,
-    log_collector: Option<Rc<RefCell<LogCollector>>>,
+    /// The local program cache for the transaction batch.
+    pub program_cache_for_tx_batch: &'a mut ProgramCacheForTxBatch,
+    /// Runtime configurations used to provision the invocation environment.
+    pub environment_config: EnvironmentConfig<'a>,
+    /// The compute budget for the current invocation.
     compute_budget: ComputeBudget,
-    current_compute_budget: ComputeBudget,
+    /// Instruction compute meter, for tracking compute units consumed against
+    /// the designated compute budget during program execution.
     compute_meter: RefCell<u64>,
-    pub programs_loaded_for_tx_batch: &'a LoadedProgramsForTxBatch,
-    pub programs_modified_by_tx: &'a mut LoadedProgramsForTxBatch,
-    pub feature_set: Arc<FeatureSet>,
+    log_collector: Option<Rc<RefCell<LogCollector>>>,
+    /// Latest measurement not yet accumulated in [ExecuteDetailsTimings::execute_us]
+    pub execute_time: Option<Measure>,
     pub timings: ExecuteDetailsTimings,
-    pub blockhash: Hash,
-    pub lamports_per_signature: u64,
     pub syscall_context: Vec<Option<SyscallContext>>,
     traces: Vec<Vec<[u64; 12]>>,
 }
@@ -174,39 +213,34 @@ impl<'a> InvokeContext<'a> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         transaction_context: &'a mut TransactionContext,
-        sysvar_cache: &'a SysvarCache,
+        program_cache_for_tx_batch: &'a mut ProgramCacheForTxBatch,
+        environment_config: EnvironmentConfig<'a>,
         log_collector: Option<Rc<RefCell<LogCollector>>>,
         compute_budget: ComputeBudget,
-        programs_loaded_for_tx_batch: &'a LoadedProgramsForTxBatch,
-        programs_modified_by_tx: &'a mut LoadedProgramsForTxBatch,
-        feature_set: Arc<FeatureSet>,
-        blockhash: Hash,
-        lamports_per_signature: u64,
     ) -> Self {
         Self {
             transaction_context,
-            sysvar_cache,
+            program_cache_for_tx_batch,
+            environment_config,
             log_collector,
-            current_compute_budget: compute_budget,
             compute_budget,
             compute_meter: RefCell::new(compute_budget.compute_unit_limit),
-            programs_loaded_for_tx_batch,
-            programs_modified_by_tx,
-            feature_set,
+            execute_time: None,
             timings: ExecuteDetailsTimings::default(),
-            blockhash,
-            lamports_per_signature,
             syscall_context: Vec::new(),
             traces: Vec::new(),
         }
     }
 
-    pub fn find_program_in_cache(&self, pubkey: &Pubkey) -> Option<Arc<LoadedProgram>> {
-        // First lookup the cache of the programs modified by the current transaction. If not found, lookup
-        // the cache of the cache of the programs that are loaded for the transaction batch.
-        self.programs_modified_by_tx
-            .find(pubkey)
-            .or_else(|| self.programs_loaded_for_tx_batch.find(pubkey))
+    pub fn get_environments_for_slot(
+        &self,
+        effective_slot: Slot,
+    ) -> Result<&ProgramRuntimeEnvironments, InstructionError> {
+        let epoch_schedule = self.environment_config.sysvar_cache.get_epoch_schedule()?;
+        let epoch = epoch_schedule.get_epoch(effective_slot);
+        Ok(self
+            .program_cache_for_tx_batch
+            .get_environments_for_epoch(epoch))
     }
 
     /// Push a stack frame onto the invocation stack
@@ -222,10 +256,8 @@ impl<'a> InvokeContext<'a> {
         if self
             .transaction_context
             .get_instruction_context_stack_height()
-            == 0
+            != 0
         {
-            self.current_compute_budget = self.compute_budget;
-        } else {
             let contains = (0..self
                 .transaction_context
                 .get_instruction_context_stack_height())
@@ -386,10 +418,10 @@ impl<'a> InvokeContext<'a> {
         let instruction_accounts = duplicate_indicies
             .into_iter()
             .map(|duplicate_index| {
-                Ok(deduplicated_instruction_accounts
+                deduplicated_instruction_accounts
                     .get(duplicate_index)
-                    .ok_or(InstructionError::NotEnoughAccountKeys)?
-                    .clone())
+                    .cloned()
+                    .ok_or(InstructionError::NotEnoughAccountKeys)
             })
             .collect::<Result<Vec<InstructionAccount>, InstructionError>>()?;
 
@@ -403,7 +435,7 @@ impl<'a> InvokeContext<'a> {
             })?;
         let borrowed_program_account = instruction_context
             .try_borrow_instruction_account(self.transaction_context, program_account_index)?;
-        if !borrowed_program_account.is_executable(&self.feature_set) {
+        if !borrowed_program_account.is_executable() {
             ic_msg!(self, "Account {} is not executable", callee_program_id);
             return Err(InstructionError::AccountNotExecutable);
         }
@@ -434,6 +466,34 @@ impl<'a> InvokeContext<'a> {
             .and(self.pop())
     }
 
+    /// Processes a precompile instruction
+    pub fn process_precompile<'ix_data>(
+        &mut self,
+        precompile: &Precompile,
+        instruction_data: &[u8],
+        instruction_accounts: &[InstructionAccount],
+        program_indices: &[IndexOfAccount],
+        message_instruction_datas_iter: impl Iterator<Item = &'ix_data [u8]>,
+    ) -> Result<(), InstructionError> {
+        self.transaction_context
+            .get_next_instruction_context()?
+            .configure(program_indices, instruction_accounts, instruction_data);
+        self.push()?;
+
+        let feature_set = self.get_feature_set();
+        let move_precompile_verification_to_svm =
+            feature_set.is_active(&move_precompile_verification_to_svm::id());
+        if move_precompile_verification_to_svm {
+            let instruction_datas: Vec<_> = message_instruction_datas_iter.collect();
+            precompile
+                .verify(instruction_data, &instruction_datas, feature_set)
+                .map_err(InstructionError::from)
+                .and(self.pop())
+        } else {
+            self.pop()
+        }
+    }
+
     /// Calls the instruction's program entrypoint method
     fn process_executable_chain(
         &mut self,
@@ -441,9 +501,10 @@ impl<'a> InvokeContext<'a> {
         timings: &mut ExecuteTimings,
     ) -> Result<(), InstructionError> {
         let instruction_context = self.transaction_context.get_current_instruction_context()?;
-        let mut process_executable_chain_time = Measure::start("process_executable_chain_time");
+        let process_executable_chain_time = Measure::start("process_executable_chain_time");
 
         let builtin_id = {
+            debug_assert!(instruction_context.get_number_of_program_accounts() <= 1);
             let borrowed_root_account = instruction_context
                 .try_borrow_program_account(self.transaction_context, 0)
                 .map_err(|_| InstructionError::UnsupportedProgramId)?;
@@ -458,11 +519,11 @@ impl<'a> InvokeContext<'a> {
         // The Murmur3 hash value (used by RBPF) of the string "entrypoint"
         const ENTRYPOINT_KEY: u32 = 0x71E3CF81;
         let entry = self
-            .programs_loaded_for_tx_batch
+            .program_cache_for_tx_batch
             .find(&builtin_id)
             .ok_or(InstructionError::UnsupportedProgramId)?;
         let function = match &entry.program {
-            LoadedProgramType::Builtin(program) => program
+            ProgramCacheEntryType::Builtin(program) => program
                 .get_function_registry()
                 .lookup_by_key(ENTRYPOINT_KEY)
                 .map(|(_name, function)| function),
@@ -484,7 +545,7 @@ impl<'a> InvokeContext<'a> {
         let empty_memory_mapping =
             MemoryMapping::new(Vec::new(), &mock_config, &SBPFVersion::V1).unwrap();
         let mut vm = EbpfVm::new(
-            self.programs_loaded_for_tx_batch
+            self.program_cache_for_tx_batch
                 .environments
                 .program_runtime_v2
                 .clone(),
@@ -523,13 +584,12 @@ impl<'a> InvokeContext<'a> {
             return Err(InstructionError::BuiltinProgramsMustConsumeComputeUnits);
         }
 
-        process_executable_chain_time.stop();
         saturating_add_assign!(
             timings
                 .execute_accessories
                 .process_instructions
                 .process_executable_chain_us,
-            process_executable_chain_time.as_us()
+            process_executable_chain_time.end_as_us()
         );
         result
     }
@@ -559,12 +619,34 @@ impl<'a> InvokeContext<'a> {
 
     /// Get this invocation's compute budget
     pub fn get_compute_budget(&self) -> &ComputeBudget {
-        &self.current_compute_budget
+        &self.compute_budget
+    }
+
+    /// Get the current feature set.
+    pub fn get_feature_set(&self) -> &FeatureSet {
+        &self.environment_config.feature_set
+    }
+
+    /// Set feature set.
+    ///
+    /// Only use for tests and benchmarks.
+    pub fn mock_set_feature_set(&mut self, feature_set: Arc<FeatureSet>) {
+        self.environment_config.feature_set = feature_set;
     }
 
     /// Get cached sysvars
     pub fn get_sysvar_cache(&self) -> &SysvarCache {
-        self.sysvar_cache
+        self.environment_config.sysvar_cache
+    }
+
+    /// Get cached epoch total stake.
+    pub fn get_epoch_total_stake(&self) -> Option<u64> {
+        self.environment_config.epoch_total_stake
+    }
+
+    /// Get cached epoch vote accounts.
+    pub fn get_epoch_vote_accounts(&self) -> Option<&VoteAccountsHashMap> {
+        self.environment_config.epoch_vote_accounts
     }
 
     // Should alignment be enforced during user pointer translation
@@ -623,14 +705,17 @@ macro_rules! with_mock_invoke_context {
         $transaction_accounts:expr $(,)?
     ) => {
         use {
+            solana_compute_budget::compute_budget::ComputeBudget,
+            solana_feature_set::FeatureSet,
+            solana_log_collector::LogCollector,
             solana_sdk::{
-                account::ReadableAccount, feature_set::FeatureSet, hash::Hash, sysvar::rent::Rent,
+                account::ReadableAccount, hash::Hash, sysvar::rent::Rent,
                 transaction_context::TransactionContext,
             },
-            std::sync::Arc,
+            solana_type_overrides::sync::Arc,
             $crate::{
-                compute_budget::ComputeBudget, invoke_context::InvokeContext,
-                loaded_programs::LoadedProgramsForTxBatch, log_collector::LogCollector,
+                invoke_context::{EnvironmentConfig, InvokeContext},
+                loaded_programs::ProgramCacheForTxBatch,
                 sysvar_cache::SysvarCache,
             },
         };
@@ -638,7 +723,7 @@ macro_rules! with_mock_invoke_context {
         let mut $transaction_context = TransactionContext::new(
             $transaction_accounts,
             Rent::default(),
-            compute_budget.max_invoke_stack_height,
+            compute_budget.max_instruction_stack_depth,
             compute_budget.max_instruction_trace_length,
         );
         let mut sysvar_cache = SysvarCache::default();
@@ -659,18 +744,21 @@ macro_rules! with_mock_invoke_context {
                 }
             }
         });
-        let programs_loaded_for_tx_batch = LoadedProgramsForTxBatch::default();
-        let mut programs_modified_by_tx = LoadedProgramsForTxBatch::default();
+        let environment_config = EnvironmentConfig::new(
+            Hash::default(),
+            None,
+            None,
+            Arc::new(FeatureSet::all_enabled()),
+            0,
+            &sysvar_cache,
+        );
+        let mut program_cache_for_tx_batch = ProgramCacheForTxBatch::default();
         let mut $invoke_context = InvokeContext::new(
             &mut $transaction_context,
-            &sysvar_cache,
+            &mut program_cache_for_tx_batch,
+            environment_config,
             Some(LogCollector::new_ref()),
             compute_budget,
-            &programs_loaded_for_tx_batch,
-            &mut programs_modified_by_tx,
-            Arc::new(FeatureSet::all_enabled()),
-            Hash::default(),
-            0,
         );
     };
 }
@@ -710,16 +798,30 @@ pub fn mock_process_instruction<F: FnMut(&mut InvokeContext), G: FnMut(&mut Invo
             is_writable: account_meta.is_writable,
         });
     }
-    program_indices.insert(0, transaction_accounts.len() as IndexOfAccount);
-    let processor_account = AccountSharedData::new(0, 0, &native_loader::id());
-    transaction_accounts.push((*loader_id, processor_account));
+    if program_indices.is_empty() {
+        program_indices.insert(0, transaction_accounts.len() as IndexOfAccount);
+        let processor_account = AccountSharedData::new(0, 0, &native_loader::id());
+        transaction_accounts.push((*loader_id, processor_account));
+    }
+    let pop_epoch_schedule_account = if !transaction_accounts
+        .iter()
+        .any(|(key, _)| *key == sysvar::epoch_schedule::id())
+    {
+        transaction_accounts.push((
+            sysvar::epoch_schedule::id(),
+            create_account_shared_data_for_test(&EpochSchedule::default()),
+        ));
+        true
+    } else {
+        false
+    };
     with_mock_invoke_context!(invoke_context, transaction_context, transaction_accounts);
-    let mut programs_loaded_for_tx_batch = LoadedProgramsForTxBatch::default();
-    programs_loaded_for_tx_batch.replenish(
+    let mut program_cache_for_tx_batch = ProgramCacheForTxBatch::default();
+    program_cache_for_tx_batch.replenish(
         *loader_id,
-        Arc::new(LoadedProgram::new_builtin(0, 0, builtin_function)),
+        Arc::new(ProgramCacheEntry::new_builtin(0, 0, builtin_function)),
     );
-    invoke_context.programs_loaded_for_tx_batch = &programs_loaded_for_tx_batch;
+    invoke_context.program_cache_for_tx_batch = &mut program_cache_for_tx_batch;
     pre_adjustments(&mut invoke_context);
     let result = invoke_context.process_instruction(
         instruction_data,
@@ -731,6 +833,9 @@ pub fn mock_process_instruction<F: FnMut(&mut InvokeContext), G: FnMut(&mut Invo
     assert_eq!(result, expected_result);
     post_adjustments(&mut invoke_context);
     let mut transaction_accounts = transaction_context.deconstruct_without_keys().unwrap();
+    if pop_epoch_schedule_account {
+        transaction_accounts.pop();
+    }
     transaction_accounts.pop();
     transaction_accounts
 }
@@ -739,8 +844,8 @@ pub fn mock_process_instruction<F: FnMut(&mut InvokeContext), G: FnMut(&mut Invo
 mod tests {
     use {
         super::*,
-        crate::compute_budget_processor,
         serde::{Deserialize, Serialize},
+        solana_compute_budget::compute_budget_limits,
         solana_sdk::{account::WritableAccount, instruction::Instruction, rent::Rent},
     };
 
@@ -802,17 +907,17 @@ mod tests {
                     MockInstruction::NoopFail => return Err(InstructionError::GenericError),
                     MockInstruction::ModifyOwned => instruction_context
                         .try_borrow_instruction_account(transaction_context, 0)?
-                        .set_data_from_slice(&[1], &invoke_context.feature_set)?,
+                        .set_data_from_slice(&[1])?,
                     MockInstruction::ModifyNotOwned => instruction_context
                         .try_borrow_instruction_account(transaction_context, 1)?
-                        .set_data_from_slice(&[1], &invoke_context.feature_set)?,
+                        .set_data_from_slice(&[1])?,
                     MockInstruction::ModifyReadonly => instruction_context
                         .try_borrow_instruction_account(transaction_context, 2)?
-                        .set_data_from_slice(&[1], &invoke_context.feature_set)?,
+                        .set_data_from_slice(&[1])?,
                     MockInstruction::UnbalancedPush => {
                         instruction_context
                             .try_borrow_instruction_account(transaction_context, 0)?
-                            .checked_add_lamports(1, &invoke_context.feature_set)?;
+                            .checked_add_lamports(1)?;
                         let program_id = *transaction_context.get_key_of_account_at_index(3)?;
                         let metas = vec![
                             AccountMeta::new_readonly(
@@ -843,7 +948,7 @@ mod tests {
                     }
                     MockInstruction::UnbalancedPop => instruction_context
                         .try_borrow_instruction_account(transaction_context, 0)?
-                        .checked_add_lamports(1, &invoke_context.feature_set)?,
+                        .checked_add_lamports(1)?,
                     MockInstruction::ConsumeComputeUnits {
                         compute_units_to_consume,
                         desired_result,
@@ -855,7 +960,7 @@ mod tests {
                     }
                     MockInstruction::Resize { new_len } => instruction_context
                         .try_borrow_instruction_account(transaction_context, 0)?
-                        .set_data(vec![0; new_len as usize], &invoke_context.feature_set)?,
+                        .set_data(vec![0; new_len as usize])?,
                 }
             } else {
                 return Err(InstructionError::InvalidInstructionData);
@@ -867,7 +972,7 @@ mod tests {
     #[test]
     fn test_instruction_stack_height() {
         let one_more_than_max_depth = ComputeBudget::default()
-            .max_invoke_stack_height
+            .max_instruction_stack_depth
             .saturating_add(1);
         let mut invoke_stack = vec![];
         let mut transaction_accounts = vec![];
@@ -968,12 +1073,12 @@ mod tests {
             })
             .collect::<Vec<_>>();
         with_mock_invoke_context!(invoke_context, transaction_context, transaction_accounts);
-        let mut programs_loaded_for_tx_batch = LoadedProgramsForTxBatch::default();
-        programs_loaded_for_tx_batch.replenish(
+        let mut program_cache_for_tx_batch = ProgramCacheForTxBatch::default();
+        program_cache_for_tx_batch.replenish(
             callee_program_id,
-            Arc::new(LoadedProgram::new_builtin(0, 1, MockBuiltin::vm)),
+            Arc::new(ProgramCacheEntry::new_builtin(0, 1, MockBuiltin::vm)),
         );
-        invoke_context.programs_loaded_for_tx_batch = &programs_loaded_for_tx_batch;
+        invoke_context.program_cache_for_tx_batch = &mut program_cache_for_tx_batch;
 
         // Account modification tests
         let cases = vec![
@@ -1068,7 +1173,7 @@ mod tests {
 
         with_mock_invoke_context!(invoke_context, transaction_context, transaction_accounts);
         invoke_context.compute_budget = ComputeBudget::new(
-            compute_budget_processor::DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT as u64,
+            compute_budget_limits::DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT as u64,
         );
 
         invoke_context
@@ -1080,7 +1185,7 @@ mod tests {
         assert_eq!(
             *invoke_context.get_compute_budget(),
             ComputeBudget::new(
-                compute_budget_processor::DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT as u64
+                compute_budget_limits::DEFAULT_INSTRUCTION_COMPUTE_UNIT_LIMIT as u64
             )
         );
         invoke_context.pop().unwrap();
@@ -1117,12 +1222,12 @@ mod tests {
             },
         ];
         with_mock_invoke_context!(invoke_context, transaction_context, transaction_accounts);
-        let mut programs_loaded_for_tx_batch = LoadedProgramsForTxBatch::default();
-        programs_loaded_for_tx_batch.replenish(
+        let mut program_cache_for_tx_batch = ProgramCacheForTxBatch::default();
+        program_cache_for_tx_batch.replenish(
             program_key,
-            Arc::new(LoadedProgram::new_builtin(0, 0, MockBuiltin::vm)),
+            Arc::new(ProgramCacheEntry::new_builtin(0, 0, MockBuiltin::vm)),
         );
-        invoke_context.programs_loaded_for_tx_batch = &programs_loaded_for_tx_batch;
+        invoke_context.program_cache_for_tx_batch = &mut program_cache_for_tx_batch;
 
         // Test: Resize the account to *the same size*, so not consuming any additional size; this must succeed
         {

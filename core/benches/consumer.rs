@@ -19,10 +19,13 @@ use {
         poh_recorder::{create_test_recorder, PohRecorder},
         poh_service::PohService,
     },
-    solana_runtime::bank::Bank,
+    solana_runtime::{bank::Bank, bank_forks::BankForks},
     solana_sdk::{
-        account::Account, feature_set::apply_cost_tracker_during_replay, signature::Keypair,
-        signer::Signer, stake_history::Epoch, system_program, system_transaction,
+        account::{Account, ReadableAccount},
+        signature::Keypair,
+        signer::Signer,
+        stake_history::Epoch,
+        system_program, system_transaction,
         transaction::SanitizedTransaction,
     },
     std::sync::{
@@ -55,7 +58,8 @@ fn create_funded_accounts(bank: &Bank, num: usize) -> Vec<Keypair> {
                 owner: system_program::id(),
                 executable: false,
                 rent_epoch: Epoch::MAX,
-            },
+            }
+            .to_account_shared_data(),
         );
     });
 
@@ -85,6 +89,7 @@ fn create_consumer(poh_recorder: &RwLock<PohRecorder>) -> Consumer {
 
 struct BenchFrame {
     bank: Arc<Bank>,
+    _bank_forks: Arc<RwLock<BankForks>>,
     ledger_path: TempDir,
     exit: Arc<AtomicBool>,
     poh_recorder: Arc<RwLock<PohRecorder>>,
@@ -92,7 +97,7 @@ struct BenchFrame {
     signal_receiver: Receiver<(Arc<Bank>, (Entry, u64))>,
 }
 
-fn setup(apply_cost_tracker_during_replay: bool) -> BenchFrame {
+fn setup() -> BenchFrame {
     let mint_total = u64::MAX;
     let GenesisConfigInfo {
         mut genesis_config, ..
@@ -104,18 +109,14 @@ fn setup(apply_cost_tracker_during_replay: bool) -> BenchFrame {
 
     let mut bank = Bank::new_for_benches(&genesis_config);
 
-    if !apply_cost_tracker_during_replay {
-        bank.deactivate_feature(&apply_cost_tracker_during_replay::id());
-    }
-
     // Allow arbitrary transaction processing time for the purposes of this bench
     bank.ns_per_slot = u128::MAX;
 
     // set cost tracker limits to MAX so it will not filter out TXs
     bank.write_cost_tracker()
         .unwrap()
-        .set_limits(std::u64::MAX, std::u64::MAX, std::u64::MAX);
-    let bank = bank.wrap_with_bank_forks_for_tests().0;
+        .set_limits(u64::MAX, u64::MAX, u64::MAX);
+    let (bank, bank_forks) = bank.wrap_with_bank_forks_for_tests();
 
     let ledger_path = TempDir::new().unwrap();
     let blockstore = Arc::new(
@@ -126,6 +127,7 @@ fn setup(apply_cost_tracker_during_replay: bool) -> BenchFrame {
 
     BenchFrame {
         bank,
+        _bank_forks: bank_forks,
         ledger_path,
         exit,
         poh_recorder,
@@ -134,29 +136,25 @@ fn setup(apply_cost_tracker_during_replay: bool) -> BenchFrame {
     }
 }
 
-fn bench_process_and_record_transactions(
-    bencher: &mut Bencher,
-    batch_size: usize,
-    apply_cost_tracker_during_replay: bool,
-) {
+fn bench_process_and_record_transactions(bencher: &mut Bencher, batch_size: usize) {
     const TRANSACTIONS_PER_ITERATION: usize = 64;
     assert_eq!(
         TRANSACTIONS_PER_ITERATION % batch_size,
         0,
-        "batch_size must be a factor of \
-        `TRANSACTIONS_PER_ITERATION` ({TRANSACTIONS_PER_ITERATION}) \
-        so that bench results are easily comparable"
+        "batch_size must be a factor of `TRANSACTIONS_PER_ITERATION` \
+         ({TRANSACTIONS_PER_ITERATION}) so that bench results are easily comparable"
     );
     let batches_per_iteration = TRANSACTIONS_PER_ITERATION / batch_size;
 
     let BenchFrame {
         bank,
+        _bank_forks,
         ledger_path: _ledger_path,
         exit,
         poh_recorder,
         poh_service,
         signal_receiver: _signal_receiver,
-    } = setup(apply_cost_tracker_during_replay);
+    } = setup();
     let consumer = create_consumer(&poh_recorder);
     let transactions = create_transactions(&bank, 2_usize.pow(20));
     let mut transaction_iter = transactions.chunks(batch_size);
@@ -181,30 +179,15 @@ fn bench_process_and_record_transactions(
 
 #[bench]
 fn bench_process_and_record_transactions_unbatched(bencher: &mut Bencher) {
-    bench_process_and_record_transactions(bencher, 1, true);
+    bench_process_and_record_transactions(bencher, 1);
 }
 
 #[bench]
 fn bench_process_and_record_transactions_half_batch(bencher: &mut Bencher) {
-    bench_process_and_record_transactions(bencher, 32, true);
+    bench_process_and_record_transactions(bencher, 32);
 }
 
 #[bench]
 fn bench_process_and_record_transactions_full_batch(bencher: &mut Bencher) {
-    bench_process_and_record_transactions(bencher, 64, true);
-}
-
-#[bench]
-fn bench_process_and_record_transactions_unbatched_disable_tx_cost_update(bencher: &mut Bencher) {
-    bench_process_and_record_transactions(bencher, 1, false);
-}
-
-#[bench]
-fn bench_process_and_record_transactions_half_batch_disable_tx_cost_update(bencher: &mut Bencher) {
-    bench_process_and_record_transactions(bencher, 32, false);
-}
-
-#[bench]
-fn bench_process_and_record_transactions_full_batch_disable_tx_cost_update(bencher: &mut Bencher) {
-    bench_process_and_record_transactions(bencher, 64, false);
+    bench_process_and_record_transactions(bencher, 64);
 }

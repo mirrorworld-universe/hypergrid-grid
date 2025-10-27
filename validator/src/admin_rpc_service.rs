@@ -6,7 +6,6 @@ use {
     jsonrpc_ipc_server::{
         tokio::sync::oneshot::channel as oneshot_channel, RequestContext, ServerBuilder,
     },
-    jsonrpc_server_utils::tokio,
     log::*,
     serde::{de::Deserializer, Deserialize, Serialize},
     solana_accounts_db::accounts_index::AccountIndex,
@@ -27,7 +26,7 @@ use {
     },
     std::{
         collections::{HashMap, HashSet},
-        error,
+        env, error,
         fmt::{self, Display},
         net::SocketAddr,
         path::{Path, PathBuf},
@@ -35,6 +34,7 @@ use {
         thread::{self, Builder},
         time::{Duration, SystemTime},
     },
+    tokio::runtime::Runtime,
 };
 
 #[derive(Clone)]
@@ -108,7 +108,7 @@ impl From<ContactInfo> for AdminRpcContactInfo {
             serve_repair_quic: unwrap_socket!(serve_repair, Protocol::QUIC),
             tpu: unwrap_socket!(tpu, Protocol::UDP),
             tpu_forwards: unwrap_socket!(tpu_forwards, Protocol::UDP),
-            tpu_vote: unwrap_socket!(tpu_vote),
+            tpu_vote: unwrap_socket!(tpu_vote, Protocol::UDP),
             rpc: unwrap_socket!(rpc),
             rpc_pubsub: unwrap_socket!(rpc_pubsub),
             serve_repair: unwrap_socket!(serve_repair, Protocol::UDP),
@@ -266,7 +266,12 @@ impl AdminRpc for AdminRpcImpl {
                 // (rocksdb background processing or some other stuck thread perhaps?).
                 //
                 // If the process is still alive after five seconds, exit harder
-                thread::sleep(Duration::from_secs(5));
+                thread::sleep(Duration::from_secs(
+                    env::var("SOLANA_VALIDATOR_EXIT_TIMEOUT")
+                        .ok()
+                        .and_then(|x| x.parse().ok())
+                        .unwrap_or(5),
+                ));
                 warn!("validator exit timeout");
                 std::process::exit(0);
             })
@@ -615,10 +620,9 @@ impl AdminRpc for AdminRpcImpl {
                 .tpu(Protocol::UDP)
                 .map_err(|err| {
                     error!(
-                        "The public TPU address isn't being published. \
-                        The node is likely in repair mode. \
-                        See help for --restricted-repair-only-mode for more information. \
-                        {err}"
+                        "The public TPU address isn't being published. The node is likely in \
+                         repair mode. See help for --restricted-repair-only-mode for more \
+                         information. {err}"
                     );
                     jsonrpc_core::error::Error::internal_error()
                 })?;
@@ -653,10 +657,9 @@ impl AdminRpc for AdminRpcImpl {
                 .tpu_forwards(Protocol::UDP)
                 .map_err(|err| {
                     error!(
-                        "The public TPU Forwards address isn't being published. \
-                        The node is likely in repair mode. \
-                        See help for --restricted-repair-only-mode for more information. \
-                        {err}"
+                        "The public TPU Forwards address isn't being published. The node is \
+                         likely in repair mode. See help for --restricted-repair-only-mode for \
+                         more information. {err}"
                     );
                     jsonrpc_core::error::Error::internal_error()
                 })?;
@@ -817,8 +820,12 @@ pub async fn connect(ledger_path: &Path) -> std::result::Result<gen_client::Clie
     }
 }
 
-pub fn runtime() -> jsonrpc_server_utils::tokio::runtime::Runtime {
-    jsonrpc_server_utils::tokio::runtime::Runtime::new().expect("new tokio runtime")
+pub fn runtime() -> Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .thread_name("solAdminRpcRt")
+        .enable_all()
+        .build()
+        .expect("new tokio runtime")
 }
 
 #[derive(Default, Deserialize, Clone)]
@@ -858,9 +865,13 @@ mod tests {
     use {
         super::*,
         serde_json::Value,
-        solana_accounts_db::{accounts_index::AccountSecondaryIndexes, inline_spl_token},
+        solana_accounts_db::{
+            accounts_db::{AccountsDbConfig, ACCOUNTS_DB_CONFIG_FOR_TESTING},
+            accounts_index::AccountSecondaryIndexes,
+        },
         solana_core::consensus::tower_storage::NullTowerStorage,
         solana_gossip::cluster_info::ClusterInfo,
+        solana_inline_spl::token,
         solana_ledger::genesis_utils::{create_genesis_config, GenesisConfigInfo},
         solana_rpc::rpc::create_validator_exit,
         solana_runtime::{
@@ -910,7 +921,10 @@ mod tests {
             let exit = Arc::new(AtomicBool::new(false));
             let validator_exit = create_validator_exit(exit);
             let (bank_forks, vote_keypair) = new_bank_forks_with_config(BankTestConfig {
-                secondary_indexes: config.account_indexes,
+                accounts_db_config: AccountsDbConfig {
+                    account_indexes: Some(config.account_indexes),
+                    ..ACCOUNTS_DB_CONFIG_FOR_TESTING
+                },
             });
             let vote_account = vote_keypair.pubkey();
             let start_progress = Arc::new(RwLock::new(ValidatorStartProgress::default()));
@@ -963,7 +977,7 @@ mod tests {
             ..
         } = create_genesis_config(1_000_000_000);
 
-        let bank = Bank::new_for_tests_with_config(&genesis_config, config);
+        let bank = Bank::new_with_config_for_tests(&genesis_config, config);
         (BankForks::new_rw_arc(bank), Arc::new(voting_keypair))
     }
 
@@ -1018,7 +1032,7 @@ mod tests {
                 // Count SPL Token Program Default Accounts
                 let req = format!(
                     r#"{{"jsonrpc":"2.0","id":1,"method":"getSecondaryIndexKeySize","params":["{}"]}}"#,
-                    inline_spl_token::id(),
+                    token::id(),
                 );
                 let res = io.handle_request_sync(&req, meta.clone());
                 let result: Value = serde_json::from_str(&res.expect("actual response"))
@@ -1073,7 +1087,7 @@ mod tests {
             let token_account1 = AccountSharedData::from(Account {
                 lamports: 111,
                 data: account1_data.to_vec(),
-                owner: inline_spl_token::id(),
+                owner: token::id(),
                 ..Account::default()
             });
             bank.store_account(&token_account1_pubkey, &token_account1);
@@ -1091,7 +1105,7 @@ mod tests {
             let mint_account1 = AccountSharedData::from(Account {
                 lamports: 222,
                 data: mint1_data.to_vec(),
-                owner: inline_spl_token::id(),
+                owner: token::id(),
                 ..Account::default()
             });
             bank.store_account(&mint1_pubkey, &mint_account1);
@@ -1112,7 +1126,7 @@ mod tests {
             let token_account2 = AccountSharedData::from(Account {
                 lamports: 333,
                 data: account2_data.to_vec(),
-                owner: inline_spl_token::id(),
+                owner: token::id(),
                 ..Account::default()
             });
             bank.store_account(&token_account2_pubkey, &token_account2);
@@ -1133,7 +1147,7 @@ mod tests {
             let token_account3 = AccountSharedData::from(Account {
                 lamports: 444,
                 data: account3_data.to_vec(),
-                owner: inline_spl_token::id(),
+                owner: token::id(),
                 ..Account::default()
             });
             bank.store_account(&token_account3_pubkey, &token_account3);
@@ -1151,7 +1165,7 @@ mod tests {
             let mint_account2 = AccountSharedData::from(Account {
                 lamports: 555,
                 data: mint2_data.to_vec(),
-                owner: inline_spl_token::id(),
+                owner: token::id(),
                 ..Account::default()
             });
             bank.store_account(&mint2_pubkey, &mint_account2);
@@ -1231,7 +1245,7 @@ mod tests {
                 // 5) SPL Token Program Owns 6 Accounts - 1 Default, 5 created above.
                 let req = format!(
                     r#"{{"jsonrpc":"2.0","id":1,"method":"getSecondaryIndexKeySize","params":["{}"]}}"#,
-                    inline_spl_token::id(),
+                    token::id(),
                 );
                 let res = io.handle_request_sync(&req, meta.clone());
                 let result: Value = serde_json::from_str(&res.expect("actual response"))

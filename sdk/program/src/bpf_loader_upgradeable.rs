@@ -25,7 +25,8 @@ use crate::{
 crate::declare_id!("BPFLoaderUpgradeab1e11111111111111111111111");
 
 /// Upgradeable loader account states
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone, Copy, AbiExample)]
+#[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone, Copy)]
 pub enum UpgradeableLoaderState {
     /// Account is not initialized.
     Uninitialized,
@@ -81,42 +82,11 @@ impl UpgradeableLoaderState {
     pub const fn size_of_programdata(program_len: usize) -> usize {
         Self::size_of_programdata_metadata().saturating_add(program_len)
     }
+}
 
-    /// Length of a Buffer account's data.
-    #[deprecated(since = "1.11.0", note = "Please use `size_of_buffer` instead")]
-    pub fn buffer_len(program_len: usize) -> Result<usize, InstructionError> {
-        Ok(Self::size_of_buffer(program_len))
-    }
-
-    /// Offset into the Buffer account's data of the program bits.
-    #[deprecated(
-        since = "1.11.0",
-        note = "Please use `size_of_buffer_metadata` instead"
-    )]
-    pub fn buffer_data_offset() -> Result<usize, InstructionError> {
-        Ok(Self::size_of_buffer_metadata())
-    }
-
-    /// Length of a Program account's data.
-    #[deprecated(since = "1.11.0", note = "Please use `size_of_program` instead")]
-    pub fn program_len() -> Result<usize, InstructionError> {
-        Ok(Self::size_of_program())
-    }
-
-    /// Length of a ProgramData account's data.
-    #[deprecated(since = "1.11.0", note = "Please use `size_of_programdata` instead")]
-    pub fn programdata_len(program_len: usize) -> Result<usize, InstructionError> {
-        Ok(Self::size_of_programdata(program_len))
-    }
-
-    /// Offset into the ProgramData account's data of the program bits.
-    #[deprecated(
-        since = "1.11.0",
-        note = "Please use `size_of_programdata_metadata` instead"
-    )]
-    pub fn programdata_data_offset() -> Result<usize, InstructionError> {
-        Ok(Self::size_of_programdata_metadata())
-    }
+/// Returns the program data address for a program ID
+pub fn get_program_data_address(program_address: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[program_address.as_ref()], &id()).0
 }
 
 /// Returns the instructions required to initialize a Buffer account.
@@ -175,7 +145,7 @@ pub fn deploy_with_max_program_len(
     program_lamports: u64,
     max_data_len: usize,
 ) -> Result<Vec<Instruction>, InstructionError> {
-    let (programdata_address, _) = Pubkey::find_program_address(&[program_address.as_ref()], &id());
+    let programdata_address = get_program_data_address(program_address);
     Ok(vec![
         system_instruction::create_account(
             payer_address,
@@ -208,7 +178,7 @@ pub fn upgrade(
     authority_address: &Pubkey,
     spill_address: &Pubkey,
 ) -> Instruction {
-    let (programdata_address, _) = Pubkey::find_program_address(&[program_address.as_ref()], &id());
+    let programdata_address = get_program_data_address(program_address);
     Instruction::new_with_bincode(
         id(),
         &UpgradeableLoaderInstruction::Upgrade,
@@ -281,7 +251,7 @@ pub fn set_upgrade_authority(
     current_authority_address: &Pubkey,
     new_authority_address: Option<&Pubkey>,
 ) -> Instruction {
-    let (programdata_address, _) = Pubkey::find_program_address(&[program_address.as_ref()], &id());
+    let programdata_address = get_program_data_address(program_address);
 
     let mut metas = vec![
         AccountMeta::new(programdata_address, false),
@@ -300,7 +270,7 @@ pub fn set_upgrade_authority_checked(
     current_authority_address: &Pubkey,
     new_authority_address: &Pubkey,
 ) -> Instruction {
-    let (programdata_address, _) = Pubkey::find_program_address(&[program_address.as_ref()], &id());
+    let programdata_address = get_program_data_address(program_address);
 
     let metas = vec![
         AccountMeta::new(programdata_address, false),
@@ -355,8 +325,7 @@ pub fn extend_program(
     payer_address: Option<&Pubkey>,
     additional_bytes: u32,
 ) -> Instruction {
-    let (program_data_address, _) =
-        Pubkey::find_program_address(&[program_address.as_ref()], &id());
+    let program_data_address = get_program_data_address(program_address);
     let mut metas = vec![
         AccountMeta::new(program_data_address, false),
         AccountMeta::new(*program_address, false),
@@ -418,24 +387,6 @@ mod tests {
         };
         let size = serialized_size(&program_state).unwrap();
         assert_eq!(UpgradeableLoaderState::size_of_program() as u64, size);
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn test_account_lengths() {
-        assert_eq!(
-            4,
-            serialized_size(&UpgradeableLoaderState::Uninitialized).unwrap()
-        );
-        assert_eq!(36, UpgradeableLoaderState::program_len().unwrap());
-        assert_eq!(
-            45,
-            UpgradeableLoaderState::programdata_data_offset().unwrap()
-        );
-        assert_eq!(
-            45 + 42,
-            UpgradeableLoaderState::programdata_len(42).unwrap()
-        );
     }
 
     fn assert_is_instruction<F>(

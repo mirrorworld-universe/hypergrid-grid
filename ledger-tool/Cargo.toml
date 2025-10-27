@@ -1,7 +1,7 @@
 [package]
-name = "solana-ledger-tool"
+name = "agave-ledger-tool"
 description = "Blockchain, Rebuilt for Scale"
-documentation = "https://docs.rs/solana-ledger-tool"
+documentation = "https://docs.rs/agave-ledger-tool"
 version = { workspace = true }
 authors = { workspace = true }
 repository = { workspace = true }
@@ -21,20 +21,25 @@ histogram = { workspace = true }
 itertools = { workspace = true }
 log = { workspace = true }
 num_cpus = { workspace = true }
+rayon = { workspace = true }
 regex = { workspace = true }
-serde = { workspace = true, features = ["derive"] }
+serde = { workspace = true }
+serde_derive = { workspace = true }
 serde_json = { workspace = true }
 solana-account-decoder = { workspace = true }
 solana-accounts-db = { workspace = true }
 solana-bpf-loader-program = { workspace = true }
 solana-clap-utils = { workspace = true }
 solana-cli-output = { workspace = true }
-solana-core = { workspace = true }
+solana-compute-budget = { workspace = true }
+solana-core = { workspace = true, features = ["dev-context-only-utils"] }
 solana-cost-model = { workspace = true }
 solana-entry = { workspace = true }
+solana-feature-set = { workspace = true }
 solana-geyser-plugin-manager = { workspace = true }
 solana-gossip = { workspace = true }
-solana-ledger = { workspace = true }
+solana-ledger = { workspace = true, features = ["dev-context-only-utils"] }
+solana-log-collector = { workspace = true }
 solana-logger = { workspace = true }
 solana-measure = { workspace = true }
 solana-program-runtime = { workspace = true }
@@ -45,6 +50,7 @@ solana-stake-program = { workspace = true }
 solana-storage-bigtable = { workspace = true }
 solana-streamer = { workspace = true }
 solana-transaction-status = { workspace = true }
+solana-type-overrides = { workspace = true }
 solana-unified-scheduler-pool = { workspace = true }
 solana-version = { workspace = true }
 solana-vote-program = { workspace = true }

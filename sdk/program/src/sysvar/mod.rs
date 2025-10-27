@@ -81,10 +81,9 @@
 //!
 //! [sysvardoc]: https://docs.solanalabs.com/runtime/sysvars
 
-use {
-    crate::{account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey},
-    lazy_static::lazy_static,
-};
+use crate::{account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey};
+#[allow(deprecated)]
+pub use sysvar_ids::ALL_IDS;
 
 pub mod clock;
 pub mod epoch_rewards;
@@ -99,25 +98,37 @@ pub mod slot_hashes;
 pub mod slot_history;
 pub mod stake_history;
 
-lazy_static! {
-    // This will be deprecated and so this list shouldn't be modified
-    pub static ref ALL_IDS: Vec<Pubkey> = vec![
-        clock::id(),
-        epoch_schedule::id(),
-        #[allow(deprecated)]
-        fees::id(),
-        #[allow(deprecated)]
-        recent_blockhashes::id(),
-        rent::id(),
-        rewards::id(),
-        slot_hashes::id(),
-        slot_history::id(),
-        stake_history::id(),
-        instructions::id(),
-    ];
+#[deprecated(
+    since = "2.0.0",
+    note = "please use `solana_sdk::reserved_account_keys::ReservedAccountKeys` instead"
+)]
+mod sysvar_ids {
+    use {super::*, lazy_static::lazy_static};
+    lazy_static! {
+        // This will be deprecated and so this list shouldn't be modified
+        pub static ref ALL_IDS: Vec<Pubkey> = vec![
+            clock::id(),
+            epoch_schedule::id(),
+            #[allow(deprecated)]
+            fees::id(),
+            #[allow(deprecated)]
+            recent_blockhashes::id(),
+            rent::id(),
+            rewards::id(),
+            slot_hashes::id(),
+            slot_history::id(),
+            stake_history::id(),
+            instructions::id(),
+        ];
+    }
 }
 
 /// Returns `true` of the given `Pubkey` is a sysvar account.
+#[deprecated(
+    since = "2.0.0",
+    note = "please check the account's owner or use solana_sdk::reserved_account_keys::ReservedAccountKeys instead"
+)]
+#[allow(deprecated)]
 pub fn is_sysvar_id(id: &Pubkey) -> bool {
     ALL_IDS.iter().any(|key| key == id)
 }
@@ -238,11 +249,46 @@ macro_rules! impl_sysvar_get {
     };
 }
 
+/// Handler for retrieving a slice of sysvar data from the `sol_get_sysvar`
+/// syscall.
+fn get_sysvar(
+    dst: &mut [u8],
+    sysvar_id: &Pubkey,
+    offset: u64,
+    length: u64,
+) -> Result<(), ProgramError> {
+    // Check that the provided destination buffer is large enough to hold the
+    // requested data.
+    if dst.len() < length as usize {
+        return Err(ProgramError::InvalidArgument);
+    }
+
+    let sysvar_id = sysvar_id as *const _ as *const u8;
+    let var_addr = dst as *mut _ as *mut u8;
+
+    #[cfg(target_os = "solana")]
+    let result = unsafe { crate::syscalls::sol_get_sysvar(sysvar_id, var_addr, offset, length) };
+
+    #[cfg(not(target_os = "solana"))]
+    let result = crate::program_stubs::sol_get_sysvar(sysvar_id, var_addr, offset, length);
+
+    match result {
+        crate::entrypoint::SUCCESS => Ok(()),
+        e => Err(e.into()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use {
         super::*,
-        crate::{clock::Epoch, program_error::ProgramError, pubkey::Pubkey},
+        crate::{
+            entrypoint::SUCCESS,
+            program_error::ProgramError,
+            program_stubs::{set_syscall_stubs, SyscallStubs},
+            pubkey::Pubkey,
+        },
+        solana_clock::Epoch,
         std::{cell::RefCell, rc::Rc},
     };
 
@@ -262,6 +308,30 @@ mod tests {
         }
     }
     impl Sysvar for TestSysvar {}
+
+    // NOTE tests that use this mock MUST carry the #[serial] attribute
+    struct MockGetSysvarSyscall {
+        data: Vec<u8>,
+    }
+    impl SyscallStubs for MockGetSysvarSyscall {
+        #[allow(clippy::arithmetic_side_effects)]
+        fn sol_get_sysvar(
+            &self,
+            _sysvar_id_addr: *const u8,
+            var_addr: *mut u8,
+            offset: u64,
+            length: u64,
+        ) -> u64 {
+            let slice = unsafe { std::slice::from_raw_parts_mut(var_addr, length as usize) };
+            slice.copy_from_slice(&self.data[offset as usize..(offset + length) as usize]);
+            SUCCESS
+        }
+    }
+    pub fn mock_get_sysvar_syscall(data: &[u8]) {
+        set_syscall_stubs(Box::new(MockGetSysvarSyscall {
+            data: data.to_vec(),
+        }));
+    }
 
     #[test]
     fn test_sysvar_account_info_to_from() {

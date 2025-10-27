@@ -15,15 +15,17 @@ bytes = { workspace = true }
 crossbeam-channel = { workspace = true }
 futures = { workspace = true }
 itertools = { workspace = true }
+lazy-lru = { workspace = true }
 log = { workspace = true }
 lru = { workspace = true }
 quinn = { workspace = true }
 rand = { workspace = true }
 rand_chacha = { workspace = true }
 rayon = { workspace = true }
-rcgen = { workspace = true }
 rustls = { workspace = true }
 solana-entry = { workspace = true }
+solana-feature-set = { workspace = true }
+solana-geyser-plugin-manager = { workspace = true }
 solana-gossip = { workspace = true }
 solana-ledger = { workspace = true }
 solana-measure = { workspace = true }
@@ -37,6 +39,7 @@ solana-rpc-client-api = { workspace = true }
 solana-runtime = { workspace = true }
 solana-sdk = { workspace = true }
 solana-streamer = { workspace = true }
+static_assertions = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 
@@ -44,6 +47,7 @@ tokio = { workspace = true }
 assert_matches = { workspace = true }
 solana-logger = { workspace = true }
 solana-runtime = { workspace = true, features = ["dev-context-only-utils"] }
+test-case = { workspace = true }
 
 [[bench]]
 name = "cluster_info"

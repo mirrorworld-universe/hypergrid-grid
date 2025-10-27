@@ -4,9 +4,9 @@ extern crate solana_program;
 use {
     num_derive::FromPrimitive,
     num_traits::FromPrimitive,
+    solana_decode_error::DecodeError,
     solana_program::{
         account_info::AccountInfo,
-        decode_error::DecodeError,
         entrypoint::ProgramResult,
         msg,
         program_error::{PrintProgramError, ProgramError},
@@ -45,7 +45,7 @@ impl PrintProgramError for MyError {
     }
 }
 
-solana_program::entrypoint!(process_instruction);
+solana_program::entrypoint_no_alloc!(process_instruction);
 fn process_instruction(
     _program_id: &Pubkey,
     accounts: &[AccountInfo],

@@ -7,6 +7,7 @@ use {
         clock::Slot,
         pubkey::Pubkey,
     },
+    sonic_hypergrid::remote_loader::RemoteAccountLoader,
     std::{
         collections::BTreeSet,
         ops::Deref,
@@ -59,10 +60,6 @@ impl SlotCacheInner {
             ),
             ("size", self.size.load(Ordering::Relaxed), i64)
         );
-    }
-
-    pub fn get_all_pubkeys(&self) -> Vec<Pubkey> {
-        self.cache.iter().map(|item| *item.key()).collect()
     }
 
     pub fn insert(&self, pubkey: &Pubkey, account: AccountSharedData) -> CachedAccount {
@@ -162,6 +159,7 @@ pub struct AccountsCache {
     maybe_unflushed_roots: RwLock<BTreeSet<Slot>>,
     max_flushed_root: AtomicU64,
     total_size: Arc<AtomicU64>,
+    pub remote_loader: Arc<RemoteAccountLoader>, //Sonic: using RemoteAccountLoader
 }
 
 impl AccountsCache {
@@ -224,8 +222,25 @@ impl AccountsCache {
     }
 
     pub fn load(&self, slot: Slot, pubkey: &Pubkey) -> Option<CachedAccount> {
-        self.slot_cache(slot)
+        // self.slot_cache(slot)
+        //     .and_then(|slot_cache| slot_cache.get_cloned(pubkey))
+        match self
+            .slot_cache(slot)
             .and_then(|slot_cache| slot_cache.get_cloned(pubkey))
+        {
+            Some(account) => Some(account),
+            None => {
+                //Sonic: load from remote
+                let account = self.remote_loader.get_account(pubkey);
+                account.map(|acc| self.store(slot, pubkey, acc))
+                // None
+            }
+        }
+    }
+
+    //Sonic: check if account exists in remote
+    pub fn has_account_from_remote(&self, pubkey: &Pubkey) -> bool {
+        self.remote_loader.has_account(pubkey)
     }
 
     pub fn remove_slot(&self, slot: Slot) -> Option<SlotCache> {
@@ -262,20 +277,6 @@ impl AccountsCache {
         self.cache.iter().any(|e| e.key() <= &max_slot_inclusive)
     }
 
-    // Removes slots less than or equal to `max_root`. Only safe to pass in a rooted slot,
-    // otherwise the slot removed could still be undergoing replay!
-    pub fn remove_slots_le(&self, max_root: Slot) -> Vec<(Slot, SlotCache)> {
-        let mut removed_slots = vec![];
-        self.cache.retain(|slot, slot_cache| {
-            let should_remove = *slot <= max_root;
-            if should_remove {
-                removed_slots.push((*slot, slot_cache.clone()))
-            }
-            !should_remove
-        });
-        removed_slots
-    }
-
     pub fn cached_frozen_slots(&self) -> Vec<Slot> {
         let mut slots: Vec<_> = self
             .cache
@@ -302,17 +303,33 @@ impl AccountsCache {
     }
 
     pub fn fetch_max_flush_root(&self) -> Slot {
-        self.max_flushed_root.load(Ordering::Relaxed)
+        self.max_flushed_root.load(Ordering::Acquire)
     }
 
     pub fn set_max_flush_root(&self, root: Slot) {
-        self.max_flushed_root.fetch_max(root, Ordering::Relaxed);
+        self.max_flushed_root.fetch_max(root, Ordering::Release);
     }
 }
 
 #[cfg(test)]
 pub mod tests {
     use super::*;
+
+    impl AccountsCache {
+        // Removes slots less than or equal to `max_root`. Only safe to pass in a rooted slot,
+        // otherwise the slot removed could still be undergoing replay!
+        pub fn remove_slots_le(&self, max_root: Slot) -> Vec<(Slot, SlotCache)> {
+            let mut removed_slots = vec![];
+            self.cache.retain(|slot, slot_cache| {
+                let should_remove = *slot <= max_root;
+                if should_remove {
+                    removed_slots.push((*slot, slot_cache.clone()))
+                }
+                !should_remove
+            });
+            removed_slots
+        }
+    }
 
     #[test]
     fn test_remove_slots_le() {

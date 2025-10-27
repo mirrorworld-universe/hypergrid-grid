@@ -29,18 +29,22 @@
 
 #![allow(clippy::arithmetic_side_effects)]
 
-use crate::{
-    account_info::AccountInfo,
-    instruction::{AccountMeta, Instruction},
-    program_error::ProgramError,
-    pubkey::Pubkey,
-    sanitize::SanitizeError,
-    serialize_utils::{read_pubkey, read_slice, read_u16, read_u8},
-};
+#[cfg(feature = "dev-context-only-utils")]
+use qualifier_attr::qualifiers;
 #[cfg(not(target_os = "solana"))]
 use {
     crate::serialize_utils::{append_slice, append_u16, append_u8},
     bitflags::bitflags,
+};
+use {
+    crate::{
+        account_info::AccountInfo,
+        instruction::{AccountMeta, Instruction},
+        program_error::ProgramError,
+        pubkey::Pubkey,
+        serialize_utils::{read_pubkey, read_slice, read_u16, read_u8},
+    },
+    solana_sanitize::SanitizeError,
 };
 
 /// Instructions sysvar, dummy type.
@@ -147,11 +151,10 @@ fn serialize_instructions(instructions: &[BorrowedInstruction]) -> Vec<u8> {
 /// `Transaction`.
 ///
 /// `data` is the instructions sysvar account data.
-#[deprecated(
-    since = "1.8.0",
-    note = "Unsafe because the sysvar accounts address is not checked, please use `load_current_index_checked` instead"
-)]
-pub fn load_current_index(data: &[u8]) -> u16 {
+///
+/// Unsafe because the sysvar accounts address is not checked; only used
+/// internally after such a check.
+fn load_current_index(data: &[u8]) -> u16 {
     let mut instr_fixed_data = [0u8; 2];
     let len = data.len();
     instr_fixed_data.copy_from_slice(&data[len - 2..len]);
@@ -172,10 +175,8 @@ pub fn load_current_index_checked(
     }
 
     let instruction_sysvar = instruction_sysvar_account_info.try_borrow_data()?;
-    let mut instr_fixed_data = [0u8; 2];
-    let len = instruction_sysvar.len();
-    instr_fixed_data.copy_from_slice(&instruction_sysvar[len - 2..len]);
-    Ok(u16::from_le_bytes(instr_fixed_data))
+    let index = load_current_index(&instruction_sysvar);
+    Ok(index)
 }
 
 /// Store the current `Instruction`'s index in the instructions sysvar data.
@@ -232,11 +233,11 @@ fn deserialize_instruction(index: usize, data: &[u8]) -> Result<Instruction, San
 /// specified index.
 ///
 /// `data` is the instructions sysvar account data.
-#[deprecated(
-    since = "1.8.0",
-    note = "Unsafe because the sysvar accounts address is not checked, please use `load_instruction_at_checked` instead"
-)]
-pub fn load_instruction_at(index: usize, data: &[u8]) -> Result<Instruction, SanitizeError> {
+///
+/// Unsafe because the sysvar accounts address is not checked; only used
+/// internally after such a check.
+#[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
+fn load_instruction_at(index: usize, data: &[u8]) -> Result<Instruction, SanitizeError> {
     deserialize_instruction(index, data)
 }
 
@@ -255,7 +256,7 @@ pub fn load_instruction_at_checked(
     }
 
     let instruction_sysvar = instruction_sysvar_account_info.try_borrow_data()?;
-    deserialize_instruction(index, &instruction_sysvar).map_err(|err| match err {
+    load_instruction_at(index, &instruction_sysvar).map_err(|err| match err {
         SanitizeError::IndexOutOfBounds => ProgramError::InvalidArgument,
         _ => ProgramError::InvalidInstructionData,
     })
@@ -276,13 +277,11 @@ pub fn get_instruction_relative(
     }
 
     let instruction_sysvar = instruction_sysvar_account_info.data.borrow();
-    #[allow(deprecated)]
     let current_index = load_current_index(&instruction_sysvar) as i64;
     let index = current_index.saturating_add(index_relative_to_current);
     if index < 0 {
         return Err(ProgramError::InvalidArgument);
     }
-    #[allow(deprecated)]
     load_instruction_at(
         current_index.saturating_add(index_relative_to_current) as usize,
         &instruction_sysvar,
@@ -302,8 +301,12 @@ mod tests {
             message::{Message as LegacyMessage, SanitizedMessage},
             pubkey::Pubkey,
         },
-        std::convert::TryFrom,
+        std::collections::HashSet,
     };
+
+    fn new_sanitized_message(message: LegacyMessage) -> SanitizedMessage {
+        SanitizedMessage::try_from_legacy_message(message, &HashSet::default()).unwrap()
+    }
 
     #[test]
     fn test_load_store_instruction() {
@@ -327,11 +330,11 @@ mod tests {
             &0,
             vec![AccountMeta::new(Pubkey::new_unique(), false)],
         );
-        let sanitized_message = SanitizedMessage::try_from(LegacyMessage::new(
+        let message = LegacyMessage::new(
             &[instruction0.clone(), instruction1.clone()],
             Some(&Pubkey::new_unique()),
-        ))
-        .unwrap();
+        );
+        let sanitized_message = new_sanitized_message(message);
 
         let key = id();
         let mut lamports = 0;
@@ -381,11 +384,9 @@ mod tests {
             &0,
             vec![AccountMeta::new(Pubkey::new_unique(), false)],
         );
-        let sanitized_message = SanitizedMessage::try_from(LegacyMessage::new(
-            &[instruction0, instruction1],
-            Some(&Pubkey::new_unique()),
-        ))
-        .unwrap();
+        let message =
+            LegacyMessage::new(&[instruction0, instruction1], Some(&Pubkey::new_unique()));
+        let sanitized_message = new_sanitized_message(message);
 
         let key = id();
         let mut lamports = 0;
@@ -435,15 +436,15 @@ mod tests {
             &0,
             vec![AccountMeta::new(Pubkey::new_unique(), false)],
         );
-        let sanitized_message = SanitizedMessage::try_from(LegacyMessage::new(
+        let message = LegacyMessage::new(
             &[
                 instruction0.clone(),
                 instruction1.clone(),
                 instruction2.clone(),
             ],
             Some(&Pubkey::new_unique()),
-        ))
-        .unwrap();
+        );
+        let sanitized_message = new_sanitized_message(message);
 
         let key = id();
         let mut lamports = 0;
@@ -538,7 +539,7 @@ mod tests {
         ];
 
         let message = LegacyMessage::new(&instructions, Some(&id1));
-        let sanitized_message = SanitizedMessage::try_from(message).unwrap();
+        let sanitized_message = new_sanitized_message(message);
         let serialized = serialize_instructions(&sanitized_message.decompile_instructions());
 
         // assert that deserialize_instruction is compatible with SanitizedMessage::serialize_instructions
@@ -560,9 +561,9 @@ mod tests {
             Instruction::new_with_bincode(program_id0, &0, vec![AccountMeta::new(id1, true)]),
         ];
 
-        let message =
-            SanitizedMessage::try_from(LegacyMessage::new(&instructions, Some(&id1))).unwrap();
-        let serialized = serialize_instructions(&message.decompile_instructions());
+        let message = LegacyMessage::new(&instructions, Some(&id1));
+        let sanitized_message = new_sanitized_message(message);
+        let serialized = serialize_instructions(&sanitized_message.decompile_instructions());
         assert_eq!(
             deserialize_instruction(instructions.len(), &serialized).unwrap_err(),
             SanitizeError::IndexOutOfBounds,

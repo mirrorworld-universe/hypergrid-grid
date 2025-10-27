@@ -1,0 +1,5 @@
+baselayer_rpc_url: https://api.testnet.solana.com
+hssn_rpc_url: https://exapi.testnet.hssn.sonic.game
+keypair_file: ~/.config/solana/id.json
+accounts_path: hypergrid/accounts
+oracle_url: https://nisaba-hssn.sonic.game

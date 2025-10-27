@@ -41,6 +41,13 @@ impl ShredData {
         }
     }
 
+    pub(super) fn chained_merkle_root(&self) -> Result<Hash, Error> {
+        match self {
+            Self::Legacy(_) => Err(Error::InvalidShredType),
+            Self::Merkle(shred) => shred.chained_merkle_root(),
+        }
+    }
+
     pub(super) fn merkle_root(&self) -> Result<Hash, Error> {
         match self {
             Self::Legacy(_) => Err(Error::InvalidShredType),
@@ -97,8 +104,10 @@ impl ShredData {
     // Possibly zero pads bytes stored in blockstore.
     pub(crate) fn resize_stored_shred(shred: Vec<u8>) -> Result<Vec<u8>, Error> {
         match shred::layout::get_shred_variant(&shred)? {
-            ShredVariant::LegacyCode | ShredVariant::MerkleCode(..) => Err(Error::InvalidShredType),
-            ShredVariant::MerkleData(..) => {
+            ShredVariant::LegacyCode | ShredVariant::MerkleCode { .. } => {
+                Err(Error::InvalidShredType)
+            }
+            ShredVariant::MerkleData { .. } => {
                 if shred.len() != merkle::ShredData::SIZE_OF_PAYLOAD {
                     return Err(Error::InvalidPayloadSize(shred.len()));
                 }
@@ -112,11 +121,18 @@ impl ShredData {
     // merkle_proof_size is the number of merkle proof entries.
     // None indicates a legacy data-shred.
     pub fn capacity(
-        merkle_variant: Option<(/*proof_size:*/ u8, /*chained:*/ bool)>,
+        merkle_variant: Option<(
+            u8,   // proof_size
+            bool, // chained
+            bool, // resigned
+        )>,
     ) -> Result<usize, Error> {
         match merkle_variant {
             None => Ok(legacy::ShredData::CAPACITY),
-            Some((proof_size, chained)) => merkle::ShredData::capacity(proof_size, chained),
+            Some((proof_size, chained, resigned)) => {
+                debug_assert!(chained || !resigned);
+                merkle::ShredData::capacity(proof_size, chained, resigned)
+            }
         }
     }
 
@@ -125,6 +141,13 @@ impl ShredData {
         match self {
             Self::Legacy(shred) => shred.set_last_in_slot(),
             Self::Merkle(_) => panic!("Not Implemented!"),
+        }
+    }
+
+    pub(super) fn retransmitter_signature(&self) -> Result<Signature, Error> {
+        match self {
+            Self::Legacy(_) => Err(Error::InvalidShredVariant),
+            Self::Merkle(shred) => shred.retransmitter_signature(),
         }
     }
 }

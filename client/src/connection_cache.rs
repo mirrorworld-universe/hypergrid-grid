@@ -16,7 +16,6 @@ use {
     solana_streamer::streamer::StakedNodes,
     solana_udp_client::{UdpConfig, UdpConnectionManager, UdpPool},
     std::{
-        error::Error,
         net::{IpAddr, Ipv4Addr, SocketAddr},
         sync::{Arc, RwLock},
     },
@@ -91,9 +90,7 @@ impl ConnectionCache {
             config.update_client_endpoint(client_endpoint);
         }
         if let Some(cert_info) = cert_info {
-            config
-                .update_client_certificate(cert_info.0, cert_info.1)
-                .unwrap();
+            config.update_client_certificate(cert_info.0, cert_info.1);
         }
         if let Some(stake_info) = stake_info {
             config.set_staked_nodes(stake_info.0, stake_info.1);
@@ -110,29 +107,6 @@ impl ConnectionCache {
             Self::Quic(_) => Protocol::QUIC,
             Self::Udp(_) => Protocol::UDP,
         }
-    }
-
-    #[deprecated(
-        since = "1.15.0",
-        note = "This method does not do anything. Please use `new_with_client_options` instead to set the client certificate."
-    )]
-    pub fn update_client_certificate(
-        &mut self,
-        _keypair: &Keypair,
-        _ipaddr: IpAddr,
-    ) -> Result<(), Box<dyn Error>> {
-        Ok(())
-    }
-
-    #[deprecated(
-        since = "1.15.0",
-        note = "This method does not do anything. Please use `new_with_client_options` instead to set staked nodes information."
-    )]
-    pub fn set_staked_nodes(
-        &mut self,
-        _staked_nodes: &Arc<RwLock<StakedNodes>>,
-        _client_pubkey: &Pubkey,
-    ) {
     }
 
     pub fn with_udp(name: &'static str, connection_pool_size: usize) -> Self {
@@ -229,7 +203,11 @@ mod tests {
         crossbeam_channel::unbounded,
         solana_sdk::{net::DEFAULT_TPU_COALESCE, signature::Keypair},
         solana_streamer::{
-            nonblocking::quic::DEFAULT_WAIT_FOR_CHUNK_TIMEOUT, quic::SpawnServerResult,
+            nonblocking::quic::{
+                DEFAULT_MAX_CONNECTIONS_PER_IPADDR_PER_MINUTE, DEFAULT_MAX_STREAMS_PER_MS,
+                DEFAULT_WAIT_FOR_CHUNK_TIMEOUT,
+            },
+            quic::SpawnServerResult,
             streamer::StakedNodes,
         },
         std::{
@@ -241,43 +219,47 @@ mod tests {
         },
     };
 
-    fn server_args() -> (UdpSocket, Arc<AtomicBool>, Keypair, IpAddr) {
+    fn server_args() -> (UdpSocket, Arc<AtomicBool>, Keypair) {
         (
             UdpSocket::bind("127.0.0.1:0").unwrap(),
             Arc::new(AtomicBool::new(false)),
             Keypair::new(),
-            "127.0.0.1".parse().unwrap(),
         )
     }
 
     #[test]
     fn test_connection_with_specified_client_endpoint() {
         // Start a response receiver:
-        let (response_recv_socket, response_recv_exit, keypair2, response_recv_ip) = server_args();
+        let (response_recv_socket, response_recv_exit, keypair2) = server_args();
         let (sender2, _receiver2) = unbounded();
 
         let staked_nodes = Arc::new(RwLock::new(StakedNodes::default()));
 
         let SpawnServerResult {
-            endpoint: response_recv_endpoint,
+            endpoints: mut response_recv_endpoints,
             thread: response_recv_thread,
             key_updater: _,
         } = solana_streamer::quic::spawn_server(
+            "solQuicTest",
             "quic_streamer_test",
             response_recv_socket,
             &keypair2,
-            response_recv_ip,
             sender2,
             response_recv_exit.clone(),
             1,
             staked_nodes,
             10,
             10,
+            DEFAULT_MAX_STREAMS_PER_MS,
+            DEFAULT_MAX_CONNECTIONS_PER_IPADDR_PER_MINUTE,
             DEFAULT_WAIT_FOR_CHUNK_TIMEOUT,
             DEFAULT_TPU_COALESCE,
         )
         .unwrap();
 
+        let response_recv_endpoint = response_recv_endpoints
+            .pop()
+            .expect("at least one endpoint");
         let connection_cache = ConnectionCache::new_with_client_options(
             "connection_cache_test",
             1,                            // connection_pool_size

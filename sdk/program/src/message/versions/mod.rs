@@ -4,15 +4,16 @@ use {
         instruction::CompiledInstruction,
         message::{legacy::Message as LegacyMessage, v0::MessageAddressTableLookup, MessageHeader},
         pubkey::Pubkey,
-        sanitize::{Sanitize, SanitizeError},
-        short_vec,
     },
     serde::{
         de::{self, Deserializer, SeqAccess, Unexpected, Visitor},
         ser::{SerializeTuple, Serializer},
-        Deserialize, Serialize,
     },
-    std::fmt,
+    serde_derive::{Deserialize, Serialize},
+    solana_hash::HASH_BYTES,
+    solana_sanitize::{Sanitize, SanitizeError},
+    solana_short_vec as short_vec,
+    std::{collections::HashSet, fmt},
 };
 
 mod sanitized;
@@ -31,8 +32,12 @@ pub const MESSAGE_VERSION_PREFIX: u8 = 0x80;
 /// which message version is serialized starting from version `0`. If the first
 /// is bit is not set, all bytes are used to encode the legacy `Message`
 /// format.
-#[frozen_abi(digest = "G4EAiqmGgBprgf5ePYemLJcoFfx4R7rhC1Weo2FVJ7fn")]
-#[derive(Debug, PartialEq, Eq, Clone, AbiEnumVisitor, AbiExample)]
+#[cfg_attr(
+    feature = "frozen-abi",
+    frozen_abi(digest = "EjjHMjAnRrd86DuTgysFXRicMiAQv3vTvzRzcMJCjYfC"),
+    derive(AbiEnumVisitor, AbiExample)
+)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum VersionedMessage {
     Legacy(LegacyMessage),
     V0(v0::Message),
@@ -77,16 +82,25 @@ impl VersionedMessage {
     /// instructions in this message. Since dynamically loaded addresses can't
     /// have write locks demoted without loading addresses, this shouldn't be
     /// used in the runtime.
-    pub fn is_maybe_writable(&self, index: usize) -> bool {
+    pub fn is_maybe_writable(
+        &self,
+        index: usize,
+        reserved_account_keys: Option<&HashSet<Pubkey>>,
+    ) -> bool {
         match self {
-            Self::Legacy(message) => message.is_writable(index),
-            Self::V0(message) => message.is_maybe_writable(index),
+            Self::Legacy(message) => message.is_maybe_writable(index, reserved_account_keys),
+            Self::V0(message) => message.is_maybe_writable(index, reserved_account_keys),
         }
+    }
+
+    #[deprecated(since = "2.0.0", note = "Please use `is_instruction_account` instead")]
+    pub fn is_key_passed_to_program(&self, key_index: usize) -> bool {
+        self.is_instruction_account(key_index)
     }
 
     /// Returns true if the account at the specified index is an input to some
     /// program instruction in this message.
-    fn is_key_passed_to_program(&self, key_index: usize) -> bool {
+    fn is_instruction_account(&self, key_index: usize) -> bool {
         if let Ok(key_index) = u8::try_from(key_index) {
             self.instructions()
                 .iter()
@@ -106,7 +120,7 @@ impl VersionedMessage {
     /// Returns true if the account at the specified index is not invoked as a
     /// program or, if invoked, is passed to a program.
     pub fn is_non_loader_key(&self, key_index: usize) -> bool {
-        !self.is_invoked(key_index) || self.is_key_passed_to_program(key_index)
+        !self.is_invoked(key_index) || self.is_instruction_account(key_index)
     }
 
     pub fn recent_blockhash(&self) -> &Hash {
@@ -148,7 +162,8 @@ impl VersionedMessage {
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"solana-tx-message-v1");
         hasher.update(message_bytes);
-        Hash(<[u8; crate::hash::HASH_BYTES]>::try_from(hasher.finalize().as_slice()).unwrap())
+        let hash_bytes: [u8; HASH_BYTES] = hasher.finalize().into();
+        hash_bytes.into()
     }
 }
 
@@ -158,7 +173,7 @@ impl Default for VersionedMessage {
     }
 }
 
-impl Serialize for VersionedMessage {
+impl serde::Serialize for VersionedMessage {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -184,7 +199,7 @@ enum MessagePrefix {
     Versioned(u8),
 }
 
-impl<'de> Deserialize<'de> for MessagePrefix {
+impl<'de> serde::Deserialize<'de> for MessagePrefix {
     fn deserialize<D>(deserializer: D) -> Result<MessagePrefix, D::Error>
     where
         D: Deserializer<'de>,
@@ -220,7 +235,7 @@ impl<'de> Deserialize<'de> for MessagePrefix {
     }
 }
 
-impl<'de> Deserialize<'de> for VersionedMessage {
+impl<'de> serde::Deserialize<'de> for VersionedMessage {
     fn deserialize<D>(deserializer: D) -> Result<VersionedMessage, D::Error>
     where
         D: Deserializer<'de>,

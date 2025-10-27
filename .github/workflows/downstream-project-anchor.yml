@@ -13,10 +13,12 @@ on:
       - "**.rs"
       - "Cargo.toml"
       - "Cargo.lock"
-      - "cargo-build-bpf"
-      - "cargo-test-bpf"
       - "cargo-build-sbf"
       - "cargo-test-sbf"
+      - "scripts/build-downstream-anchor-projects.sh"
+      - "scripts/patch-spl-crates-for-anchor.sh"
+      - ".github/scripts/purge-ubuntu-runner.sh"
+      - ".github/scripts/downstream-project-spl-install-deps.sh"
       - ".github/workflows/downstream-project-anchor.yml"
   workflow_call:
     inputs:
@@ -39,17 +41,18 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        version: ["v0.29.0"]
+        version: ["master"]
+    if: false # Re-enable once new major versions for spl-token-2022 and spl-pod are out
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - shell: bash
         run: |
           .github/scripts/purge-ubuntu-runner.sh
 
-      - uses: mozilla-actions/sccache-action@v0.0.3
+      - uses: mozilla-actions/sccache-action@v0.0.5
         with:
-          version: "v0.5.4"
+          version: "v0.8.1"
 
       - shell: bash
         run: |

@@ -1,8 +1,8 @@
 //! Vote program instructions
 
 use {
+    super::state::TowerSync,
     crate::{
-        clock::{Slot, UnixTimestamp},
         hash::Hash,
         instruction::{AccountMeta, Instruction},
         pubkey::Pubkey,
@@ -10,13 +10,14 @@ use {
         vote::{
             program::id,
             state::{
-                serde_compact_vote_state_update, Vote, VoteAuthorize,
+                serde_compact_vote_state_update, serde_tower_sync, Vote, VoteAuthorize,
                 VoteAuthorizeCheckedWithSeedArgs, VoteAuthorizeWithSeedArgs, VoteInit,
                 VoteStateUpdate, VoteStateVersions,
             },
         },
     },
     serde_derive::{Deserialize, Serialize},
+    solana_clock::{Slot, UnixTimestamp},
 };
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone)]
@@ -146,6 +147,21 @@ pub enum VoteInstruction {
         #[serde(with = "serde_compact_vote_state_update")] VoteStateUpdate,
         Hash,
     ),
+
+    /// Sync the onchain vote state with local tower
+    ///
+    /// # Account references
+    ///   0. `[Write]` Vote account to vote with
+    ///   1. `[SIGNER]` Vote authority
+    #[serde(with = "serde_tower_sync")]
+    TowerSync(TowerSync),
+
+    /// Sync the onchain vote state with local tower along with a switching proof
+    ///
+    /// # Account references
+    ///   0. `[Write]` Vote account to vote with
+    ///   1. `[SIGNER]` Vote authority
+    TowerSyncSwitch(#[serde(with = "serde_tower_sync")] TowerSync, Hash),
 }
 
 impl VoteInstruction {
@@ -157,7 +173,9 @@ impl VoteInstruction {
                 | Self::UpdateVoteState(_)
                 | Self::UpdateVoteStateSwitch(_, _)
                 | Self::CompactUpdateVoteState(_)
-                | Self::CompactUpdateVoteStateSwitch(_, _),
+                | Self::CompactUpdateVoteStateSwitch(_, _)
+                | Self::TowerSync(_)
+                | Self::TowerSyncSwitch(_, _),
         )
     }
 
@@ -167,7 +185,9 @@ impl VoteInstruction {
             Self::UpdateVoteState(_)
                 | Self::UpdateVoteStateSwitch(_, _)
                 | Self::CompactUpdateVoteState(_)
-                | Self::CompactUpdateVoteStateSwitch(_, _),
+                | Self::CompactUpdateVoteStateSwitch(_, _)
+                | Self::TowerSync(_)
+                | Self::TowerSyncSwitch(_, _),
         )
     }
 
@@ -182,10 +202,26 @@ impl VoteInstruction {
             | Self::CompactUpdateVoteStateSwitch(vote_state_update, _) => {
                 vote_state_update.last_voted_slot()
             }
+            Self::TowerSync(tower_sync) | Self::TowerSyncSwitch(tower_sync, _) => {
+                tower_sync.last_voted_slot()
+            }
             _ => panic!("Tried to get slot on non simple vote instruction"),
         }
     }
 
+    /// Only to be used on vote instructions (guard with is_simple_vote), panics otherwise
+    pub fn hash(&self) -> Hash {
+        assert!(self.is_simple_vote());
+        match self {
+            Self::Vote(v) | Self::VoteSwitch(v, _) => v.hash,
+            Self::UpdateVoteState(vote_state_update)
+            | Self::UpdateVoteStateSwitch(vote_state_update, _)
+            | Self::CompactUpdateVoteState(vote_state_update)
+            | Self::CompactUpdateVoteStateSwitch(vote_state_update, _) => vote_state_update.hash,
+            Self::TowerSync(tower_sync) | Self::TowerSyncSwitch(tower_sync, _) => tower_sync.hash,
+            _ => panic!("Tried to get hash on non simple vote instruction"),
+        }
+    }
     /// Only to be used on vote instructions (guard with is_simple_vote),  panics otherwise
     pub fn timestamp(&self) -> Option<UnixTimestamp> {
         assert!(self.is_simple_vote());
@@ -196,6 +232,9 @@ impl VoteInstruction {
             | Self::CompactUpdateVoteState(vote_state_update)
             | Self::CompactUpdateVoteStateSwitch(vote_state_update, _) => {
                 vote_state_update.timestamp
+            }
+            Self::TowerSync(tower_sync) | Self::TowerSyncSwitch(tower_sync, _) => {
+                tower_sync.timestamp
             }
             _ => panic!("Tried to get timestamp on non simple vote instruction"),
         }
@@ -229,49 +268,6 @@ impl<'a> Default for CreateVoteAccountConfig<'a> {
             with_seed: None,
         }
     }
-}
-
-#[deprecated(
-    since = "1.16.0",
-    note = "Please use `create_account_with_config()` instead."
-)]
-pub fn create_account(
-    from_pubkey: &Pubkey,
-    vote_pubkey: &Pubkey,
-    vote_init: &VoteInit,
-    lamports: u64,
-) -> Vec<Instruction> {
-    create_account_with_config(
-        from_pubkey,
-        vote_pubkey,
-        vote_init,
-        lamports,
-        CreateVoteAccountConfig::default(),
-    )
-}
-
-#[deprecated(
-    since = "1.16.0",
-    note = "Please use `create_account_with_config()` instead."
-)]
-pub fn create_account_with_seed(
-    from_pubkey: &Pubkey,
-    vote_pubkey: &Pubkey,
-    base: &Pubkey,
-    seed: &str,
-    vote_init: &VoteInit,
-    lamports: u64,
-) -> Vec<Instruction> {
-    create_account_with_config(
-        from_pubkey,
-        vote_pubkey,
-        vote_init,
-        lamports,
-        CreateVoteAccountConfig {
-            with_seed: Some((base, seed)),
-            ..CreateVoteAccountConfig::default()
-        },
-    )
 }
 
 pub fn create_account_with_config(
@@ -510,6 +506,37 @@ pub fn compact_update_vote_state_switch(
     Instruction::new_with_bincode(
         id(),
         &VoteInstruction::CompactUpdateVoteStateSwitch(vote_state_update, proof_hash),
+        account_metas,
+    )
+}
+
+pub fn tower_sync(
+    vote_pubkey: &Pubkey,
+    authorized_voter_pubkey: &Pubkey,
+    tower_sync: TowerSync,
+) -> Instruction {
+    let account_metas = vec![
+        AccountMeta::new(*vote_pubkey, false),
+        AccountMeta::new_readonly(*authorized_voter_pubkey, true),
+    ];
+
+    Instruction::new_with_bincode(id(), &VoteInstruction::TowerSync(tower_sync), account_metas)
+}
+
+pub fn tower_sync_switch(
+    vote_pubkey: &Pubkey,
+    authorized_voter_pubkey: &Pubkey,
+    tower_sync: TowerSync,
+    proof_hash: Hash,
+) -> Instruction {
+    let account_metas = vec![
+        AccountMeta::new(*vote_pubkey, false),
+        AccountMeta::new_readonly(*authorized_voter_pubkey, true),
+    ];
+
+    Instruction::new_with_bincode(
+        id(),
+        &VoteInstruction::TowerSyncSwitch(tower_sync, proof_hash),
         account_metas,
     )
 }

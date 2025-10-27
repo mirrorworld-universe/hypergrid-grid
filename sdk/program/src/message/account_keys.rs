@@ -17,6 +17,7 @@ pub struct AccountKeys<'a> {
 
 impl Index<usize> for AccountKeys<'_> {
     type Output = Pubkey;
+    #[inline]
     fn index(&self, index: usize) -> &Self::Output {
         self.get(index).expect("index is invalid")
     }
@@ -33,7 +34,8 @@ impl<'a> AccountKeys<'a> {
     /// Returns an iterator of account key segments. The ordering of segments
     /// affects how account indexes from compiled instructions are resolved and
     /// so should not be changed.
-    fn key_segment_iter(&self) -> impl Iterator<Item = &'a [Pubkey]> {
+    #[inline]
+    fn key_segment_iter(&self) -> impl Iterator<Item = &'a [Pubkey]> + Clone {
         if let Some(dynamic_keys) = self.dynamic_keys {
             [
                 self.static_keys,
@@ -51,6 +53,7 @@ impl<'a> AccountKeys<'a> {
     /// message account keys constructed from static keys, followed by dynamically
     /// loaded writable addresses, and lastly the list of dynamically loaded
     /// readonly addresses.
+    #[inline]
     pub fn get(&self, mut index: usize) -> Option<&'a Pubkey> {
         for key_segment in self.key_segment_iter() {
             if index < key_segment.len() {
@@ -63,6 +66,7 @@ impl<'a> AccountKeys<'a> {
     }
 
     /// Returns the total length of loaded accounts for a message
+    #[inline]
     pub fn len(&self) -> usize {
         let mut len = 0usize;
         for key_segment in self.key_segment_iter() {
@@ -77,7 +81,8 @@ impl<'a> AccountKeys<'a> {
     }
 
     /// Iterator for the addresses of the loaded accounts for a message
-    pub fn iter(&self) -> impl Iterator<Item = &'a Pubkey> {
+    #[inline]
+    pub fn iter(&self) -> impl Iterator<Item = &'a Pubkey> + Clone {
         self.key_segment_iter().flatten()
     }
 
@@ -171,7 +176,7 @@ mod tests {
         };
         let account_keys = AccountKeys::new(&static_keys, Some(&dynamic_keys));
 
-        let expected_segments = vec![
+        let expected_segments = [
             vec![keys[0], keys[1], keys[2]],
             vec![keys[3], keys[4]],
             vec![keys[5]],

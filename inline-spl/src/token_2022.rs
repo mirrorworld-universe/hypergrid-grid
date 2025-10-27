@@ -1,0 +1,23 @@
+/// Partial SPL Token declarations inlined to avoid an external dependency on the spl-token-2022 crate
+use crate::token::{self, GenericTokenAccount};
+
+solana_pubkey::declare_id!("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
+
+// `spl_token_program_2022::extension::AccountType::Account` ordinal value
+pub const ACCOUNTTYPE_ACCOUNT: u8 = 2;
+
+pub struct Account;
+impl GenericTokenAccount for Account {
+    fn valid_account_data(account_data: &[u8]) -> bool {
+        token::Account::valid_account_data(account_data)
+            || ACCOUNTTYPE_ACCOUNT
+                == *account_data
+                    .get(token::Account::get_packed_len())
+                    .unwrap_or(&0)
+    }
+}
+
+//Sonic: added this
+pub mod native_mint {
+    solana_pubkey::declare_id!("9pan9bMn5HatX4EJdBwg9VgCa7Uz5HL8N1m5D3NdXejP");
+}

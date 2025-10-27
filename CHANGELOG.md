@@ -8,12 +8,96 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 and follows a [Backwards Compatibility Policy](https://docs.solanalabs.com/backwards-compatibility)
 
 Release channels have their own copy of this changelog:
-* [edge - v2.0](#edge-channel)
-* [beta - v1.18](https://github.com/solana-labs/solana/blob/v1.18/CHANGELOG.md)
-* [stable - v1.17](https://github.com/solana-labs/solana/blob/v1.17/CHANGELOG.md)
+* [edge - v2.2](#edge-channel)
+* [beta - v2.1](https://github.com/solana-labs/solana/blob/v2.1/CHANGELOG.md)
+* [stable - v2.0](https://github.com/solana-labs/solana/blob/v2.0/CHANGELOG.md)
 
 <a name="edge-channel"></a>
-## [2.0.0] - Unreleased
+## [2.2.0] - Unreleased
+
+## [2.1.0]
+* Breaking:
+  * SDK:
+    * `cargo-build-sbf` and `cargo-build-bpf` have been deprecated for two years and have now been definitely removed.
+       Use `cargo-build-sbf` and `cargo-test-sbf` instead.
+  * Stake:
+    * removed the unreleased `redelegate` instruction processor and CLI commands (#2213)
+  * Banks-client:
+    * relax functions to use `&self` instead of `&mut self` (#2591)
+* Changes
+  * SDK:
+    * removed the `respan` macro. This was marked as "internal use only" and was no longer used internally.
+    * add `entrypoint_no_alloc!`, a more performant program entrypoint that avoids allocations, saving 20-30 CUs per unique account
+    * `cargo-build-sbf`: a workspace or package-level Cargo.toml may specify `tools-version` for overriding the default platform tools version when building on-chain programs. For example:
+```toml
+[package.metadata.solana]
+tools-version = "1.43"
+```
+or
+```toml
+[workspace.metadata.solana]
+tools-version = "1.43"
+```
+The order of precedence for the chosen tools version goes: `--tools-version` argument, package version, workspace version, and finally default version.
+  * `package-metadata`: specify a program's id in Cargo.toml for easy consumption by downstream users and tools using `solana-package-metadata` (#1806). For example:
+```toml
+[package.metadata.solana]
+program-id = "MyProgram1111111111111111111111111111111111"
+```
+Can be consumed in the program crate:
+```rust
+solana_package_metadata::declare_id_with_package_metadata!("solana.program-id");
+```
+This is equivalent to writing:
+```rust
+solana_pubkey::declare_id!("MyProgram1111111111111111111111111111111111");
+```
+  * `agave-validator`: Update PoH speed check to compare against current hash rate from a Bank (#2447)
+  * `solana-test-validator`: Add `--clone-feature-set` flag to mimic features from a target cluster (#2480)
+  * `solana-genesis`: the `--cluster-type` parameter now clones the feature set from the target cluster (#2587)
+  * `unified-scheduler` as default option for `--block-verification-method` (#2653)
+  * warn that `thread-local-multi-iterator` option for `--block-production-method` is deprecated (#3113)
+
+## [2.0.0]
+* Breaking
+  * SDK:
+    * Support for Borsh v0.9 removed, please use v1 or v0.10 (#1440)
+    * `Copy` is no longer derived on `Rent` and `EpochSchedule`, please switch to using `clone()` (solana-labs#32767)
+    * `solana-sdk`: deprecated symbols removed
+    * `solana-program`: deprecated symbols removed
+  * RPC: obsolete and deprecated v1 endpoints are removed. These endpoints are:
+    confirmTransaction, getSignatureStatus, getSignatureConfirmation, getTotalSupply,
+    getConfirmedSignaturesForAddress, getConfirmedBlock, getConfirmedBlocks, getConfirmedBlocksWithLimit,
+    getConfirmedTransaction, getConfirmedSignaturesForAddress2, getRecentBlockhash, getFees,
+    getFeeCalculatorForBlockhash, getFeeRateGovernor, getSnapshotSlot getStakeActivation
+  * Deprecated methods are removed from `RpcClient` and `RpcClient::nonblocking`
+  * `solana-client`: deprecated re-exports removed; please import `solana-connection-cache`, `solana-quic-client`, or `solana-udp-client` directly
+  * Deprecated arguments removed from `agave-validator`:
+    * `--enable-rpc-obsolete_v1_7` (#1886)
+    * `--accounts-db-caching-enabled` (#2063)
+    * `--accounts-db-index-hashing` (#2063)
+    * `--no-accounts-db-index-hashing` (#2063)
+    * `--incremental-snapshots` (#2148)
+    * `--halt-on-known-validators-accounts-hash-mismatch` (#2157)
+* Changes
+  * `central-scheduler` as default option for `--block-production-method` (#34891)
+  * `solana-rpc-client-api`: `RpcFilterError` depends on `base64` version 0.22, so users may need to upgrade to `base64` version 0.22
+  * Changed default value for `--health-check-slot-distance` from 150 to 128
+  * CLI: Can specify `--with-compute-unit-price`, `--max-sign-attempts`, and `--use-rpc` during program deployment
+  * RPC's `simulateTransaction` now returns an extra `replacementBlockhash` field in the response
+    when the `replaceRecentBlockhash` config param is `true` (#380)
+  * SDK: `cargo test-sbf` accepts `--tools-version`, just like `build-sbf` (#1359)
+  * CLI: Can specify `--full-snapshot-archive-path` (#1631)
+  * transaction-status: The SPL Token `amountToUiAmount` instruction parses the amount into a string instead of a number (#1737)
+  * Implemented partitioned epoch rewards as per [SIMD-0118](https://github.com/solana-foundation/solana-improvement-documents/blob/fae25d5a950f43bd787f1f5d75897ef1fdd425a7/proposals/0118-partitioned-epoch-reward-distribution.md). Feature gate: #426. Specific changes include:
+    * EpochRewards sysvar expanded and made persistent (#428, #572)
+    * Stake Program credits now allowed during distribution (#631)
+    * Updated type in Bank::epoch_rewards_status (#1277)
+    * Partitions are recalculated on boot from snapshot (#1159)
+    * `epoch_rewards_status` removed from snapshot (#1274)
+  * Added `unified-scheduler` option for `--block-verification-method` (#1668)
+  * Deprecate the `fifo` option for `--rocksdb-shred-compaction` (#1882)
+    * `fifo` will remain supported in v2.0 with plans to fully remove in v2.1
 
 ## [1.18.0]
 * Changes
@@ -34,6 +118,8 @@ Release channels have their own copy of this changelog:
   * New program deployments default to the exact size of a program, instead of
     double the size. Program accounts must be extended with `solana program extend`
     before an upgrade if they need to accommodate larger programs.
+  * Interface for `gossip_service::get_client()` has changed. `gossip_service::get_multi_client()` has been removed.
+  * CLI: Can specify `--with-compute-unit-price`, `--max-sign-attempts`, and `--use-rpc` during program deployment
 * Upgrade Notes
   * `solana-program` and `solana-sdk` default to support for Borsh v1, with
 limited backward compatibility for v0.10 and v0.9. Please upgrade to Borsh v1.

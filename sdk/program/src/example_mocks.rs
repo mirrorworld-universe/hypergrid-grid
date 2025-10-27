@@ -123,7 +123,7 @@ pub mod solana_sdk {
     };
 
     pub mod account {
-        use crate::{clock::Epoch, pubkey::Pubkey};
+        use {crate::pubkey::Pubkey, solana_clock::Epoch};
         #[derive(Clone)]
         pub struct Account {
             pub lamports: u64,
@@ -204,7 +204,7 @@ pub mod solana_sdk {
                 message::{Message, VersionedMessage},
                 pubkey::Pubkey,
             },
-            serde::Serialize,
+            serde_derive::Serialize,
         };
 
         pub struct VersionedTransaction {
@@ -274,44 +274,5 @@ pub mod solana_sdk {
         }
     }
 
-    #[deprecated(
-        since = "1.17.0",
-        note = "Please use `solana_sdk::address_lookup_table` instead"
-    )]
-    pub use crate::address_lookup_table as address_lookup_table_account;
-}
-
-#[deprecated(
-    since = "1.17.0",
-    note = "Please use `solana_sdk::address_lookup_table` instead"
-)]
-pub mod solana_address_lookup_table_program {
-    pub use crate::address_lookup_table::program::{check_id, id, ID};
-
-    pub mod state {
-        use {
-            crate::{instruction::InstructionError, pubkey::Pubkey},
-            std::borrow::Cow,
-        };
-
-        pub struct AddressLookupTable<'a> {
-            pub addresses: Cow<'a, [Pubkey]>,
-        }
-
-        impl<'a> AddressLookupTable<'a> {
-            pub fn serialize_for_tests(self) -> Result<Vec<u8>, InstructionError> {
-                let mut data = vec![];
-                self.addresses.iter().for_each(|address| {
-                    data.extend_from_slice(address.as_ref());
-                });
-                Ok(data)
-            }
-
-            pub fn deserialize(data: &'a [u8]) -> Result<AddressLookupTable<'a>, InstructionError> {
-                Ok(Self {
-                    addresses: Cow::Borrowed(bytemuck::try_cast_slice(data).unwrap()),
-                })
-            }
-        }
-    }
+    pub use crate::address_lookup_table;
 }

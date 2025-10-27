@@ -17,14 +17,15 @@ bs58 = { workspace = true }
 indicatif = { workspace = true, optional = true }
 log = { workspace = true }
 reqwest = { workspace = true, features = ["blocking", "brotli", "deflate", "gzip", "rustls-tls", "json"] }
+reqwest-middleware = { workspace = true }
 semver = { workspace = true }
 serde = { workspace = true }
 serde_derive = { workspace = true }
 serde_json = { workspace = true }
-solana-account-decoder = { workspace = true }
+solana-account-decoder-client-types = { workspace = true, features = ["zstd"] }
 solana-rpc-client-api = { workspace = true }
 solana-sdk = { workspace = true }
-solana-transaction-status = { workspace = true }
+solana-transaction-status-client-types = { workspace = true }
 solana-version = { workspace = true }
 solana-vote-program = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
@@ -35,6 +36,7 @@ crossbeam-channel = { workspace = true }
 futures = { workspace = true }
 jsonrpc-core = { workspace = true }
 jsonrpc-http-server = { workspace = true }
+solana-account-decoder = { workspace = true }
 
 [features]
 default = ["spinner"]

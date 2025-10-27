@@ -76,18 +76,18 @@ nodes=(
   "multinode-demo/bootstrap-validator.sh \
     --no-restart \
     --init-complete-file init-complete-node0.log \
-    --dynamic-port-range 8000-8050"
+    --dynamic-port-range 8000-8200"
   "multinode-demo/validator.sh \
     --no-restart \
-    --dynamic-port-range 8050-8100
+    --dynamic-port-range 8200-8400
     --init-complete-file init-complete-node1.log \
     --rpc-port 18899"
 )
 
 if [[ extraNodes -gt 0 ]]; then
   for i in $(seq 1 $extraNodes); do
-    portStart=$((8100 + i * 50))
-    portEnd=$((portStart + 49))
+    portStart=$((8400 + i * 200))
+    portEnd=$((portStart + 200))
     nodes+=(
       "multinode-demo/validator.sh \
         --no-restart \
@@ -202,8 +202,8 @@ killNodes() {
   # Try to use the RPC exit API to cleanly exit the first two nodes
   # (dynamic nodes, -x, are just killed)
   echo "--- RPC exit"
-  $solana_validator --ledger "$SOLANA_CONFIG_DIR"/bootstrap-validator exit --force || true
-  $solana_validator --ledger "$SOLANA_CONFIG_DIR"/validator exit --force || true
+  $agave_validator --ledger "$SOLANA_CONFIG_DIR"/bootstrap-validator exit --force || true
+  $agave_validator --ledger "$SOLANA_CONFIG_DIR"/validator exit --force || true
 
   # Give the nodes a splash of time to cleanly exit before killing them
   sleep 2

@@ -1,7 +1,10 @@
 #![allow(clippy::arithmetic_side_effects)]
 #![feature(test)]
 
-use solana_core::validator::BlockProductionMethod;
+use {
+    solana_core::validator::BlockProductionMethod,
+    solana_vote_program::{vote_state::TowerSync, vote_transaction::new_tower_sync_transaction},
+};
 
 extern crate test;
 
@@ -46,13 +49,10 @@ use {
         pubkey,
         signature::{Keypair, Signature, Signer},
         system_instruction, system_transaction,
-        timing::{duration_as_us, timestamp},
+        timing::timestamp,
         transaction::{Transaction, VersionedTransaction},
     },
     solana_streamer::socket::SocketAddrSpace,
-    solana_vote_program::{
-        vote_state::VoteStateUpdate, vote_transaction::new_vote_state_update_transaction,
-    },
     std::{
         iter::repeat_with,
         sync::{atomic::Ordering, Arc},
@@ -169,11 +169,11 @@ fn make_vote_txs(txes: usize) -> Vec<Transaction> {
         .map(|i| {
             // Quarter of the votes should be filtered out
             let vote = if i % 4 == 0 {
-                VoteStateUpdate::from(vec![(2, 1)])
+                TowerSync::from(vec![(2, 1)])
             } else {
-                VoteStateUpdate::from(vec![(i as u64, 1)])
+                TowerSync::from(vec![(i as u64, 1)])
             };
-            new_vote_state_update_transaction(
+            new_tower_sync_transaction(
                 vote,
                 Hash::new_unique(),
                 &keypairs[i % num_voters],
@@ -224,7 +224,7 @@ fn bench_banking(bencher: &mut Bencher, tx_type: TransactionType) {
     // set cost tracker limits to MAX so it will not filter out TXs
     bank.write_cost_tracker()
         .unwrap()
-        .set_limits(std::u64::MAX, std::u64::MAX, std::u64::MAX);
+        .set_limits(u64::MAX, u64::MAX, u64::MAX);
 
     debug!("threads: {} txs: {}", num_threads, txes);
 
@@ -303,6 +303,7 @@ fn bench_banking(bencher: &mut Bencher, tx_type: TransactionType) {
         Arc::new(ConnectionCache::new("connection_cache_test")),
         bank_forks,
         &Arc::new(PrioritizationFeeCache::new(0u64)),
+        false,
     );
 
     let chunk_len = verified.len() / CHUNKS;
@@ -354,7 +355,7 @@ fn bench_banking(bencher: &mut Bencher, tx_type: TransactionType) {
         bank.clear_signatures();
         trace!(
             "time: {} checked: {} sent: {}",
-            duration_as_us(&now.elapsed()),
+            now.elapsed().as_micros(),
             txes / CHUNKS,
             sent,
         );
@@ -398,10 +399,7 @@ fn simulate_process_entries(
     let bank_fork = BankForks::new_rw_arc(bank);
     let bank = bank_fork.read().unwrap().get_with_scheduler(slot).unwrap();
     bank.clone_without_scheduler()
-        .loaded_programs_cache
-        .write()
-        .unwrap()
-        .set_fork_graph(bank_fork.clone());
+        .set_fork_graph_in_program_cache(Arc::downgrade(&bank_fork));
 
     for i in 0..(num_accounts / 2) {
         bank.transfer(initial_lamports, mint_keypair, &keypairs[i * 2].pubkey())

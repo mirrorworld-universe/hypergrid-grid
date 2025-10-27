@@ -1,4 +1,4 @@
-#![cfg_attr(RUSTC_WITH_SPECIALIZATION, feature(min_specialization))]
+#![cfg_attr(feature = "frozen-abi", feature(min_specialization))]
 #![allow(clippy::arithmetic_side_effects)]
 
 pub mod cluster_info;
@@ -20,7 +20,7 @@ pub mod epoch_slots;
 pub mod gossip_error;
 pub mod gossip_service;
 #[macro_use]
-pub mod legacy_contact_info;
+mod legacy_contact_info;
 pub mod ping_pong;
 mod push_active_set;
 mod received_cache;
@@ -37,7 +37,8 @@ extern crate assert_matches;
 #[macro_use]
 extern crate serde_derive;
 
-#[macro_use]
+#[cfg_attr(feature = "frozen-abi", macro_use)]
+#[cfg(feature = "frozen-abi")]
 extern crate solana_frozen_abi_macro;
 
 #[macro_use]

@@ -17,8 +17,8 @@ use solana_program::{
 
 pub const REALLOC: u8 = 1;
 pub const REALLOC_EXTEND_FROM_SLICE: u8 = 12;
-pub const TEST_CPI_ACCOUNT_UPDATE_CALLER_GROWS: u8 = 28;
-pub const TEST_CPI_ACCOUNT_UPDATE_CALLER_GROWS_NESTED: u8 = 29;
+pub const TEST_CPI_ACCOUNT_UPDATE_CALLER_GROWS: u8 = 29;
+pub const TEST_CPI_ACCOUNT_UPDATE_CALLER_GROWS_NESTED: u8 = 30;
 
 #[derive(Debug, PartialEq)]
 struct SStruct {
@@ -39,7 +39,6 @@ fn custom_panic(info: &core::panic::PanicInfo<'_>) {
 }
 
 solana_program::entrypoint_deprecated!(process_instruction);
-#[allow(clippy::unnecessary_wraps)]
 fn process_instruction(
     program_id: &Pubkey,
     accounts: &[AccountInfo],

@@ -9,18 +9,35 @@ use {
     crate::banking_stage::{
         consumer::TARGET_NUM_TRANSACTIONS_PER_BATCH,
         read_write_account_set::ReadWriteAccountSet,
-        scheduler_messages::{ConsumeWork, FinishedConsumeWork, TransactionBatchId, TransactionId},
-        transaction_scheduler::transaction_priority_id::TransactionPriorityId,
+        scheduler_messages::{
+            ConsumeWork, FinishedConsumeWork, MaxAge, TransactionBatchId, TransactionId,
+        },
+        transaction_scheduler::{
+            transaction_priority_id::TransactionPriorityId, transaction_state::TransactionState,
+        },
     },
     crossbeam_channel::{Receiver, Sender, TryRecvError},
     itertools::izip,
-    prio_graph::{AccessKind, PrioGraph},
+    prio_graph::{AccessKind, GraphNode, PrioGraph},
+    solana_cost_model::block_cost_limits::MAX_BLOCK_UNITS,
     solana_measure::measure_us,
-    solana_sdk::{
-        pubkey::Pubkey, saturating_add_assign, slot_history::Slot,
-        transaction::SanitizedTransaction,
-    },
+    solana_sdk::{pubkey::Pubkey, saturating_add_assign, transaction::SanitizedTransaction},
 };
+
+#[inline(always)]
+fn passthrough_priority(
+    id: &TransactionPriorityId,
+    _graph_node: &GraphNode<TransactionPriorityId>,
+) -> TransactionPriorityId {
+    *id
+}
+
+type SchedulerPrioGraph = PrioGraph<
+    TransactionPriorityId,
+    Pubkey,
+    TransactionPriorityId,
+    fn(&TransactionPriorityId, &GraphNode<TransactionPriorityId>) -> TransactionPriorityId,
+>;
 
 pub(crate) struct PrioGraphScheduler {
     in_flight_tracker: InFlightTracker,
@@ -28,6 +45,7 @@ pub(crate) struct PrioGraphScheduler {
     consume_work_senders: Vec<Sender<ConsumeWork>>,
     finished_consume_work_receiver: Receiver<FinishedConsumeWork>,
     look_ahead_window_size: usize,
+    prio_graph: SchedulerPrioGraph,
 }
 
 impl PrioGraphScheduler {
@@ -42,6 +60,7 @@ impl PrioGraphScheduler {
             consume_work_senders,
             finished_consume_work_receiver,
             look_ahead_window_size: 2048,
+            prio_graph: PrioGraph::new(passthrough_priority),
         }
     }
 
@@ -68,6 +87,23 @@ impl PrioGraphScheduler {
         pre_lock_filter: impl Fn(&SanitizedTransaction) -> bool,
     ) -> Result<SchedulingSummary, SchedulerError> {
         let num_threads = self.consume_work_senders.len();
+        let max_cu_per_thread = MAX_BLOCK_UNITS / num_threads as u64;
+
+        let mut schedulable_threads = ThreadSet::any(num_threads);
+        for thread_id in 0..num_threads {
+            if self.in_flight_tracker.cus_in_flight_per_thread()[thread_id] >= max_cu_per_thread {
+                schedulable_threads.remove(thread_id);
+            }
+        }
+        if schedulable_threads.is_empty() {
+            return Ok(SchedulingSummary {
+                num_scheduled: 0,
+                num_unschedulable: 0,
+                num_filtered_out: 0,
+                filter_time_us: 0,
+            });
+        }
+
         let mut batches = Batches::new(num_threads);
         // Some transactions may be unschedulable due to multi-thread conflicts.
         // These transactions cannot be scheduled until some conflicting work is completed.
@@ -75,7 +111,6 @@ impl PrioGraphScheduler {
         // these transactions to be scheduled before them.
         let mut unschedulable_ids = Vec::new();
         let mut blocking_locks = ReadWriteAccountSet::default();
-        let mut prio_graph = PrioGraph::new(|id: &TransactionPriorityId, _graph_node| *id);
 
         // Track metrics on filter.
         let mut num_filtered_out: usize = 0;
@@ -131,7 +166,7 @@ impl PrioGraphScheduler {
 
         // Create the initial look-ahead window.
         // Check transactions against filter, remove from container if it fails.
-        chunked_pops(container, &mut prio_graph, &mut window_budget);
+        chunked_pops(container, &mut self.prio_graph, &mut window_budget);
 
         let mut unblock_this_batch =
             Vec::with_capacity(self.consume_work_senders.len() * TARGET_NUM_TRANSACTIONS_PER_BATCH);
@@ -141,11 +176,11 @@ impl PrioGraphScheduler {
         let mut num_unschedulable: usize = 0;
         while num_scheduled < MAX_TRANSACTIONS_PER_SCHEDULING_PASS {
             // If nothing is in the main-queue of the `PrioGraph` then there's nothing left to schedule.
-            if prio_graph.is_empty() {
+            if self.prio_graph.is_empty() {
                 break;
             }
 
-            while let Some(id) = prio_graph.pop() {
+            while let Some(id) = self.prio_graph.pop() {
                 unblock_this_batch.push(id);
 
                 // Should always be in the container, during initial testing phase panic.
@@ -154,62 +189,67 @@ impl PrioGraphScheduler {
                     panic!("transaction state must exist")
                 };
 
-                let transaction = &transaction_state.transaction_ttl().transaction;
-                if !pre_lock_filter(transaction) {
-                    container.remove_by_id(&id.id);
-                    continue;
-                }
-
-                // Check if this transaction conflicts with any blocked transactions
-                if !blocking_locks.check_locks(transaction.message()) {
-                    blocking_locks.take_locks(transaction.message());
-                    unschedulable_ids.push(id);
-                    saturating_add_assign!(num_unschedulable, 1);
-                    continue;
-                }
-
-                // Schedule the transaction if it can be.
-                let transaction_locks = transaction.get_account_locks_unchecked();
-                let Some(thread_id) = self.account_locks.try_lock_accounts(
-                    transaction_locks.writable.into_iter(),
-                    transaction_locks.readonly.into_iter(),
-                    ThreadSet::any(num_threads),
+                let maybe_schedule_info = try_schedule_transaction(
+                    transaction_state,
+                    &pre_lock_filter,
+                    &mut blocking_locks,
+                    &mut self.account_locks,
+                    num_threads,
                     |thread_set| {
                         Self::select_thread(
                             thread_set,
+                            &batches.total_cus,
+                            self.in_flight_tracker.cus_in_flight_per_thread(),
                             &batches.transactions,
                             self.in_flight_tracker.num_in_flight_per_thread(),
                         )
                     },
-                ) else {
-                    blocking_locks.take_locks(transaction.message());
-                    unschedulable_ids.push(id);
-                    saturating_add_assign!(num_unschedulable, 1);
-                    continue;
-                };
+                );
 
-                saturating_add_assign!(num_scheduled, 1);
+                match maybe_schedule_info {
+                    Err(TransactionSchedulingError::Filtered) => {
+                        container.remove_by_id(&id.id);
+                    }
+                    Err(TransactionSchedulingError::UnschedulableConflicts) => {
+                        unschedulable_ids.push(id);
+                        saturating_add_assign!(num_unschedulable, 1);
+                    }
+                    Ok(TransactionSchedulingInfo {
+                        thread_id,
+                        transaction,
+                        max_age,
+                        cost,
+                    }) => {
+                        saturating_add_assign!(num_scheduled, 1);
+                        batches.transactions[thread_id].push(transaction);
+                        batches.ids[thread_id].push(id.id);
+                        batches.max_ages[thread_id].push(max_age);
+                        saturating_add_assign!(batches.total_cus[thread_id], cost);
 
-                let sanitized_transaction_ttl = transaction_state.transition_to_pending();
-                let cost = transaction_state.transaction_cost().sum();
+                        // If target batch size is reached, send only this batch.
+                        if batches.ids[thread_id].len() >= TARGET_NUM_TRANSACTIONS_PER_BATCH {
+                            saturating_add_assign!(
+                                num_sent,
+                                self.send_batch(&mut batches, thread_id)?
+                            );
+                        }
 
-                let SanitizedTransactionTTL {
-                    transaction,
-                    max_age_slot,
-                } = sanitized_transaction_ttl;
+                        // if the thread is at max_cu_per_thread, remove it from the schedulable threads
+                        // if there are no more schedulable threads, stop scheduling.
+                        if self.in_flight_tracker.cus_in_flight_per_thread()[thread_id]
+                            + batches.total_cus[thread_id]
+                            >= max_cu_per_thread
+                        {
+                            schedulable_threads.remove(thread_id);
+                            if schedulable_threads.is_empty() {
+                                break;
+                            }
+                        }
 
-                batches.transactions[thread_id].push(transaction);
-                batches.ids[thread_id].push(id.id);
-                batches.max_age_slots[thread_id].push(max_age_slot);
-                saturating_add_assign!(batches.total_cus[thread_id], cost);
-
-                // If target batch size is reached, send only this batch.
-                if batches.ids[thread_id].len() >= TARGET_NUM_TRANSACTIONS_PER_BATCH {
-                    saturating_add_assign!(num_sent, self.send_batch(&mut batches, thread_id)?);
-                }
-
-                if num_scheduled >= MAX_TRANSACTIONS_PER_SCHEDULING_PASS {
-                    break;
+                        if num_scheduled >= MAX_TRANSACTIONS_PER_SCHEDULING_PASS {
+                            break;
+                        }
+                    }
                 }
             }
 
@@ -218,11 +258,11 @@ impl PrioGraphScheduler {
 
             // Refresh window budget and do chunked pops
             saturating_add_assign!(window_budget, unblock_this_batch.len());
-            chunked_pops(container, &mut prio_graph, &mut window_budget);
+            chunked_pops(container, &mut self.prio_graph, &mut window_budget);
 
             // Unblock all transactions that were blocked by the transactions that were just sent.
             for id in unblock_this_batch.drain(..) {
-                prio_graph.unblock(&id);
+                self.prio_graph.unblock(&id);
             }
         }
 
@@ -235,9 +275,13 @@ impl PrioGraphScheduler {
         }
 
         // Push remaining transactions back into the container
-        while let Some((id, _)) = prio_graph.pop_and_unblock() {
+        while let Some((id, _)) = self.prio_graph.pop_and_unblock() {
             container.push_id_into_queue(id);
         }
+        // No more remaining items in the queue.
+        // Clear here to make sure the next scheduling pass starts fresh
+        // without detecting any conflicts.
+        self.prio_graph.clear();
 
         assert_eq!(
             num_scheduled, num_sent,
@@ -284,7 +328,7 @@ impl PrioGraphScheduler {
                         batch_id,
                         ids,
                         transactions,
-                        max_age_slots,
+                        max_ages,
                     },
                 retryable_indexes,
             }) => {
@@ -296,8 +340,8 @@ impl PrioGraphScheduler {
 
                 // Retryable transactions should be inserted back into the container
                 let mut retryable_iter = retryable_indexes.into_iter().peekable();
-                for (index, (id, transaction, max_age_slot)) in
-                    izip!(ids, transactions, max_age_slots).enumerate()
+                for (index, (id, transaction, max_age)) in
+                    izip!(ids, transactions, max_ages).enumerate()
                 {
                     if let Some(retryable_index) = retryable_iter.peek() {
                         if *retryable_index == index {
@@ -305,7 +349,7 @@ impl PrioGraphScheduler {
                                 id,
                                 SanitizedTransactionTTL {
                                     transaction,
-                                    max_age_slot,
+                                    max_age,
                                 },
                             );
                             retryable_iter.next();
@@ -333,12 +377,18 @@ impl PrioGraphScheduler {
     ) {
         let thread_id = self.in_flight_tracker.complete_batch(batch_id);
         for transaction in transactions {
-            let account_locks = transaction.get_account_locks_unchecked();
-            self.account_locks.unlock_accounts(
-                account_locks.writable.into_iter(),
-                account_locks.readonly.into_iter(),
-                thread_id,
-            );
+            let message = transaction.message();
+            let account_keys = message.account_keys();
+            let write_account_locks = account_keys
+                .iter()
+                .enumerate()
+                .filter_map(|(index, key)| message.is_writable(index).then_some(key));
+            let read_account_locks = account_keys
+                .iter()
+                .enumerate()
+                .filter_map(|(index, key)| (!message.is_writable(index)).then_some(key));
+            self.account_locks
+                .unlock_accounts(write_account_locks, read_account_locks, thread_id);
         }
     }
 
@@ -361,7 +411,7 @@ impl PrioGraphScheduler {
             return Ok(0);
         }
 
-        let (ids, transactions, max_age_slots, total_cus) = batches.take_batch(thread_index);
+        let (ids, transactions, max_ages, total_cus) = batches.take_batch(thread_index);
 
         let batch_id = self
             .in_flight_tracker
@@ -372,7 +422,7 @@ impl PrioGraphScheduler {
             batch_id,
             ids,
             transactions,
-            max_age_slots,
+            max_ages,
         };
         self.consume_work_senders[thread_index]
             .send(work)
@@ -388,9 +438,12 @@ impl PrioGraphScheduler {
     /// If the `chain_thread` is available, this thread will be selected, regardless of
     /// load-balancing.
     ///
-    /// Panics if the `thread_set` is empty.
+    /// Panics if the `thread_set` is empty. This should never happen, see comment
+    /// on `ThreadAwareAccountLocks::try_lock_accounts`.
     fn select_thread(
         thread_set: ThreadSet,
+        batch_cus_per_thread: &[u64],
+        in_flight_cus_per_thread: &[u64],
         batches_per_thread: &[Vec<SanitizedTransaction>],
         in_flight_per_thread: &[usize],
     ) -> ThreadId {
@@ -399,11 +452,12 @@ impl PrioGraphScheduler {
             .map(|thread_id| {
                 (
                     thread_id,
+                    batch_cus_per_thread[thread_id] + in_flight_cus_per_thread[thread_id],
                     batches_per_thread[thread_id].len() + in_flight_per_thread[thread_id],
                 )
             })
-            .min_by(|a, b| a.1.cmp(&b.1))
-            .map(|(thread_id, _)| thread_id)
+            .min_by(|a, b| a.1.cmp(&b.1).then_with(|| a.2.cmp(&b.2)))
+            .map(|(thread_id, _, _)| thread_id)
             .unwrap()
     }
 
@@ -442,7 +496,7 @@ pub(crate) struct SchedulingSummary {
 struct Batches {
     ids: Vec<Vec<TransactionId>>,
     transactions: Vec<Vec<SanitizedTransaction>>,
-    max_age_slots: Vec<Vec<Slot>>,
+    max_ages: Vec<Vec<MaxAge>>,
     total_cus: Vec<u64>,
 }
 
@@ -451,7 +505,7 @@ impl Batches {
         Self {
             ids: vec![Vec::with_capacity(TARGET_NUM_TRANSACTIONS_PER_BATCH); num_threads],
             transactions: vec![Vec::with_capacity(TARGET_NUM_TRANSACTIONS_PER_BATCH); num_threads],
-            max_age_slots: vec![Vec::with_capacity(TARGET_NUM_TRANSACTIONS_PER_BATCH); num_threads],
+            max_ages: vec![Vec::with_capacity(TARGET_NUM_TRANSACTIONS_PER_BATCH); num_threads],
             total_cus: vec![0; num_threads],
         }
     }
@@ -462,7 +516,7 @@ impl Batches {
     ) -> (
         Vec<TransactionId>,
         Vec<SanitizedTransaction>,
-        Vec<Slot>,
+        Vec<MaxAge>,
         u64,
     ) {
         (
@@ -475,7 +529,7 @@ impl Batches {
                 Vec::with_capacity(TARGET_NUM_TRANSACTIONS_PER_BATCH),
             ),
             core::mem::replace(
-                &mut self.max_age_slots[thread_id],
+                &mut self.max_ages[thread_id],
                 Vec::with_capacity(TARGET_NUM_TRANSACTIONS_PER_BATCH),
             ),
             core::mem::replace(&mut self.total_cus[thread_id], 0),
@@ -483,21 +537,92 @@ impl Batches {
     }
 }
 
+/// A transaction has been scheduled to a thread.
+struct TransactionSchedulingInfo {
+    thread_id: ThreadId,
+    transaction: SanitizedTransaction,
+    max_age: MaxAge,
+    cost: u64,
+}
+
+/// Error type for reasons a transaction could not be scheduled.
+enum TransactionSchedulingError {
+    /// Transaction was filtered out before locking.
+    Filtered,
+    /// Transaction cannot be scheduled due to conflicts, or
+    /// higher priority conflicting transactions are unschedulable.
+    UnschedulableConflicts,
+}
+
+fn try_schedule_transaction(
+    transaction_state: &mut TransactionState,
+    pre_lock_filter: impl Fn(&SanitizedTransaction) -> bool,
+    blocking_locks: &mut ReadWriteAccountSet,
+    account_locks: &mut ThreadAwareAccountLocks,
+    num_threads: usize,
+    thread_selector: impl Fn(ThreadSet) -> ThreadId,
+) -> Result<TransactionSchedulingInfo, TransactionSchedulingError> {
+    let transaction = &transaction_state.transaction_ttl().transaction;
+    if !pre_lock_filter(transaction) {
+        return Err(TransactionSchedulingError::Filtered);
+    }
+
+    // Check if this transaction conflicts with any blocked transactions
+    let message = transaction.message();
+    if !blocking_locks.check_locks(message) {
+        blocking_locks.take_locks(message);
+        return Err(TransactionSchedulingError::UnschedulableConflicts);
+    }
+
+    // Schedule the transaction if it can be.
+    let message = transaction.message();
+    let account_keys = message.account_keys();
+    let write_account_locks = account_keys
+        .iter()
+        .enumerate()
+        .filter_map(|(index, key)| message.is_writable(index).then_some(key));
+    let read_account_locks = account_keys
+        .iter()
+        .enumerate()
+        .filter_map(|(index, key)| (!message.is_writable(index)).then_some(key));
+
+    let Some(thread_id) = account_locks.try_lock_accounts(
+        write_account_locks,
+        read_account_locks,
+        ThreadSet::any(num_threads),
+        thread_selector,
+    ) else {
+        blocking_locks.take_locks(message);
+        return Err(TransactionSchedulingError::UnschedulableConflicts);
+    };
+
+    let sanitized_transaction_ttl = transaction_state.transition_to_pending();
+    let cost = transaction_state.cost();
+
+    Ok(TransactionSchedulingInfo {
+        thread_id,
+        transaction: sanitized_transaction_ttl.transaction,
+        max_age: sanitized_transaction_ttl.max_age,
+        cost,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use {
         super::*,
-        crate::banking_stage::consumer::TARGET_NUM_TRANSACTIONS_PER_BATCH,
+        crate::banking_stage::{
+            consumer::TARGET_NUM_TRANSACTIONS_PER_BATCH,
+            immutable_deserialized_packet::ImmutableDeserializedPacket,
+        },
         crossbeam_channel::{unbounded, Receiver},
         itertools::Itertools,
-        solana_cost_model::cost_model::CostModel,
-        solana_runtime::transaction_priority_details::TransactionPriorityDetails,
         solana_sdk::{
-            compute_budget::ComputeBudgetInstruction, feature_set::FeatureSet, hash::Hash,
-            message::Message, pubkey::Pubkey, signature::Keypair, signer::Signer,
-            system_instruction, transaction::Transaction,
+            clock::Slot, compute_budget::ComputeBudgetInstruction, hash::Hash, message::Message,
+            packet::Packet, pubkey::Pubkey, signature::Keypair, signer::Signer, system_instruction,
+            transaction::Transaction,
         },
-        std::borrow::Borrow,
+        std::{borrow::Borrow, sync::Arc},
     };
 
     macro_rules! txid {
@@ -562,25 +687,36 @@ mod tests {
         >,
     ) -> TransactionStateContainer {
         let mut container = TransactionStateContainer::with_capacity(10 * 1024);
-        for (index, (from_keypair, to_pubkeys, lamports, priority)) in
+        for (index, (from_keypair, to_pubkeys, lamports, compute_unit_price)) in
             tx_infos.into_iter().enumerate()
         {
             let id = TransactionId::new(index as u64);
-            let transaction =
-                prioritized_tranfers(from_keypair.borrow(), to_pubkeys, lamports, priority);
-            let transaction_cost = CostModel::calculate_cost(&transaction, &FeatureSet::default());
+            let transaction = prioritized_tranfers(
+                from_keypair.borrow(),
+                to_pubkeys,
+                lamports,
+                compute_unit_price,
+            );
+            let packet = Arc::new(
+                ImmutableDeserializedPacket::new(
+                    Packet::from_data(None, transaction.to_versioned_transaction()).unwrap(),
+                )
+                .unwrap(),
+            );
             let transaction_ttl = SanitizedTransactionTTL {
                 transaction,
-                max_age_slot: Slot::MAX,
+                max_age: MaxAge {
+                    epoch_invalidation_slot: Slot::MAX,
+                    alt_invalidation_slot: Slot::MAX,
+                },
             };
+            const TEST_TRANSACTION_COST: u64 = 5000;
             container.insert_new_transaction(
                 id,
                 transaction_ttl,
-                TransactionPriorityDetails {
-                    priority,
-                    compute_unit_limit: 1,
-                },
-                transaction_cost,
+                packet,
+                compute_unit_price,
+                TEST_TRANSACTION_COST,
             );
         }
 

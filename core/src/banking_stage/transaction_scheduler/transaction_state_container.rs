@@ -3,11 +3,13 @@ use {
         transaction_priority_id::TransactionPriorityId,
         transaction_state::{SanitizedTransactionTTL, TransactionState},
     },
-    crate::banking_stage::scheduler_messages::TransactionId,
+    crate::banking_stage::{
+        immutable_deserialized_packet::ImmutableDeserializedPacket,
+        scheduler_messages::TransactionId,
+    },
+    itertools::MinMaxResult,
     min_max_heap::MinMaxHeap,
-    solana_cost_model::transaction_cost::TransactionCost,
-    solana_runtime::transaction_priority_details::TransactionPriorityDetails,
-    std::collections::HashMap,
+    std::{collections::HashMap, sync::Arc},
 };
 
 /// This structure will hold `TransactionState` for the entirety of a
@@ -18,9 +20,9 @@ use {
 /// 2. Inserted into `TransactionStateContainer` by `BankingStage`
 /// 3. Popped in priority-order by scheduler, and transitioned to `Pending` state
 /// 4. Processed by `ConsumeWorker`
-///   a. If consumed, remove `Pending` state from the `TransactionStateContainer`
-///   b. If retryable, transition back to `Unprocessed` state.
-///      Re-insert to the queue, and return to step 3.
+///    a. If consumed, remove `Pending` state from the `TransactionStateContainer`
+///    b. If retryable, transition back to `Unprocessed` state.
+///       Re-insert to the queue, and return to step 3.
 ///
 /// The structure is composed of two main components:
 /// 1. A priority queue of wrapped `TransactionId`s, which are used to
@@ -82,34 +84,20 @@ impl TransactionStateContainer {
             .map(|state| state.transaction_ttl())
     }
 
-    /// Take `SanitizedTransactionTTL` by id.
-    /// This transitions the transaction to `Pending` state.
-    /// Panics if the transaction does not exist.
-    pub(crate) fn take_transaction(&mut self, id: &TransactionId) -> SanitizedTransactionTTL {
-        self.id_to_transaction_state
-            .get_mut(id)
-            .expect("transaction must exist")
-            .transition_to_pending()
-    }
-
     /// Insert a new transaction into the container's queues and maps.
     /// Returns `true` if a packet was dropped due to capacity limits.
     pub(crate) fn insert_new_transaction(
         &mut self,
         transaction_id: TransactionId,
         transaction_ttl: SanitizedTransactionTTL,
-        transaction_priority_details: TransactionPriorityDetails,
-        transaction_cost: TransactionCost,
+        packet: Arc<ImmutableDeserializedPacket>,
+        priority: u64,
+        cost: u64,
     ) -> bool {
-        let priority_id =
-            TransactionPriorityId::new(transaction_priority_details.priority, transaction_id);
+        let priority_id = TransactionPriorityId::new(priority, transaction_id);
         self.id_to_transaction_state.insert(
             transaction_id,
-            TransactionState::new(
-                transaction_ttl,
-                transaction_priority_details,
-                transaction_cost,
-            ),
+            TransactionState::new(transaction_ttl, packet, priority, cost),
         );
         self.push_id_into_queue(priority_id)
     }
@@ -149,18 +137,28 @@ impl TransactionStateContainer {
             .remove(id)
             .expect("transaction must exist");
     }
+
+    pub(crate) fn get_min_max_priority(&self) -> MinMaxResult<u64> {
+        match self.priority_queue.peek_min() {
+            Some(min) => match self.priority_queue.peek_max() {
+                Some(max) => MinMaxResult::MinMax(min.priority, max.priority),
+                None => MinMaxResult::OneElement(min.priority),
+            },
+            None => MinMaxResult::NoElements,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use {
         super::*,
-        solana_cost_model::cost_model::CostModel,
+        crate::banking_stage::scheduler_messages::MaxAge,
         solana_sdk::{
             compute_budget::ComputeBudgetInstruction,
-            feature_set::FeatureSet,
             hash::Hash,
             message::Message,
+            packet::Packet,
             signature::Keypair,
             signer::Signer,
             slot_history::Slot,
@@ -169,12 +167,14 @@ mod tests {
         },
     };
 
+    /// Returns (transaction_ttl, priority, cost)
     fn test_transaction(
         priority: u64,
     ) -> (
         SanitizedTransactionTTL,
-        TransactionPriorityDetails,
-        TransactionCost,
+        Arc<ImmutableDeserializedPacket>,
+        u64,
+        u64,
     ) {
         let from_keypair = Keypair::new();
         let ixs = vec![
@@ -191,31 +191,33 @@ mod tests {
             message,
             Hash::default(),
         ));
-        let transaction_cost = CostModel::calculate_cost(&tx, &FeatureSet::default());
+        let packet = Arc::new(
+            ImmutableDeserializedPacket::new(
+                Packet::from_data(None, tx.to_versioned_transaction()).unwrap(),
+            )
+            .unwrap(),
+        );
         let transaction_ttl = SanitizedTransactionTTL {
             transaction: tx,
-            max_age_slot: Slot::MAX,
-        };
-        (
-            transaction_ttl,
-            TransactionPriorityDetails {
-                priority,
-                compute_unit_limit: 0,
+            max_age: MaxAge {
+                epoch_invalidation_slot: Slot::MAX,
+                alt_invalidation_slot: Slot::MAX,
             },
-            transaction_cost,
-        )
+        };
+        const TEST_TRANSACTION_COST: u64 = 5000;
+        (transaction_ttl, packet, priority, TEST_TRANSACTION_COST)
     }
 
     fn push_to_container(container: &mut TransactionStateContainer, num: usize) {
         for id in 0..num as u64 {
             let priority = id;
-            let (transaction_ttl, transaction_priority_details, transaction_cost) =
-                test_transaction(priority);
+            let (transaction_ttl, packet, priority, cost) = test_transaction(priority);
             container.insert_new_transaction(
                 TransactionId::new(id),
                 transaction_ttl,
-                transaction_priority_details,
-                transaction_cost,
+                packet,
+                priority,
+                cost,
             );
         }
     }

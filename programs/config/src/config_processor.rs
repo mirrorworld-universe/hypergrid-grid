@@ -3,7 +3,8 @@
 use {
     crate::ConfigKeys,
     bincode::deserialize,
-    solana_program_runtime::{declare_process_instruction, ic_msg},
+    solana_log_collector::ic_msg,
+    solana_program_runtime::declare_process_instruction,
     solana_sdk::{
         instruction::InstructionError, program_utils::limited_deserialize, pubkey::Pubkey,
         transaction_context::IndexOfAccount,
@@ -127,7 +128,7 @@ declare_process_instruction!(Entrypoint, DEFAULT_COMPUTE_UNITS, |invoke_context|
         ic_msg!(invoke_context, "instruction data too large");
         return Err(InstructionError::InvalidInstructionData);
     }
-    config_account.get_data_mut(&invoke_context.feature_set)?[..data.len()].copy_from_slice(data);
+    config_account.get_data_mut()?[..data.len()].copy_from_slice(data);
     Ok(())
 });
 

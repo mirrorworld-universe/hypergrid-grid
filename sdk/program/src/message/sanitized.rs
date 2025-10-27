@@ -1,3 +1,8 @@
+#[deprecated(
+    since = "2.1.0",
+    note = "Use solana_transaction_error::SanitizeMessageError instead"
+)]
+pub use solana_transaction_error::SanitizeMessageError;
 use {
     crate::{
         ed25519_program,
@@ -6,19 +11,17 @@ use {
         message::{
             legacy,
             v0::{self, LoadedAddresses},
-            AccountKeys, AddressLoader, AddressLoaderError, MessageHeader,
-            SanitizedVersionedMessage, VersionedMessage,
+            AccountKeys, AddressLoader, MessageHeader, SanitizedVersionedMessage, VersionedMessage,
         },
         nonce::NONCED_TX_MARKER_IX_INDEX,
         program_utils::limited_deserialize,
         pubkey::Pubkey,
-        sanitize::{Sanitize, SanitizeError},
         secp256k1_program,
         solana_program::{system_instruction::SystemInstruction, system_program},
         sysvar::instructions::{BorrowedAccountMeta, BorrowedInstruction},
     },
-    std::{borrow::Cow, convert::TryFrom},
-    thiserror::Error,
+    solana_sanitize::Sanitize,
+    std::{borrow::Cow, collections::HashSet, convert::TryFrom},
 };
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -31,12 +34,16 @@ pub struct LegacyMessage<'a> {
 }
 
 impl<'a> LegacyMessage<'a> {
-    pub fn new(message: legacy::Message) -> Self {
+    pub fn new(message: legacy::Message, reserved_account_keys: &HashSet<Pubkey>) -> Self {
         let is_writable_account_cache = message
             .account_keys
             .iter()
             .enumerate()
-            .map(|(i, _key)| message.is_writable(i))
+            .map(|(i, _key)| {
+                message.is_writable_index(i)
+                    && !reserved_account_keys.contains(&message.account_keys[i])
+                    && !message.demote_program_id(i)
+            })
             .collect::<Vec<_>>();
         Self {
             message: Cow::Owned(message),
@@ -76,36 +83,6 @@ pub enum SanitizedMessage {
     V0(v0::LoadedMessage<'static>),
 }
 
-#[derive(PartialEq, Debug, Error, Eq, Clone)]
-pub enum SanitizeMessageError {
-    #[error("index out of bounds")]
-    IndexOutOfBounds,
-    #[error("value out of bounds")]
-    ValueOutOfBounds,
-    #[error("invalid value")]
-    InvalidValue,
-    #[error("{0}")]
-    AddressLoaderError(#[from] AddressLoaderError),
-}
-
-impl From<SanitizeError> for SanitizeMessageError {
-    fn from(err: SanitizeError) -> Self {
-        match err {
-            SanitizeError::IndexOutOfBounds => Self::IndexOutOfBounds,
-            SanitizeError::ValueOutOfBounds => Self::ValueOutOfBounds,
-            SanitizeError::InvalidValue => Self::InvalidValue,
-        }
-    }
-}
-
-impl TryFrom<legacy::Message> for SanitizedMessage {
-    type Error = SanitizeMessageError;
-    fn try_from(message: legacy::Message) -> Result<Self, Self::Error> {
-        message.sanitize()?;
-        Ok(Self::Legacy(LegacyMessage::new(message)))
-    }
-}
-
 impl SanitizedMessage {
     /// Create a sanitized message from a sanitized versioned message.
     /// If the input message uses address tables, attempt to look up the
@@ -113,17 +90,34 @@ impl SanitizedMessage {
     pub fn try_new(
         sanitized_msg: SanitizedVersionedMessage,
         address_loader: impl AddressLoader,
+        reserved_account_keys: &HashSet<Pubkey>,
     ) -> Result<Self, SanitizeMessageError> {
         Ok(match sanitized_msg.message {
             VersionedMessage::Legacy(message) => {
-                SanitizedMessage::Legacy(LegacyMessage::new(message))
+                SanitizedMessage::Legacy(LegacyMessage::new(message, reserved_account_keys))
             }
             VersionedMessage::V0(message) => {
                 let loaded_addresses =
                     address_loader.load_addresses(&message.address_table_lookups)?;
-                SanitizedMessage::V0(v0::LoadedMessage::new(message, loaded_addresses))
+                SanitizedMessage::V0(v0::LoadedMessage::new(
+                    message,
+                    loaded_addresses,
+                    reserved_account_keys,
+                ))
             }
         })
+    }
+
+    /// Create a sanitized legacy message
+    pub fn try_from_legacy_message(
+        message: legacy::Message,
+        reserved_account_keys: &HashSet<Pubkey>,
+    ) -> Result<Self, SanitizeMessageError> {
+        message.sanitize()?;
+        Ok(Self::Legacy(LegacyMessage::new(
+            message,
+            reserved_account_keys,
+        )))
     }
 
     /// Return true if this message contains duplicate account keys
@@ -156,7 +150,7 @@ impl SanitizedMessage {
     pub fn fee_payer(&self) -> &Pubkey {
         self.account_keys()
             .get(0)
-            .expect("sanitized message always has non-program fee payer at index 0")
+            .expect("sanitized messages always have a fee payer at index 0")
     }
 
     /// The hash of a recent block, used for timing out a transaction
@@ -209,7 +203,14 @@ impl SanitizedMessage {
 
     /// Returns true if the account at the specified index is an input to some
     /// program instruction in this message.
-    fn is_key_passed_to_program(&self, key_index: usize) -> bool {
+    #[deprecated(since = "2.0.0", note = "Please use `is_instruction_account` instead")]
+    pub fn is_key_passed_to_program(&self, key_index: usize) -> bool {
+        self.is_instruction_account(key_index)
+    }
+
+    /// Returns true if the account at the specified index is an input to some
+    /// program instruction in this message.
+    pub fn is_instruction_account(&self, key_index: usize) -> bool {
         if let Ok(key_index) = u8::try_from(key_index) {
             self.instructions()
                 .iter()
@@ -230,8 +231,12 @@ impl SanitizedMessage {
 
     /// Returns true if the account at the specified index is not invoked as a
     /// program or, if invoked, is passed to a program.
+    #[deprecated(
+        since = "2.0.0",
+        note = "Please use `is_invoked` and `is_instruction_account` instead"
+    )]
     pub fn is_non_loader_key(&self, key_index: usize) -> bool {
-        !self.is_invoked(key_index) || self.is_key_passed_to_program(key_index)
+        !self.is_invoked(key_index) || self.is_instruction_account(key_index)
     }
 
     /// Returns true if the account at the specified index is writable by the
@@ -346,18 +351,19 @@ impl SanitizedMessage {
             })
     }
 
+    #[deprecated(
+        since = "2.1.0",
+        note = "Please use `SanitizedMessage::num_total_signatures` instead."
+    )]
     pub fn num_signatures(&self) -> u64 {
-        let mut num_signatures = u64::from(self.header().num_required_signatures);
-        // This next part is really calculating the number of pre-processor
-        // operations being done and treating them like a signature
-        for (program_id, instruction) in self.program_instructions_iter() {
-            if secp256k1_program::check_id(program_id) || ed25519_program::check_id(program_id) {
-                if let Some(num_verifies) = instruction.data.first() {
-                    num_signatures = num_signatures.saturating_add(u64::from(*num_verifies));
-                }
-            }
-        }
-        num_signatures
+        self.num_total_signatures()
+    }
+
+    /// Returns the total number of signatures in the message.
+    /// This includes required transaction signatures as well as any
+    /// pre-compile signatures that are attached in instructions.
+    pub fn num_total_signatures(&self) -> u64 {
+        self.get_signature_details().total_signatures()
     }
 
     /// Returns the number of requested write-locks in this message.
@@ -367,6 +373,80 @@ impl SanitizedMessage {
             .len()
             .saturating_sub(self.num_readonly_accounts()) as u64
     }
+
+    /// return detailed signature counts
+    pub fn get_signature_details(&self) -> TransactionSignatureDetails {
+        let mut transaction_signature_details = TransactionSignatureDetails {
+            num_transaction_signatures: u64::from(self.header().num_required_signatures),
+            ..TransactionSignatureDetails::default()
+        };
+
+        // counting the number of pre-processor operations separately
+        for (program_id, instruction) in self.program_instructions_iter() {
+            if secp256k1_program::check_id(program_id) {
+                if let Some(num_verifies) = instruction.data.first() {
+                    transaction_signature_details.num_secp256k1_instruction_signatures =
+                        transaction_signature_details
+                            .num_secp256k1_instruction_signatures
+                            .saturating_add(u64::from(*num_verifies));
+                }
+            } else if ed25519_program::check_id(program_id) {
+                if let Some(num_verifies) = instruction.data.first() {
+                    transaction_signature_details.num_ed25519_instruction_signatures =
+                        transaction_signature_details
+                            .num_ed25519_instruction_signatures
+                            .saturating_add(u64::from(*num_verifies));
+                }
+            }
+        }
+
+        transaction_signature_details
+    }
+}
+
+/// Transaction signature details including the number of transaction signatures
+/// and precompile signatures.
+#[derive(Debug, Default)]
+pub struct TransactionSignatureDetails {
+    num_transaction_signatures: u64,
+    num_secp256k1_instruction_signatures: u64,
+    num_ed25519_instruction_signatures: u64,
+}
+
+impl TransactionSignatureDetails {
+    pub fn new(
+        num_transaction_signatures: u64,
+        num_secp256k1_instruction_signatures: u64,
+        num_ed25519_instruction_signatures: u64,
+    ) -> Self {
+        Self {
+            num_transaction_signatures,
+            num_secp256k1_instruction_signatures,
+            num_ed25519_instruction_signatures,
+        }
+    }
+
+    /// return total number of signature, treating pre-processor operations as signature
+    pub fn total_signatures(&self) -> u64 {
+        self.num_transaction_signatures
+            .saturating_add(self.num_secp256k1_instruction_signatures)
+            .saturating_add(self.num_ed25519_instruction_signatures)
+    }
+
+    /// return the number of transaction signatures
+    pub fn num_transaction_signatures(&self) -> u64 {
+        self.num_transaction_signatures
+    }
+
+    /// return the number of secp256k1 instruction signatures
+    pub fn num_secp256k1_instruction_signatures(&self) -> u64 {
+        self.num_secp256k1_instruction_signatures
+    }
+
+    /// return the number of ed25519 instruction signatures
+    pub fn num_ed25519_instruction_signatures(&self) -> u64 {
+        self.num_ed25519_instruction_signatures
+    }
 }
 
 #[cfg(test)]
@@ -374,20 +454,25 @@ mod tests {
     use {super::*, crate::message::v0, std::collections::HashSet};
 
     #[test]
-    fn test_try_from_message() {
+    fn test_try_from_legacy_message() {
         let legacy_message_with_no_signers = legacy::Message {
             account_keys: vec![Pubkey::new_unique()],
             ..legacy::Message::default()
         };
 
         assert_eq!(
-            SanitizedMessage::try_from(legacy_message_with_no_signers).err(),
+            SanitizedMessage::try_from_legacy_message(
+                legacy_message_with_no_signers,
+                &HashSet::default(),
+            )
+            .err(),
             Some(SanitizeMessageError::IndexOutOfBounds),
         );
     }
 
     #[test]
     fn test_is_non_loader_key() {
+        #![allow(deprecated)]
         let key0 = Pubkey::new_unique();
         let key1 = Pubkey::new_unique();
         let loader_key = Pubkey::new_unique();
@@ -396,14 +481,17 @@ mod tests {
             CompiledInstruction::new(2, &(), vec![0, 1]),
         ];
 
-        let message = SanitizedMessage::try_from(legacy::Message::new_with_compiled_instructions(
-            1,
-            0,
-            2,
-            vec![key0, key1, loader_key],
-            Hash::default(),
-            instructions,
-        ))
+        let message = SanitizedMessage::try_from_legacy_message(
+            legacy::Message::new_with_compiled_instructions(
+                1,
+                0,
+                2,
+                vec![key0, key1, loader_key],
+                Hash::default(),
+                instructions,
+            ),
+            &HashSet::default(),
+        )
         .unwrap();
 
         assert!(message.is_non_loader_key(0));
@@ -420,15 +508,18 @@ mod tests {
         let key4 = Pubkey::new_unique();
         let key5 = Pubkey::new_unique();
 
-        let legacy_message = SanitizedMessage::try_from(legacy::Message {
-            header: MessageHeader {
-                num_required_signatures: 2,
-                num_readonly_signed_accounts: 1,
-                num_readonly_unsigned_accounts: 1,
+        let legacy_message = SanitizedMessage::try_from_legacy_message(
+            legacy::Message {
+                header: MessageHeader {
+                    num_required_signatures: 2,
+                    num_readonly_signed_accounts: 1,
+                    num_readonly_unsigned_accounts: 1,
+                },
+                account_keys: vec![key0, key1, key2, key3],
+                ..legacy::Message::default()
             },
-            account_keys: vec![key0, key1, key2, key3],
-            ..legacy::Message::default()
-        })
+            &HashSet::default(),
+        )
         .unwrap();
 
         assert_eq!(legacy_message.num_readonly_accounts(), 2);
@@ -447,6 +538,7 @@ mod tests {
                 writable: vec![key4],
                 readonly: vec![key5],
             },
+            &HashSet::default(),
         ));
 
         assert_eq!(v0_message.num_readonly_accounts(), 3);
@@ -464,14 +556,17 @@ mod tests {
             CompiledInstruction::new(3, &(), vec![0, 0]),
         ];
 
-        let message = SanitizedMessage::try_from(legacy::Message::new_with_compiled_instructions(
-            2,
-            1,
-            2,
-            vec![signer0, signer1, non_signer, loader_key],
-            Hash::default(),
-            instructions,
-        ))
+        let message = SanitizedMessage::try_from_legacy_message(
+            legacy::Message::new_with_compiled_instructions(
+                2,
+                1,
+                2,
+                vec![signer0, signer1, non_signer, loader_key],
+                Hash::default(),
+                instructions,
+            ),
+            &HashSet::default(),
+        )
         .unwrap();
 
         assert_eq!(
@@ -502,15 +597,18 @@ mod tests {
         let key4 = Pubkey::new_unique();
         let key5 = Pubkey::new_unique();
 
-        let legacy_message = SanitizedMessage::try_from(legacy::Message {
-            header: MessageHeader {
-                num_required_signatures: 2,
-                num_readonly_signed_accounts: 1,
-                num_readonly_unsigned_accounts: 1,
+        let legacy_message = SanitizedMessage::try_from_legacy_message(
+            legacy::Message {
+                header: MessageHeader {
+                    num_required_signatures: 2,
+                    num_readonly_signed_accounts: 1,
+                    num_readonly_unsigned_accounts: 1,
+                },
+                account_keys: vec![key0, key1, key2, key3],
+                ..legacy::Message::default()
             },
-            account_keys: vec![key0, key1, key2, key3],
-            ..legacy::Message::default()
-        })
+            &HashSet::default(),
+        )
         .unwrap();
         match legacy_message {
             SanitizedMessage::Legacy(message) => {
@@ -542,6 +640,7 @@ mod tests {
                 writable: vec![key4],
                 readonly: vec![key5],
             },
+            &HashSet::default(),
         ));
         match v0_message {
             SanitizedMessage::V0(message) => {
@@ -560,5 +659,48 @@ mod tests {
                 panic!("Expect to be SanitizedMessage::V0")
             }
         }
+    }
+
+    #[test]
+    fn test_get_signature_details() {
+        let key0 = Pubkey::new_unique();
+        let key1 = Pubkey::new_unique();
+        let loader_key = Pubkey::new_unique();
+
+        let loader_instr = CompiledInstruction::new(2, &(), vec![0, 1]);
+        let mock_secp256k1_instr = CompiledInstruction::new(3, &[1u8; 10], vec![]);
+        let mock_ed25519_instr = CompiledInstruction::new(4, &[5u8; 10], vec![]);
+
+        let message = SanitizedMessage::try_from_legacy_message(
+            legacy::Message::new_with_compiled_instructions(
+                2,
+                1,
+                2,
+                vec![
+                    key0,
+                    key1,
+                    loader_key,
+                    secp256k1_program::id(),
+                    ed25519_program::id(),
+                ],
+                Hash::default(),
+                vec![
+                    loader_instr,
+                    mock_secp256k1_instr.clone(),
+                    mock_ed25519_instr,
+                    mock_secp256k1_instr,
+                ],
+            ),
+            &HashSet::new(),
+        )
+        .unwrap();
+
+        let signature_details = message.get_signature_details();
+        // expect 2 required transaction signatures
+        assert_eq!(2, signature_details.num_transaction_signatures);
+        // expect 2 secp256k1 instruction signatures - 1 for each mock_secp2561k1_instr
+        assert_eq!(2, signature_details.num_secp256k1_instruction_signatures);
+        // expect 5 ed25519 instruction signatures from mock_ed25519_instr
+        assert_eq!(5, signature_details.num_ed25519_instruction_signatures);
     }
 }

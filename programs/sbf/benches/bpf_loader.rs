@@ -2,11 +2,14 @@
 #![cfg(feature = "sbf_c")]
 #![allow(clippy::uninlined_format_args)]
 #![allow(clippy::arithmetic_side_effects)]
-#![cfg_attr(not(target_arch = "x86_64"), allow(dead_code, unused_imports))]
+#![cfg_attr(
+    any(target_os = "windows", not(target_arch = "x86_64")),
+    allow(dead_code, unused_imports)
+)]
 
 use {
-    solana_rbpf::memory_region::MemoryState,
-    solana_sdk::feature_set::bpf_account_data_direct_mapping, std::slice,
+    solana_feature_set::bpf_account_data_direct_mapping, solana_rbpf::memory_region::MemoryState,
+    solana_sdk::signer::keypair::Keypair, std::slice,
 };
 
 extern crate test;
@@ -17,8 +20,10 @@ use {
         create_vm, serialization::serialize_parameters,
         syscalls::create_program_runtime_environment_v1,
     },
+    solana_compute_budget::compute_budget::ComputeBudget,
+    solana_feature_set::FeatureSet,
     solana_measure::measure::Measure,
-    solana_program_runtime::{compute_budget::ComputeBudget, invoke_context::InvokeContext},
+    solana_program_runtime::invoke_context::InvokeContext,
     solana_rbpf::{
         ebpf::MM_INPUT_START, elf::Executable, memory_region::MemoryRegion,
         verifier::RequisiteVerifier, vm::ContextObject,
@@ -27,14 +32,13 @@ use {
         bank::Bank,
         bank_client::BankClient,
         genesis_utils::{create_genesis_config, GenesisConfigInfo},
-        loader_utils::{load_program, load_program_from_file},
+        loader_utils::{load_program_from_file, load_upgradeable_program_and_advance_slot},
     },
     solana_sdk::{
         account::AccountSharedData,
         bpf_loader,
         client::SyncClient,
         entrypoint::SUCCESS,
-        feature_set::{self, FeatureSet},
         instruction::{AccountMeta, Instruction},
         message::Message,
         native_loader,
@@ -102,7 +106,7 @@ fn bench_program_create_executable(bencher: &mut Bencher) {
 }
 
 #[bench]
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(not(target_os = "windows"), target_arch = "x86_64"))]
 fn bench_program_alu(bencher: &mut Bencher) {
     let ns_per_s = 1000000000;
     let one_million = 1000000;
@@ -115,7 +119,7 @@ fn bench_program_alu(bencher: &mut Bencher) {
     with_mock_invoke_context!(invoke_context, bpf_loader::id(), 10000001);
 
     let program_runtime_environment = create_program_runtime_environment_v1(
-        &invoke_context.feature_set,
+        invoke_context.get_feature_set(),
         &ComputeBudget::default(),
         true,
         false,
@@ -134,11 +138,11 @@ fn bench_program_alu(bencher: &mut Bencher) {
         vec![],
         &mut invoke_context,
     );
-    let mut vm = vm.unwrap();
+    let (mut vm, _, _) = vm.unwrap();
 
     println!("Interpreted:");
     vm.context_object_pointer
-        .mock_set_remaining(std::i64::MAX as u64);
+        .mock_set_remaining(i64::MAX as u64);
     let (instructions, result) = vm.execute_program(&executable, true);
     assert_eq!(SUCCESS, result.unwrap());
     assert_eq!(ARMSTRONG_LIMIT, LittleEndian::read_u64(&inner_iter));
@@ -149,7 +153,7 @@ fn bench_program_alu(bencher: &mut Bencher) {
 
     bencher.iter(|| {
         vm.context_object_pointer
-            .mock_set_remaining(std::i64::MAX as u64);
+            .mock_set_remaining(i64::MAX as u64);
         vm.execute_program(&executable, true).1.unwrap();
     });
     let summary = bencher.bench(|_bencher| Ok(())).unwrap().unwrap();
@@ -170,7 +174,7 @@ fn bench_program_alu(bencher: &mut Bencher) {
 
     bencher.iter(|| {
         vm.context_object_pointer
-            .mock_set_remaining(std::i64::MAX as u64);
+            .mock_set_remaining(i64::MAX as u64);
         vm.execute_program(&executable, false).1.unwrap();
     });
     let summary = bencher.bench(|_bencher| Ok(())).unwrap().unwrap();
@@ -185,31 +189,26 @@ fn bench_program_alu(bencher: &mut Bencher) {
 #[bench]
 fn bench_program_execute_noop(bencher: &mut Bencher) {
     let GenesisConfigInfo {
-        mut genesis_config,
+        genesis_config,
         mint_keypair,
         ..
     } = create_genesis_config(50);
-
-    // deactivate `disable_bpf_loader_instructions` feature so that the program
-    // can be loaded, finalized and benched.
-    genesis_config
-        .accounts
-        .remove(&feature_set::disable_bpf_loader_instructions::id());
-
-    genesis_config
-        .accounts
-        .remove(&feature_set::deprecate_executable_meta_update_in_bpf_loader::id());
 
     let bank = Bank::new_for_benches(&genesis_config);
     let (bank, bank_forks) = bank.wrap_with_bank_forks_for_tests();
     let mut bank_client = BankClient::new_shared(bank.clone());
 
-    let invoke_program_id = load_program(&bank_client, &bpf_loader::id(), &mint_keypair, "noop");
-    let bank = bank_client
-        .advance_slot(1, bank_forks.as_ref(), &Pubkey::default())
-        .expect("Failed to advance the slot");
-
+    let authority_keypair = Keypair::new();
     let mint_pubkey = mint_keypair.pubkey();
+
+    let (_, invoke_program_id) = load_upgradeable_program_and_advance_slot(
+        &mut bank_client,
+        bank_forks.as_ref(),
+        &mint_keypair,
+        &authority_keypair,
+        "noop",
+    );
+
     let account_metas = vec![AccountMeta::new(mint_pubkey, true)];
 
     let instruction =
@@ -236,10 +235,10 @@ fn bench_create_vm(bencher: &mut Bencher) {
     invoke_context.mock_set_remaining(BUDGET);
 
     let direct_mapping = invoke_context
-        .feature_set
+        .get_feature_set()
         .is_active(&bpf_account_data_direct_mapping::id());
     let program_runtime_environment = create_program_runtime_environment_v1(
-        &invoke_context.feature_set,
+        invoke_context.get_feature_set(),
         &ComputeBudget::default(),
         true,
         false,
@@ -258,7 +257,6 @@ fn bench_create_vm(bencher: &mut Bencher) {
             .get_current_instruction_context()
             .unwrap(),
         !direct_mapping, // copy_account_data,
-        &invoke_context.feature_set,
     )
     .unwrap();
 
@@ -282,7 +280,7 @@ fn bench_instruction_count_tuner(_bencher: &mut Bencher) {
     invoke_context.mock_set_remaining(BUDGET);
 
     let direct_mapping = invoke_context
-        .feature_set
+        .get_feature_set()
         .is_active(&bpf_account_data_direct_mapping::id());
 
     // Serialize account data
@@ -293,12 +291,11 @@ fn bench_instruction_count_tuner(_bencher: &mut Bencher) {
             .get_current_instruction_context()
             .unwrap(),
         !direct_mapping, // copy_account_data
-        &invoke_context.feature_set,
     )
     .unwrap();
 
     let program_runtime_environment = create_program_runtime_environment_v1(
-        &invoke_context.feature_set,
+        invoke_context.get_feature_set(),
         &ComputeBudget::default(),
         true,
         false,
@@ -316,7 +313,7 @@ fn bench_instruction_count_tuner(_bencher: &mut Bencher) {
         account_lengths,
         &mut invoke_context,
     );
-    let mut vm = vm.unwrap();
+    let (mut vm, _, _) = vm.unwrap();
 
     let mut measure = Measure::start("tune");
     let (instructions, _result) = vm.execute_program(&executable, true);

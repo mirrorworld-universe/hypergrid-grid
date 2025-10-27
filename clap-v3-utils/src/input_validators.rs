@@ -1,5 +1,8 @@
 use {
-    crate::keypair::{parse_signer_source, SignerSourceKind, ASK_KEYWORD},
+    crate::{
+        input_parsers::signer::{SignerSource, SignerSourceKind},
+        keypair::ASK_KEYWORD,
+    },
     chrono::DateTime,
     solana_sdk::{
         clock::{Epoch, Slot},
@@ -119,7 +122,7 @@ pub fn is_prompt_signer_source(string: &str) -> Result<(), String> {
     if string == ASK_KEYWORD {
         return Ok(());
     }
-    match parse_signer_source(string)
+    match SignerSource::parse(string)
         .map_err(|err| format!("{err}"))?
         .kind
     {
@@ -147,14 +150,14 @@ where
 // produce a pubkey()
 #[deprecated(
     since = "1.18.0",
-    note = "please use `SignerSourceParserBuilder::default().allow_pubkey().allow_file_path().build()` instead"
+    note = "please use `SignerSourceParserBuilder::default().allow_all().build()` instead"
 )]
 #[allow(deprecated)]
 pub fn is_valid_pubkey<T>(string: T) -> Result<(), String>
 where
     T: AsRef<str> + Display,
 {
-    match parse_signer_source(string.as_ref())
+    match SignerSource::parse(string.as_ref())
         .map_err(|err| format!("{err}"))?
         .kind
     {
@@ -173,7 +176,7 @@ where
 // also provided and correct happens in parsing, not in validation.
 #[deprecated(
     since = "1.18.0",
-    note = "please use `SignerSourceParserBuilder::default().build()` instead"
+    note = "please use `SignerSourceParserBuilder::default().allow_all().build()` instead"
 )]
 #[allow(deprecated)]
 pub fn is_valid_signer<T>(string: T) -> Result<(), String>

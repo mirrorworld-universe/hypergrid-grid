@@ -1,15 +1,30 @@
+#[cfg(feature = "frozen-abi")]
+use solana_frozen_abi_macro::{AbiEnumVisitor, AbiExample};
 use {
-    serde::{Deserialize, Serialize},
-    solana_frozen_abi_macro::{AbiEnumVisitor, AbiExample},
+    crate::slot_hashes::get_entries,
+    serde_derive::{Deserialize, Serialize},
+    solana_clock::Slot,
     solana_program::{
         address_lookup_table::error::AddressLookupError,
-        clock::Slot,
         instruction::InstructionError,
         pubkey::Pubkey,
         slot_hashes::{SlotHashes, MAX_ENTRIES},
     },
     std::borrow::Cow,
 };
+
+/// The lookup table may be in a deactivating state until
+/// the `deactivation_slot`` is no longer "recent".
+/// This function returns a conservative estimate for the
+/// last block that the table may be used for lookups.
+/// This estimate may be incorrect due to skipped blocks,
+/// however, if the current slot is lower than the returned
+/// value, the table is guaranteed to still be in the
+/// deactivating state.
+#[inline]
+pub fn estimate_last_valid_slot(deactivation_slot: Slot) -> Slot {
+    deactivation_slot.saturating_add(get_entries() as Slot)
+}
 
 /// The maximum number of addresses that a lookup table can hold
 pub const LOOKUP_TABLE_MAX_ADDRESSES: usize = 256;
@@ -26,7 +41,8 @@ pub enum LookupTableStatus {
 }
 
 /// Address lookup table metadata
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone, AbiExample)]
+#[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub struct LookupTableMeta {
     /// Lookup tables cannot be closed until the deactivation slot is
     /// no longer "recent" (not accessible in the `SlotHashes` sysvar).
@@ -103,7 +119,8 @@ impl LookupTableMeta {
 }
 
 /// Program account states
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone, AbiExample, AbiEnumVisitor)]
+#[cfg_attr(feature = "frozen-abi", derive(AbiEnumVisitor, AbiExample))]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 #[allow(clippy::large_enum_variant)]
 pub enum ProgramState {
     /// Account is not initialized.
@@ -112,7 +129,8 @@ pub enum ProgramState {
     LookupTable(LookupTableMeta),
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, AbiExample)]
+#[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct AddressLookupTable<'a> {
     pub meta: LookupTableMeta,
     pub addresses: Cow<'a, [Pubkey]>,
@@ -168,13 +186,27 @@ impl<'a> AddressLookupTable<'a> {
         indexes: &[u8],
         slot_hashes: &SlotHashes,
     ) -> Result<Vec<Pubkey>, AddressLookupError> {
-        let active_addresses_len = self.get_active_addresses_len(current_slot, slot_hashes)?;
-        let active_addresses = &self.addresses[0..active_addresses_len];
-        indexes
-            .iter()
-            .map(|idx| active_addresses.get(*idx as usize).cloned())
+        self.lookup_iter(current_slot, indexes, slot_hashes)?
             .collect::<Option<_>>()
             .ok_or(AddressLookupError::InvalidLookupIndex)
+    }
+
+    /// Lookup addresses for provided table indexes. Since lookups are performed on
+    /// tables which are not read-locked, this implementation needs to be careful
+    /// about resolving addresses consistently.
+    /// If ANY of the indexes return `None`, the entire lookup should be considered
+    /// invalid.
+    pub fn lookup_iter(
+        &'a self,
+        current_slot: Slot,
+        indexes: &'a [u8],
+        slot_hashes: &SlotHashes,
+    ) -> Result<impl Iterator<Item = Option<Pubkey>> + 'a, AddressLookupError> {
+        let active_addresses_len = self.get_active_addresses_len(current_slot, slot_hashes)?;
+        let active_addresses = &self.addresses[0..active_addresses_len];
+        Ok(indexes
+            .iter()
+            .map(|idx| active_addresses.get(*idx as usize).cloned()))
     }
 
     /// Serialize an address table including its addresses

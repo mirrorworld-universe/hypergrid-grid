@@ -11,7 +11,7 @@ pub enum TieredStorageError {
     #[error("AttemptToUpdateReadOnly: attempted to update read-only file {0}")]
     AttemptToUpdateReadOnly(PathBuf),
 
-    #[error("UnknownFormat: the tiered storage format is unavailable for file {0}")]
+    #[error("UnknownFormat: the tiered storage format is unknown for file {0}")]
     UnknownFormat(PathBuf),
 
     #[error("Unsupported: the feature is not yet supported")]
@@ -31,4 +31,7 @@ pub enum TieredStorageError {
 
     #[error("OffsetAlignmentError: offset {0} must be multiple of {1}")]
     OffsetAlignmentError(usize, usize),
+
+    #[error("failed to flush hot storage writer: {0}")]
+    FlushHotWriter(#[source] std::io::Error),
 }

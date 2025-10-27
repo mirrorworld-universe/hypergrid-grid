@@ -4,21 +4,23 @@ use {
         active_stats::{ActiveStatItem, ActiveStats},
         ancestors::Ancestors,
         pubkey_bins::PubkeyBinCalculator24,
-        rent_collector::RentCollector,
     },
-    bytemuck::{Pod, Zeroable},
+    bytemuck_derive::{Pod, Zeroable},
     log::*,
     memmap2::MmapMut,
     rayon::prelude::*,
+    solana_lattice_hash::lt_hash::LtHash,
     solana_measure::{measure::Measure, measure_us},
     solana_sdk::{
-        hash::{Hash, Hasher},
+        hash::{Hash, Hasher, HASH_BYTES},
         pubkey::Pubkey,
+        rent_collector::RentCollector,
         slot_history::Slot,
         sysvar::epoch_schedule::EpochSchedule,
     },
     std::{
         borrow::Borrow,
+        collections::HashSet,
         convert::TryInto,
         io::{Seek, SeekFrom, Write},
         path::PathBuf,
@@ -167,8 +169,6 @@ impl AccountHashesFile {
 pub struct CalcAccountsHashConfig<'a> {
     /// true to use a thread pool dedicated to bg operations
     pub use_bg_thread_pool: bool,
-    /// verify every hash in append vec/write cache with a recalculated hash
-    pub check_hash: bool,
     /// 'ancestors' is used to get storages
     pub ancestors: Option<&'a Ancestors>,
     /// does hash calc need to consider account data that exists in the write cache?
@@ -207,6 +207,8 @@ pub struct HashStats {
     pub sum_ancient_scans_us: AtomicU64,
     pub count_ancient_scans: AtomicU64,
     pub pubkey_bin_search_us: AtomicU64,
+    pub num_zero_lamport_accounts: AtomicU64,
+    pub num_zero_lamport_accounts_ancient: Arc<AtomicU64>,
 }
 impl HashStats {
     pub fn calc_storage_size_quartiles(&mut self, storages: &[Arc<AccountStorageEntry>]) {
@@ -306,6 +308,17 @@ impl HashStats {
             (
                 "pubkey_bin_search_us",
                 self.pubkey_bin_search_us.load(Ordering::Relaxed),
+                i64
+            ),
+            (
+                "num_zero_lamport_accounts",
+                self.num_zero_lamport_accounts.load(Ordering::Relaxed),
+                i64
+            ),
+            (
+                "num_zero_lamport_accounts_ancient",
+                self.num_zero_lamport_accounts_ancient
+                    .load(Ordering::Relaxed),
                 i64
             ),
         );
@@ -473,6 +486,7 @@ pub struct AccountsHasher<'a> {
     /// The directory where temporary cache files are put
     pub dir_for_temp_cache_files: PathBuf,
     pub(crate) active_stats: &'a ActiveStats,
+    pub remote_accounts: Arc<HashSet<Pubkey>>, // Sonic: accounts to exclude from hash calculation
 }
 
 /// Pointer to a specific item in chunked accounts hash slices.
@@ -838,9 +852,13 @@ impl<'a> AccountsHasher<'a> {
                 accum
             })
             .reduce(
-                || DedupResult {
-                    hashes_files: Vec::with_capacity(max_bin),
-                    ..Default::default()
+                || {
+                    DedupResult {
+                        // Allocate with Vec::new() so that no allocation actually happens. See
+                        // https://github.com/anza-xyz/agave/pull/1308.
+                        hashes_files: Vec::new(),
+                        ..Default::default()
+                    }
                 },
                 |mut a, mut b| {
                     a.lamports_sum = a
@@ -1144,7 +1162,11 @@ impl<'a> AccountsHasher<'a> {
             capacity: max_inclusive_num_pubkeys * std::mem::size_of::<Hash>(),
         };
 
-        let mut overall_sum = 0;
+        let mut overall_sum: u64 = 0;
+
+        // Sonic: skip accounts that are remote
+        let remote_accounts = self.remote_accounts.clone();
+        // info!("de_dup_accounts_in_parallel: remote accounts: {remote_accounts:?}");
 
         while let Some(pointer) = working_set.pop() {
             let key = &sorted_data_by_pubkey[pointer.slot_group_index][pointer.offset].pubkey;
@@ -1159,11 +1181,22 @@ impl<'a> AccountsHasher<'a> {
 
             // add lamports and get hash
             if item.lamports != 0 {
-                overall_sum = Self::checked_cast_for_capitalization(
-                    item.lamports as u128 + overall_sum as u128,
-                );
+                // Sonic: skip accounts that are remote
+                if remote_accounts.is_empty() || !remote_accounts.contains(&item.pubkey) {
+                    overall_sum = overall_sum
+                        .checked_add(item.lamports)
+                        .expect("summing lamports cannot overflow");
+                } else {
+                    info!(
+                        "de_dup_accounts_in_parallel: Skipping remote account: {:?}, pointer:{:?}",
+                        item.pubkey, pointer
+                    );
+                }
                 hashes.write(&item.hash.0);
             } else {
+                stats
+                    .num_zero_lamport_accounts
+                    .fetch_add(1, Ordering::Relaxed);
                 // if lamports == 0, check if they should be included
                 if self.zero_lamport_accounts == ZeroLamportAccounts::Included {
                     // For incremental accounts hash, the hash of a zero lamport account is
@@ -1226,12 +1259,28 @@ pub enum ZeroLamportAccounts {
 
 /// Hash of an account
 #[repr(transparent)]
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Pod, Zeroable, AbiExample)]
+#[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Pod, Zeroable)]
 pub struct AccountHash(pub Hash);
 
 // Ensure the newtype wrapper never changes size from the underlying Hash
 // This also ensures there are no padding bytes, which is required to safely implement Pod
 const _: () = assert!(std::mem::size_of::<AccountHash>() == std::mem::size_of::<Hash>());
+
+/// The AccountHash for a zero-lamport account
+pub const ZERO_LAMPORT_ACCOUNT_HASH: AccountHash =
+    AccountHash(Hash::new_from_array([0; HASH_BYTES]));
+
+/// Lattice hash of an account
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct AccountLtHash(pub LtHash);
+
+/// The AccountLtHash for a zero-lamport account
+pub const ZERO_LAMPORT_ACCOUNT_LT_HASH: AccountLtHash = AccountLtHash(LtHash::identity());
+
+/// Lattice hash of all accounts
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct AccountsLtHash(pub LtHash);
 
 /// Hash of accounts
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -1271,7 +1320,8 @@ pub struct IncrementalAccountsHash(pub Hash);
 pub struct AccountsDeltaHash(pub Hash);
 
 /// Snapshot serde-safe accounts delta hash
-#[derive(Clone, Default, Debug, Serialize, Deserialize, PartialEq, Eq, AbiExample)]
+#[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
+#[derive(Clone, Default, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SerdeAccountsDeltaHash(pub Hash);
 
 impl From<SerdeAccountsDeltaHash> for AccountsDeltaHash {
@@ -1286,7 +1336,8 @@ impl From<AccountsDeltaHash> for SerdeAccountsDeltaHash {
 }
 
 /// Snapshot serde-safe accounts hash
-#[derive(Clone, Default, Debug, Serialize, Deserialize, PartialEq, Eq, AbiExample)]
+#[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
+#[derive(Clone, Default, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SerdeAccountsHash(pub Hash);
 
 impl From<SerdeAccountsHash> for AccountsHash {
@@ -1301,7 +1352,8 @@ impl From<AccountsHash> for SerdeAccountsHash {
 }
 
 /// Snapshot serde-safe incremental accounts hash
-#[derive(Clone, Default, Debug, Serialize, Deserialize, PartialEq, Eq, AbiExample)]
+#[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
+#[derive(Clone, Default, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SerdeIncrementalAccountsHash(pub Hash);
 
 impl From<SerdeIncrementalAccountsHash> for IncrementalAccountsHash {
@@ -1329,6 +1381,7 @@ mod tests {
                 zero_lamport_accounts: ZeroLamportAccounts::Excluded,
                 dir_for_temp_cache_files,
                 active_stats: &ACTIVE_STATS,
+                remote_accounts: Arc::new(HashSet::default()), //Sonic: add remote_accounts
             }
         }
     }
@@ -1609,7 +1662,7 @@ mod tests {
 
     #[test]
     fn test_accountsdb_de_dup_accounts_zero_chunks() {
-        let vec = vec![vec![CalculateHashIntermediate {
+        let vec = [vec![CalculateHashIntermediate {
             lamports: 1,
             hash: AccountHash(Hash::default()),
             pubkey: Pubkey::default(),
@@ -1645,7 +1698,7 @@ mod tests {
         let (hashes, lamports) =
             accounts_hash.de_dup_accounts(vec, &mut HashStats::default(), one_range());
         assert_eq!(
-            vec![Hash::default(); 0],
+            Vec::<Hash>::new(),
             get_vec_vec(hashes)
                 .into_iter()
                 .flatten()
@@ -1661,12 +1714,12 @@ mod tests {
 
         let (hashes, lamports) =
             accounts_hash.de_dup_accounts_in_parallel(&[], 1, 1, &HashStats::default());
-        assert_eq!(vec![Hash::default(); 0], get_vec(hashes));
+        assert_eq!(Vec::<Hash>::new(), get_vec(hashes));
         assert_eq!(lamports, 0);
 
         let (hashes, lamports) =
             accounts_hash.de_dup_accounts_in_parallel(&[], 2, 1, &HashStats::default());
-        assert_eq!(vec![Hash::default(); 0], get_vec(hashes));
+        assert_eq!(Vec::<Hash>::new(), get_vec(hashes));
         assert_eq!(lamports, 0);
     }
 
@@ -2378,7 +2431,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "overflow is detected while summing capitalization")]
+    #[should_panic(expected = "summing lamports cannot overflow")]
     fn test_accountsdb_lamport_overflow() {
         solana_logger::setup();
 
@@ -2412,7 +2465,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "overflow is detected while summing capitalization")]
+    #[should_panic(expected = "summing lamports cannot overflow")]
     fn test_accountsdb_lamport_overflow2() {
         solana_logger::setup();
 

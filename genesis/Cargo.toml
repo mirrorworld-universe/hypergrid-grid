@@ -23,12 +23,17 @@ solana-cli-config = { workspace = true }
 solana-entry = { workspace = true }
 solana-ledger = { workspace = true }
 solana-logger = { workspace = true }
+solana-rpc-client = { workspace = true }
+solana-rpc-client-api = { workspace = true }
 solana-runtime = { workspace = true }
 solana-sdk = { workspace = true }
 solana-stake-program = { workspace = true }
 solana-version = { workspace = true }
 solana-vote-program = { workspace = true }
 tempfile = { workspace = true }
+
+# Sonic:
+solana-inline-spl.workspace = true
 
 [dev-dependencies]
 solana-runtime = { workspace = true, features = ["dev-context-only-utils"] }

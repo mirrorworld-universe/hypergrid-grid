@@ -248,7 +248,7 @@
 //!   language-independent serialization format. It is not generally recommended
 //!   for new code.
 //!
-//!   [`Pack`]: program_pack::Pack
+//!   [`Pack`]: https://docs.rs/solana-program-pack/latest/trait.Pack.html
 //!
 //! Developers should carefully consider the CPU cost of serialization, balanced
 //! against the need for correctness and ease of use: off-the-shelf
@@ -464,70 +464,45 @@
 //! [lut]: https://docs.solanalabs.com/proposals/versioned-transactions
 
 #![allow(incomplete_features)]
-#![cfg_attr(RUSTC_WITH_SPECIALIZATION, feature(specialization))]
-#![cfg_attr(RUSTC_NEEDS_PROC_MACRO_HYGIENE, feature(proc_macro_hygiene))]
+#![cfg_attr(feature = "frozen-abi", feature(specialization))]
 
 // Allows macro expansion of `use ::solana_program::*` to work within this crate
 extern crate self as solana_program;
 
-pub mod account_info;
 pub mod address_lookup_table;
-pub mod alt_bn128;
-pub(crate) mod atomic_u64;
 pub mod big_mod_exp;
 pub mod blake3;
-pub mod borsh;
-pub mod borsh0_10;
-pub mod borsh0_9;
-pub mod borsh1;
 pub mod bpf_loader;
 pub mod bpf_loader_deprecated;
 pub mod bpf_loader_upgradeable;
-pub mod clock;
 pub mod compute_units;
-pub mod debug_account_data;
-pub mod decode_error;
 pub mod ed25519_program;
-pub mod entrypoint;
 pub mod entrypoint_deprecated;
 pub mod epoch_rewards;
-pub mod epoch_rewards_partition_data;
 pub mod epoch_schedule;
+pub mod epoch_stake;
 pub mod feature;
-pub mod fee_calculator;
 pub mod hash;
 pub mod incinerator;
 pub mod instruction;
 pub mod keccak;
 pub mod lamports;
-pub mod last_restart_slot;
 pub mod loader_instruction;
 pub mod loader_upgradeable_instruction;
 pub mod loader_v4;
 pub mod loader_v4_instruction;
 pub mod log;
 pub mod message;
-pub mod native_token;
 pub mod nonce;
-pub mod poseidon;
 pub mod program;
 pub mod program_error;
-pub mod program_memory;
-pub mod program_option;
-pub mod program_pack;
 pub mod program_stubs;
 pub mod program_utils;
-pub mod pubkey;
-pub mod rent;
-pub mod sanitize;
 pub mod secp256k1_program;
-pub mod secp256k1_recover;
-pub mod serde_varint;
-pub mod serialize_utils;
-pub mod short_vec;
 pub mod slot_hashes;
 pub mod slot_history;
-pub mod stable_layout;
+pub mod sonic_account_migrater;
+pub mod sonic_fee_settlement;
 pub mod stake;
 pub mod stake_history;
 pub mod syscalls;
@@ -537,22 +512,48 @@ pub mod sysvar;
 pub mod vote;
 pub mod wasm;
 
-#[deprecated(
-    since = "1.17.0",
-    note = "Please use `solana_sdk::address_lookup_table::AddressLookupTableAccount` instead"
-)]
-pub mod address_lookup_table_account {
-    pub use crate::address_lookup_table::AddressLookupTableAccount;
-}
-
-#[cfg(target_os = "solana")]
-pub use solana_sdk_macro::wasm_bindgen_stub as wasm_bindgen;
-/// Re-export of [wasm-bindgen].
-///
-/// [wasm-bindgen]: https://rustwasm.github.io/docs/wasm-bindgen/
-#[cfg(not(target_os = "solana"))]
+#[cfg(feature = "borsh")]
+#[deprecated(since = "2.1.0", note = "Use `solana-borsh` crate instead")]
+pub use solana_borsh::deprecated as borsh;
+#[cfg(feature = "borsh")]
+#[deprecated(since = "2.1.0", note = "Use `solana-borsh` crate instead")]
+pub use solana_borsh::v0_10 as borsh0_10;
+#[cfg(feature = "borsh")]
+#[deprecated(since = "2.1.0", note = "Use `solana-borsh` crate instead")]
+pub use solana_borsh::v1 as borsh1;
+#[deprecated(since = "2.1.0", note = "Use `solana-fee-calculator` crate instead")]
+pub use solana_fee_calculator as fee_calculator;
+#[deprecated(since = "2.1.0", note = "Use `solana-last-restart-slot` crate instead")]
+pub use solana_last_restart_slot as last_restart_slot;
+#[deprecated(since = "2.1.0", note = "Use `solana-program-memory` crate instead")]
+pub use solana_program_memory as program_memory;
+#[deprecated(since = "2.1.0", note = "Use `solana-program-pack` crate instead")]
+pub use solana_program_pack as program_pack;
+#[deprecated(since = "2.1.0", note = "Use `solana-sanitize` crate instead")]
+pub use solana_sanitize as sanitize;
+#[deprecated(since = "2.1.0", note = "Use `solana-secp256k1-recover` crate instead")]
+pub use solana_secp256k1_recover as secp256k1_recover;
+#[deprecated(since = "2.1.0", note = "Use `solana-serde-varint` crate instead")]
+pub use solana_serde_varint as serde_varint;
+#[deprecated(since = "2.1.0", note = "Use `solana-serialize-utils` crate instead")]
+pub use solana_serialize_utils as serialize_utils;
+#[deprecated(since = "2.1.0", note = "Use `solana-short-vec` crate instead")]
+pub use solana_short_vec as short_vec;
+#[deprecated(since = "2.1.0", note = "Use `solana-stable-layout` crate instead")]
+pub use solana_stable_layout as stable_layout;
+#[cfg(target_arch = "wasm32")]
 pub use wasm_bindgen::prelude::wasm_bindgen;
-
+pub use {
+    solana_account_info::{self as account_info, debug_account_data},
+    solana_clock as clock,
+    solana_msg::msg,
+    solana_native_token as native_token,
+    solana_program_entrypoint::{
+        self as entrypoint, custom_heap_default, custom_panic_default, entrypoint,
+        entrypoint_no_alloc,
+    },
+    solana_program_option as program_option, solana_pubkey as pubkey, solana_rent as rent,
+};
 /// The [config native program][np].
 ///
 /// [np]: https://docs.solanalabs.com/runtime/programs#config-program
@@ -563,12 +564,18 @@ pub mod config {
 }
 
 /// A vector of Solana SDK IDs.
+#[deprecated(
+    since = "2.0.0",
+    note = "Please use `solana_sdk::reserved_account_keys::ReservedAccountKeys` instead"
+)]
+#[allow(deprecated)]
 pub mod sdk_ids {
     use {
         crate::{
             address_lookup_table, bpf_loader, bpf_loader_deprecated, bpf_loader_upgradeable,
             config, ed25519_program, feature, incinerator, loader_v4, secp256k1_program,
-            solana_program::pubkey::Pubkey, stake, system_program, sysvar, vote,
+            solana_program::pubkey::Pubkey, sonic_account_migrater, sonic_fee_settlement, stake,
+            system_program, sysvar, vote,
         },
         lazy_static::lazy_static,
     };
@@ -592,6 +599,8 @@ pub mod sdk_ids {
                 stake::program::id(),
                 #[allow(deprecated)]
                 stake::config::id(),
+                sonic_account_migrater::program::id(),
+                sonic_fee_settlement::program::id(),
             ];
             sdk_ids.extend(sysvar::ALL_IDS.iter());
             sdk_ids
@@ -599,51 +608,15 @@ pub mod sdk_ids {
     }
 }
 
-/// Same as [`declare_id`] except that it reports that this ID has been deprecated.
-pub use solana_sdk_macro::program_declare_deprecated_id as declare_deprecated_id;
-/// Convenience macro to declare a static public key and functions to interact with it.
-///
-/// Input: a single literal base58 string representation of a program's ID.
-///
-/// # Example
-///
-/// ```
-/// # // wrapper is used so that the macro invocation occurs in the item position
-/// # // rather than in the statement position which isn't allowed.
-/// use std::str::FromStr;
-/// use solana_program::{declare_id, pubkey::Pubkey};
-///
-/// # mod item_wrapper {
-/// #   use solana_program::declare_id;
-/// declare_id!("My11111111111111111111111111111111111111111");
-/// # }
-/// # use item_wrapper::id;
-///
-/// let my_id = Pubkey::from_str("My11111111111111111111111111111111111111111").unwrap();
-/// assert_eq!(id(), my_id);
-/// ```
-pub use solana_sdk_macro::program_declare_id as declare_id;
-/// Convenience macro to define a static public key.
-///
-/// Input: a single literal base58 string representation of a Pubkey.
-///
-/// # Example
-///
-/// ```
-/// use std::str::FromStr;
-/// use solana_program::{pubkey, pubkey::Pubkey};
-///
-/// static ID: Pubkey = pubkey!("My11111111111111111111111111111111111111111");
-///
-/// let my_id = Pubkey::from_str("My11111111111111111111111111111111111111111").unwrap();
-/// assert_eq!(ID, my_id);
-/// ```
-pub use solana_sdk_macro::program_pubkey as pubkey;
+#[deprecated(since = "2.1.0", note = "Use `solana-decode-error` crate instead")]
+pub use solana_decode_error as decode_error;
+pub use solana_pubkey::{declare_deprecated_id, declare_id, pubkey};
 
 #[macro_use]
 extern crate serde_derive;
 
-#[macro_use]
+#[cfg_attr(feature = "frozen-abi", macro_use)]
+#[cfg(feature = "frozen-abi")]
 extern crate solana_frozen_abi_macro;
 
 /// Convenience macro for doing integer division where the operation's safety

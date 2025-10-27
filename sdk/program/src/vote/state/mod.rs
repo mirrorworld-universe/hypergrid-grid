@@ -1,27 +1,38 @@
 //! Vote state
 
-#[cfg(test)]
-use crate::epoch_schedule::MAX_LEADER_SCHEDULE_EPOCH_OFFSET;
 #[cfg(not(target_os = "solana"))]
 use bincode::deserialize;
+#[cfg(test)]
+use {
+    crate::epoch_schedule::MAX_LEADER_SCHEDULE_EPOCH_OFFSET,
+    arbitrary::{Arbitrary, Unstructured},
+};
 use {
     crate::{
-        clock::{Epoch, Slot, UnixTimestamp},
         hash::Hash,
         instruction::InstructionError,
         pubkey::Pubkey,
         rent::Rent,
+        serialize_utils::cursor::read_u32,
         sysvar::clock::Clock,
         vote::{authorized_voters::AuthorizedVoters, error::VoteError},
     },
     bincode::{serialize_into, ErrorKind},
     serde_derive::{Deserialize, Serialize},
-    std::{collections::VecDeque, fmt::Debug},
+    solana_clock::{Epoch, Slot, UnixTimestamp},
+    std::{
+        collections::VecDeque,
+        fmt::Debug,
+        io::Cursor,
+        mem::{self, MaybeUninit},
+    },
 };
 
 mod vote_state_0_23_5;
 pub mod vote_state_1_14_11;
 pub use vote_state_1_14_11::*;
+mod vote_state_deserialize;
+use vote_state_deserialize::deserialize_vote_state_into;
 pub mod vote_state_versions;
 pub use vote_state_versions::*;
 
@@ -39,10 +50,14 @@ const DEFAULT_PRIOR_VOTERS_OFFSET: usize = 114;
 pub const VOTE_CREDITS_GRACE_SLOTS: u8 = 2;
 
 // Maximum number of credits to award for a vote; this number of credits is awarded to votes on slots that land within the grace period. After that grace period, vote credits are reduced.
-pub const VOTE_CREDITS_MAXIMUM_PER_SLOT: u8 = 8;
+pub const VOTE_CREDITS_MAXIMUM_PER_SLOT: u8 = 16;
 
-#[frozen_abi(digest = "Ch2vVEwos2EjAVqSHCyJjnN2MNX1yrpapZTGhMSCjWUH")]
-#[derive(Serialize, Default, Deserialize, Debug, PartialEq, Eq, Clone, AbiExample)]
+#[cfg_attr(
+    feature = "frozen-abi",
+    frozen_abi(digest = "GvUzgtcxhKVVxPAjSntXGPqjLZK5ovgZzCiUP1tDpB9q"),
+    derive(AbiExample)
+)]
+#[derive(Serialize, Default, Deserialize, Debug, PartialEq, Eq, Clone)]
 pub struct Vote {
     /// A stack of votes starting with the oldest vote
     pub slots: Vec<Slot>,
@@ -66,7 +81,9 @@ impl Vote {
     }
 }
 
-#[derive(Serialize, Default, Deserialize, Debug, PartialEq, Eq, Copy, Clone, AbiExample)]
+#[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
+#[derive(Serialize, Default, Deserialize, Debug, PartialEq, Eq, Copy, Clone)]
+#[cfg_attr(test, derive(Arbitrary))]
 pub struct Lockout {
     slot: Slot,
     confirmation_count: u32,
@@ -113,7 +130,9 @@ impl Lockout {
     }
 }
 
-#[derive(Serialize, Default, Deserialize, Debug, PartialEq, Eq, Copy, Clone, AbiExample)]
+#[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
+#[derive(Serialize, Default, Deserialize, Debug, PartialEq, Eq, Copy, Clone)]
+#[cfg_attr(test, derive(Arbitrary))]
 pub struct LandedVote {
     // Latency is the difference in slot number between the slot that was voted on (lockout.slot) and the slot in
     // which the vote that added this Lockout landed.  For votes which were cast before versions of the validator
@@ -147,8 +166,12 @@ impl From<Lockout> for LandedVote {
     }
 }
 
-#[frozen_abi(digest = "GwJfVFsATSj7nvKwtUkHYzqPRaPY6SLxPGXApuCya3x5")]
-#[derive(Serialize, Default, Deserialize, Debug, PartialEq, Eq, Clone, AbiExample)]
+#[cfg_attr(
+    feature = "frozen-abi",
+    frozen_abi(digest = "DRKTb72wifCUcCTSJs6PqWrQQK5Pfis4SCLEvXqWnDaL"),
+    derive(AbiExample)
+)]
+#[derive(Serialize, Default, Deserialize, Debug, PartialEq, Eq, Clone)]
 pub struct VoteStateUpdate {
     /// The proposed tower
     pub lockouts: VecDeque<Lockout>,
@@ -196,6 +219,103 @@ impl VoteStateUpdate {
     }
 }
 
+#[cfg_attr(
+    feature = "frozen-abi",
+    frozen_abi(digest = "5PFw9pyF1UG1DXVsw7gpjHegNyRycAAxWf2GA9wUXPs5"),
+    derive(AbiExample)
+)]
+#[derive(Serialize, Default, Deserialize, Debug, PartialEq, Eq, Clone)]
+pub struct TowerSync {
+    /// The proposed tower
+    pub lockouts: VecDeque<Lockout>,
+    /// The proposed root
+    pub root: Option<Slot>,
+    /// signature of the bank's state at the last slot
+    pub hash: Hash,
+    /// processing timestamp of last slot
+    pub timestamp: Option<UnixTimestamp>,
+    /// the unique identifier for the chain up to and
+    /// including this block. Does not require replaying
+    /// in order to compute.
+    pub block_id: Hash,
+}
+
+impl From<Vec<(Slot, u32)>> for TowerSync {
+    fn from(recent_slots: Vec<(Slot, u32)>) -> Self {
+        let lockouts: VecDeque<Lockout> = recent_slots
+            .into_iter()
+            .map(|(slot, confirmation_count)| {
+                Lockout::new_with_confirmation_count(slot, confirmation_count)
+            })
+            .collect();
+        Self {
+            lockouts,
+            root: None,
+            hash: Hash::default(),
+            timestamp: None,
+            block_id: Hash::default(),
+        }
+    }
+}
+
+impl TowerSync {
+    pub fn new(
+        lockouts: VecDeque<Lockout>,
+        root: Option<Slot>,
+        hash: Hash,
+        block_id: Hash,
+    ) -> Self {
+        Self {
+            lockouts,
+            root,
+            hash,
+            timestamp: None,
+            block_id,
+        }
+    }
+
+    /// Creates a tower with consecutive votes for `slot - MAX_LOCKOUT_HISTORY + 1` to `slot` inclusive.
+    /// If `slot >= MAX_LOCKOUT_HISTORY`, sets the root to `(slot - MAX_LOCKOUT_HISTORY)`
+    /// Sets the hash to `hash` and leaves `block_id` unset.
+    pub fn new_from_slot(slot: Slot, hash: Hash) -> Self {
+        let lowest_slot = slot
+            .saturating_add(1)
+            .saturating_sub(MAX_LOCKOUT_HISTORY as u64);
+        let slots: Vec<_> = (lowest_slot..slot.saturating_add(1)).collect();
+        Self::new_from_slots(
+            slots,
+            hash,
+            (lowest_slot > 0).then(|| lowest_slot.saturating_sub(1)),
+        )
+    }
+
+    /// Creates a tower with consecutive confirmation for `slots`
+    pub fn new_from_slots(slots: Vec<Slot>, hash: Hash, root: Option<Slot>) -> Self {
+        let lockouts: VecDeque<Lockout> = slots
+            .into_iter()
+            .rev()
+            .enumerate()
+            .map(|(cc, s)| Lockout::new_with_confirmation_count(s, cc.saturating_add(1) as u32))
+            .rev()
+            .collect();
+        Self {
+            lockouts,
+            hash,
+            root,
+            timestamp: None,
+            block_id: Hash::default(),
+        }
+    }
+
+    pub fn slots(&self) -> Vec<Slot> {
+        self.lockouts.iter().map(|lockout| lockout.slot()).collect()
+    }
+
+    pub fn last_voted_slot(&self) -> Option<Slot> {
+        self.lockouts.back().map(|l| l.slot())
+    }
+}
+
 #[derive(Default, Serialize, Deserialize, Debug, PartialEq, Eq, Clone, Copy)]
 pub struct VoteInit {
     pub node_pubkey: Pubkey,
@@ -225,7 +345,9 @@ pub struct VoteAuthorizeCheckedWithSeedArgs {
     pub current_authority_derived_key_seed: String,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize, PartialEq, Eq, Clone, AbiExample)]
+#[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq, Eq, Clone)]
+#[cfg_attr(test, derive(Arbitrary))]
 pub struct BlockTimestamp {
     pub slot: Slot,
     pub timestamp: UnixTimestamp,
@@ -234,7 +356,9 @@ pub struct BlockTimestamp {
 // this is how many epochs a voter can be remembered for slashing
 const MAX_ITEMS: usize = 32;
 
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone, AbiExample)]
+#[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
+#[cfg_attr(test, derive(Arbitrary))]
 pub struct CircBuf<I> {
     buf: [I; MAX_ITEMS],
     /// next pointer
@@ -273,15 +397,20 @@ impl<I> CircBuf<I> {
 
     pub fn last(&self) -> Option<&I> {
         if !self.is_empty {
-            Some(&self.buf[self.idx])
+            self.buf.get(self.idx)
         } else {
             None
         }
     }
 }
 
-#[frozen_abi(digest = "EeenjJaSrm9hRM39gK6raRNtzG61hnk7GciUCJJRDUSQ")]
-#[derive(Debug, Default, Serialize, Deserialize, PartialEq, Eq, Clone, AbiExample)]
+#[cfg_attr(
+    feature = "frozen-abi",
+    frozen_abi(digest = "87ULMjjHnMsPmCTEyzj4KPn2u5gdX1rmgtSdycpbSaLs"),
+    derive(AbiExample)
+)]
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq, Eq, Clone)]
+#[cfg_attr(test, derive(Arbitrary))]
 pub struct VoteState {
     /// the node that votes in this account
     pub node_pubkey: Pubkey,
@@ -325,6 +454,24 @@ impl VoteState {
         }
     }
 
+    pub fn new_rand_for_tests(node_pubkey: Pubkey, root_slot: Slot) -> Self {
+        let votes = (1..32)
+            .map(|x| LandedVote {
+                latency: 0,
+                lockout: Lockout::new_with_confirmation_count(
+                    u64::from(x).saturating_add(root_slot),
+                    32_u32.saturating_sub(x),
+                ),
+            })
+            .collect();
+        Self {
+            node_pubkey,
+            root_slot: Some(root_slot),
+            votes,
+            ..VoteState::default()
+        }
+    }
+
     pub fn get_authorized_voter(&self, epoch: Epoch) -> Option<Pubkey> {
         self.authorized_voters.get_authorized_voter(epoch)
     }
@@ -347,16 +494,136 @@ impl VoteState {
         3762 // see test_vote_state_size_of.
     }
 
-    #[allow(clippy::used_underscore_binding)]
-    pub fn deserialize(_input: &[u8]) -> Result<Self, InstructionError> {
+    // NOTE we retain `bincode::deserialize` for `not(target_os = "solana")` pending testing on mainnet-beta
+    // once that testing is done, `VoteState::deserialize_into` may be used for all targets
+    // conversion of V0_23_5 to current must be handled specially, however
+    // because it inserts a null voter into `authorized_voters`
+    // which `VoteStateVersions::is_uninitialized` erroneously reports as initialized
+    pub fn deserialize(input: &[u8]) -> Result<Self, InstructionError> {
         #[cfg(not(target_os = "solana"))]
         {
-            deserialize::<VoteStateVersions>(_input)
+            deserialize::<VoteStateVersions>(input)
                 .map(|versioned| versioned.convert_to_current())
                 .map_err(|_| InstructionError::InvalidAccountData)
         }
         #[cfg(target_os = "solana")]
-        unimplemented!();
+        {
+            let mut vote_state = Self::default();
+            Self::deserialize_into(input, &mut vote_state)?;
+            Ok(vote_state)
+        }
+    }
+
+    /// Deserializes the input `VoteStateVersions` buffer directly into the provided `VoteState`.
+    ///
+    /// In a SBPF context, V0_23_5 is not supported, but in non-SBPF, all versions are supported for
+    /// compatibility with `bincode::deserialize`.
+    ///
+    /// On success, `vote_state` reflects the state of the input data. On failure, `vote_state` is
+    /// reset to `VoteState::default()`.
+    pub fn deserialize_into(
+        input: &[u8],
+        vote_state: &mut VoteState,
+    ) -> Result<(), InstructionError> {
+        // Rebind vote_state to *mut VoteState so that the &mut binding isn't
+        // accessible anymore, preventing accidental use after this point.
+        //
+        // NOTE: switch to ptr::from_mut() once platform-tools moves to rustc >= 1.76
+        let vote_state = vote_state as *mut VoteState;
+
+        // Safety: vote_state is valid to_drop (see drop_in_place() docs). After
+        // dropping, the pointer is treated as uninitialized and only accessed
+        // through ptr::write, which is safe as per drop_in_place docs.
+        unsafe {
+            std::ptr::drop_in_place(vote_state);
+        }
+
+        // This is to reset vote_state to VoteState::default() if deserialize fails or panics.
+        struct DropGuard {
+            vote_state: *mut VoteState,
+        }
+
+        impl Drop for DropGuard {
+            fn drop(&mut self) {
+                // Safety:
+                //
+                // Deserialize failed or panicked so at this point vote_state is uninitialized. We
+                // must write a new _valid_ value into it or after returning (or unwinding) from
+                // this function the caller is left with an uninitialized `&mut VoteState`, which is
+                // UB (references must always be valid).
+                //
+                // This is always safe and doesn't leak memory because deserialize_into_ptr() writes
+                // into the fields that heap alloc only when it returns Ok().
+                unsafe {
+                    self.vote_state.write(VoteState::default());
+                }
+            }
+        }
+
+        let guard = DropGuard { vote_state };
+
+        let res = VoteState::deserialize_into_ptr(input, vote_state);
+        if res.is_ok() {
+            mem::forget(guard);
+        }
+
+        res
+    }
+
+    /// Deserializes the input `VoteStateVersions` buffer directly into the provided
+    /// `MaybeUninit<VoteState>`.
+    ///
+    /// In a SBPF context, V0_23_5 is not supported, but in non-SBPF, all versions are supported for
+    /// compatibility with `bincode::deserialize`.
+    ///
+    /// On success, `vote_state` is fully initialized and can be converted to `VoteState` using
+    /// [MaybeUninit::assume_init]. On failure, `vote_state` may still be uninitialized and must not
+    /// be converted to `VoteState`.
+    pub fn deserialize_into_uninit(
+        input: &[u8],
+        vote_state: &mut MaybeUninit<VoteState>,
+    ) -> Result<(), InstructionError> {
+        VoteState::deserialize_into_ptr(input, vote_state.as_mut_ptr())
+    }
+
+    fn deserialize_into_ptr(
+        input: &[u8],
+        vote_state: *mut VoteState,
+    ) -> Result<(), InstructionError> {
+        let mut cursor = Cursor::new(input);
+
+        let variant = read_u32(&mut cursor)?;
+        match variant {
+            // V0_23_5. not supported for bpf targets; these should not exist on mainnet
+            // supported for non-bpf targets for backwards compatibility
+            0 => {
+                #[cfg(not(target_os = "solana"))]
+                {
+                    // Safety: vote_state is valid as it comes from `&mut MaybeUninit<VoteState>` or
+                    // `&mut VoteState`. In the first case, the value is uninitialized so we write()
+                    // to avoid dropping invalid data; in the latter case, we `drop_in_place()`
+                    // before writing so the value has already been dropped and we just write a new
+                    // one in place.
+                    unsafe {
+                        vote_state.write(
+                            bincode::deserialize::<VoteStateVersions>(input)
+                                .map(|versioned| versioned.convert_to_current())
+                                .map_err(|_| InstructionError::InvalidAccountData)?,
+                        );
+                    }
+                    Ok(())
+                }
+                #[cfg(target_os = "solana")]
+                Err(InstructionError::InvalidAccountData)
+            }
+            // V1_14_11. substantially different layout and data from V0_23_5
+            1 => deserialize_vote_state_into(&mut cursor, vote_state, false),
+            // Current. the only difference from V1_14_11 is the addition of a slot-latency to each vote
+            2 => deserialize_vote_state_into(&mut cursor, vote_state, true),
+            _ => Err(InstructionError::InvalidAccountData),
+        }?;
+
+        Ok(())
     }
 
     pub fn serialize(
@@ -418,7 +685,7 @@ impl VoteState {
 
         VoteState {
             votes: VecDeque::from(vec![LandedVote::default(); MAX_LOCKOUT_HISTORY]),
-            root_slot: Some(std::u64::MAX),
+            root_slot: Some(u64::MAX),
             epoch_credits: vec![(0, 0, 0); MAX_EPOCH_CREDITS_HISTORY],
             authorized_voters,
             ..Self::default()
@@ -430,6 +697,7 @@ impl VoteState {
         next_vote_slot: Slot,
         epoch: Epoch,
         current_slot: Slot,
+        timely_vote_credits: bool,
     ) {
         // Ignore votes for slots earlier than we already have votes for
         if self
@@ -442,13 +710,17 @@ impl VoteState {
         self.pop_expired_votes(next_vote_slot);
 
         let landed_vote = LandedVote {
-            latency: Self::compute_vote_latency(next_vote_slot, current_slot),
+            latency: if timely_vote_credits {
+                Self::compute_vote_latency(next_vote_slot, current_slot)
+            } else {
+                0
+            },
             lockout: Lockout::new(next_vote_slot),
         };
 
         // Once the stack is full, pop the oldest lockout and distribute rewards
         if self.votes.len() == MAX_LOCKOUT_HISTORY {
-            let credits = self.credits_for_vote_at_index(0);
+            let credits = self.credits_for_vote_at_index(0, timely_vote_credits);
             let landed_vote = self.votes.pop_front().unwrap();
             self.root_slot = Some(landed_vote.slot());
 
@@ -493,7 +765,7 @@ impl VoteState {
     }
 
     /// Returns the credits to award for a vote at the given lockout slot index
-    pub fn credits_for_vote_at_index(&self, index: usize) -> u64 {
+    pub fn credits_for_vote_at_index(&self, index: usize, timely_vote_credits: bool) -> u64 {
         let latency = self
             .votes
             .get(index)
@@ -501,7 +773,7 @@ impl VoteState {
 
         // If latency is 0, this means that the Lockout was created and stored from a software version that did not
         // store vote latencies; in this case, 1 credit is awarded
-        if latency == 0 {
+        if latency == 0 || !timely_vote_credits {
             1
         } else {
             match latency.checked_sub(VOTE_CREDITS_GRACE_SLOTS) {
@@ -620,7 +892,9 @@ impl VoteState {
             // 2) not be equal to latest epoch otherwise this
             //    function would have returned TooSoonToReauthorize error
             //    above
-            assert!(target_epoch > *latest_epoch);
+            if target_epoch <= *latest_epoch {
+                return Err(InstructionError::InvalidAccountData);
+            }
 
             // Commit the new state
             self.prior_voters.append((
@@ -704,22 +978,20 @@ impl VoteState {
 pub mod serde_compact_vote_state_update {
     use {
         super::*,
-        crate::{
-            clock::{Slot, UnixTimestamp},
-            serde_varint, short_vec,
-            vote::state::Lockout,
-        },
+        crate::vote::state::Lockout,
         serde::{Deserialize, Deserializer, Serialize, Serializer},
+        solana_serde_varint as serde_varint, solana_short_vec as short_vec,
     };
 
-    #[derive(Deserialize, Serialize, AbiExample)]
+    #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
+    #[derive(serde_derive::Deserialize, serde_derive::Serialize)]
     struct LockoutOffset {
         #[serde(with = "serde_varint")]
         offset: Slot,
         confirmation_count: u8,
     }
 
-    #[derive(Deserialize, Serialize)]
+    #[derive(serde_derive::Deserialize, serde_derive::Serialize)]
     struct CompactVoteStateUpdate {
         root: Slot,
         #[serde(with = "short_vec")]
@@ -797,9 +1069,104 @@ pub mod serde_compact_vote_state_update {
     }
 }
 
+pub mod serde_tower_sync {
+    use {
+        super::*,
+        crate::vote::state::Lockout,
+        serde::{Deserialize, Deserializer, Serialize, Serializer},
+        solana_serde_varint as serde_varint, solana_short_vec as short_vec,
+    };
+
+    #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
+    #[derive(serde_derive::Deserialize, serde_derive::Serialize)]
+    struct LockoutOffset {
+        #[serde(with = "serde_varint")]
+        offset: Slot,
+        confirmation_count: u8,
+    }
+
+    #[derive(serde_derive::Deserialize, serde_derive::Serialize)]
+    struct CompactTowerSync {
+        root: Slot,
+        #[serde(with = "short_vec")]
+        lockout_offsets: Vec<LockoutOffset>,
+        hash: Hash,
+        timestamp: Option<UnixTimestamp>,
+        block_id: Hash,
+    }
+
+    pub fn serialize<S>(tower_sync: &TowerSync, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let lockout_offsets = tower_sync.lockouts.iter().scan(
+            tower_sync.root.unwrap_or_default(),
+            |slot, lockout| {
+                let Some(offset) = lockout.slot().checked_sub(*slot) else {
+                    return Some(Err(serde::ser::Error::custom("Invalid vote lockout")));
+                };
+                let Ok(confirmation_count) = u8::try_from(lockout.confirmation_count()) else {
+                    return Some(Err(serde::ser::Error::custom("Invalid confirmation count")));
+                };
+                let lockout_offset = LockoutOffset {
+                    offset,
+                    confirmation_count,
+                };
+                *slot = lockout.slot();
+                Some(Ok(lockout_offset))
+            },
+        );
+        let compact_tower_sync = CompactTowerSync {
+            root: tower_sync.root.unwrap_or(Slot::MAX),
+            lockout_offsets: lockout_offsets.collect::<Result<_, _>>()?,
+            hash: tower_sync.hash,
+            timestamp: tower_sync.timestamp,
+            block_id: tower_sync.block_id,
+        };
+        compact_tower_sync.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<TowerSync, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let CompactTowerSync {
+            root,
+            lockout_offsets,
+            hash,
+            timestamp,
+            block_id,
+        } = CompactTowerSync::deserialize(deserializer)?;
+        let root = (root != Slot::MAX).then_some(root);
+        let lockouts =
+            lockout_offsets
+                .iter()
+                .scan(root.unwrap_or_default(), |slot, lockout_offset| {
+                    *slot = match slot.checked_add(lockout_offset.offset) {
+                        None => {
+                            return Some(Err(serde::de::Error::custom("Invalid lockout offset")))
+                        }
+                        Some(slot) => slot,
+                    };
+                    let lockout = Lockout::new_with_confirmation_count(
+                        *slot,
+                        u32::from(lockout_offset.confirmation_count),
+                    );
+                    Some(Ok(lockout))
+                });
+        Ok(TowerSync {
+            root,
+            lockouts: lockouts.collect::<Result<_, _>>()?,
+            hash,
+            timestamp,
+            block_id,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use {super::*, itertools::Itertools, rand::Rng};
+    use {super::*, bincode::serialized_size, itertools::Itertools, rand::Rng};
 
     #[test]
     fn test_vote_serialize() {
@@ -819,13 +1186,167 @@ mod tests {
     }
 
     #[test]
+    fn test_vote_deserialize_into() {
+        // base case
+        let target_vote_state = VoteState::default();
+        let vote_state_buf =
+            bincode::serialize(&VoteStateVersions::new_current(target_vote_state.clone())).unwrap();
+
+        let mut test_vote_state = VoteState::default();
+        VoteState::deserialize_into(&vote_state_buf, &mut test_vote_state).unwrap();
+
+        assert_eq!(target_vote_state, test_vote_state);
+
+        // variant
+        // provide 4x the minimum struct size in bytes to ensure we typically touch every field
+        let struct_bytes_x4 = std::mem::size_of::<VoteState>() * 4;
+        for _ in 0..1000 {
+            let raw_data: Vec<u8> = (0..struct_bytes_x4).map(|_| rand::random::<u8>()).collect();
+            let mut unstructured = Unstructured::new(&raw_data);
+
+            let target_vote_state_versions =
+                VoteStateVersions::arbitrary(&mut unstructured).unwrap();
+            let vote_state_buf = bincode::serialize(&target_vote_state_versions).unwrap();
+            let target_vote_state = target_vote_state_versions.convert_to_current();
+
+            let mut test_vote_state = VoteState::default();
+            VoteState::deserialize_into(&vote_state_buf, &mut test_vote_state).unwrap();
+
+            assert_eq!(target_vote_state, test_vote_state);
+        }
+    }
+
+    #[test]
+    fn test_vote_deserialize_into_error() {
+        let target_vote_state = VoteState::new_rand_for_tests(Pubkey::new_unique(), 42);
+        let mut vote_state_buf =
+            bincode::serialize(&VoteStateVersions::new_current(target_vote_state.clone())).unwrap();
+        let len = vote_state_buf.len();
+        vote_state_buf.truncate(len - 1);
+
+        let mut test_vote_state = VoteState::default();
+        VoteState::deserialize_into(&vote_state_buf, &mut test_vote_state).unwrap_err();
+        assert_eq!(test_vote_state, VoteState::default());
+    }
+
+    #[test]
+    fn test_vote_deserialize_into_uninit() {
+        // base case
+        let target_vote_state = VoteState::default();
+        let vote_state_buf =
+            bincode::serialize(&VoteStateVersions::new_current(target_vote_state.clone())).unwrap();
+
+        let mut test_vote_state = MaybeUninit::uninit();
+        VoteState::deserialize_into_uninit(&vote_state_buf, &mut test_vote_state).unwrap();
+        let test_vote_state = unsafe { test_vote_state.assume_init() };
+
+        assert_eq!(target_vote_state, test_vote_state);
+
+        // variant
+        // provide 4x the minimum struct size in bytes to ensure we typically touch every field
+        let struct_bytes_x4 = std::mem::size_of::<VoteState>() * 4;
+        for _ in 0..1000 {
+            let raw_data: Vec<u8> = (0..struct_bytes_x4).map(|_| rand::random::<u8>()).collect();
+            let mut unstructured = Unstructured::new(&raw_data);
+
+            let target_vote_state_versions =
+                VoteStateVersions::arbitrary(&mut unstructured).unwrap();
+            let vote_state_buf = bincode::serialize(&target_vote_state_versions).unwrap();
+            let target_vote_state = target_vote_state_versions.convert_to_current();
+
+            let mut test_vote_state = MaybeUninit::uninit();
+            VoteState::deserialize_into_uninit(&vote_state_buf, &mut test_vote_state).unwrap();
+            let test_vote_state = unsafe { test_vote_state.assume_init() };
+
+            assert_eq!(target_vote_state, test_vote_state);
+        }
+    }
+
+    #[test]
+    fn test_vote_deserialize_into_uninit_nopanic() {
+        // base case
+        let mut test_vote_state = MaybeUninit::uninit();
+        let e = VoteState::deserialize_into_uninit(&[], &mut test_vote_state).unwrap_err();
+        assert_eq!(e, InstructionError::InvalidAccountData);
+
+        // variant
+        let serialized_len_x4 = serialized_size(&VoteState::default()).unwrap() * 4;
+        let mut rng = rand::thread_rng();
+        for _ in 0..1000 {
+            let raw_data_length = rng.gen_range(1..serialized_len_x4);
+            let mut raw_data: Vec<u8> = (0..raw_data_length).map(|_| rng.gen::<u8>()).collect();
+
+            // pure random data will ~never have a valid enum tag, so lets help it out
+            if raw_data_length >= 4 && rng.gen::<bool>() {
+                let tag = rng.gen::<u8>() % 3;
+                raw_data[0] = tag;
+                raw_data[1] = 0;
+                raw_data[2] = 0;
+                raw_data[3] = 0;
+            }
+
+            // it is extremely improbable, though theoretically possible, for random bytes to be syntactically valid
+            // so we only check that the parser does not panic and that it succeeds or fails exactly in line with bincode
+            let mut test_vote_state = MaybeUninit::uninit();
+            let test_res = VoteState::deserialize_into_uninit(&raw_data, &mut test_vote_state);
+            let bincode_res = bincode::deserialize::<VoteStateVersions>(&raw_data)
+                .map(|versioned| versioned.convert_to_current());
+
+            if test_res.is_err() {
+                assert!(bincode_res.is_err());
+            } else {
+                let test_vote_state = unsafe { test_vote_state.assume_init() };
+                assert_eq!(test_vote_state, bincode_res.unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn test_vote_deserialize_into_uninit_ill_sized() {
+        // provide 4x the minimum struct size in bytes to ensure we typically touch every field
+        let struct_bytes_x4 = std::mem::size_of::<VoteState>() * 4;
+        for _ in 0..1000 {
+            let raw_data: Vec<u8> = (0..struct_bytes_x4).map(|_| rand::random::<u8>()).collect();
+            let mut unstructured = Unstructured::new(&raw_data);
+
+            let original_vote_state_versions =
+                VoteStateVersions::arbitrary(&mut unstructured).unwrap();
+            let original_buf = bincode::serialize(&original_vote_state_versions).unwrap();
+
+            let mut truncated_buf = original_buf.clone();
+            let mut expanded_buf = original_buf.clone();
+
+            truncated_buf.resize(original_buf.len() - 8, 0);
+            expanded_buf.resize(original_buf.len() + 8, 0);
+
+            // truncated fails
+            let mut test_vote_state = MaybeUninit::uninit();
+            let test_res = VoteState::deserialize_into_uninit(&truncated_buf, &mut test_vote_state);
+            let bincode_res = bincode::deserialize::<VoteStateVersions>(&truncated_buf)
+                .map(|versioned| versioned.convert_to_current());
+
+            assert!(test_res.is_err());
+            assert!(bincode_res.is_err());
+
+            // expanded succeeds
+            let mut test_vote_state = MaybeUninit::uninit();
+            VoteState::deserialize_into_uninit(&expanded_buf, &mut test_vote_state).unwrap();
+            let bincode_res = bincode::deserialize::<VoteStateVersions>(&expanded_buf)
+                .map(|versioned| versioned.convert_to_current());
+
+            let test_vote_state = unsafe { test_vote_state.assume_init() };
+            assert_eq!(test_vote_state, bincode_res.unwrap());
+        }
+    }
+
+    #[test]
     fn test_vote_state_commission_split() {
         let vote_state = VoteState::default();
 
         assert_eq!(vote_state.commission_split(1), (0, 1, false));
 
         let mut vote_state = VoteState {
-            commission: std::u8::MAX,
+            commission: u8::MAX,
             ..VoteState::default()
         };
         assert_eq!(vote_state.commission_split(1), (1, 0, false));
@@ -1156,7 +1677,7 @@ mod tests {
     fn test_vote_state_size_of() {
         let vote_state = VoteState::get_max_sized_vote_state();
         let vote_state = VoteStateVersions::new_current(vote_state);
-        let size = bincode::serialized_size(&vote_state).unwrap();
+        let size = serialized_size(&vote_state).unwrap();
         assert_eq!(VoteState::size_of() as u64, size);
     }
 
@@ -1303,5 +1824,13 @@ mod tests {
         let vote = VoteInstruction::UpdateVoteStateSwitch(vote_state_update, hash);
         let bytes = bincode::serialize(&vote).unwrap();
         assert_eq!(vote, bincode::deserialize(&bytes).unwrap());
+    }
+
+    #[test]
+    fn test_circbuf_oob() {
+        // Craft an invalid CircBuf with out-of-bounds index
+        let data: &[u8] = &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00];
+        let circ_buf: CircBuf<()> = bincode::deserialize(data).unwrap();
+        assert_eq!(circ_buf.last(), None);
     }
 }

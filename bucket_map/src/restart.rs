@@ -1,7 +1,7 @@
 //! Persistent info of disk index files to allow files to be reused on restart.
 use {
     crate::bucket_map::{BucketMapConfig, MAX_SEARCH_DEFAULT},
-    bytemuck::{Pod, Zeroable},
+    bytemuck_derive::{Pod, Zeroable},
     memmap2::MmapMut,
     std::{
         collections::HashMap,
@@ -221,7 +221,7 @@ impl Restart {
                     paths.remove(&id)
                 });
                 RestartableBucket {
-                    restart: restart.map(Arc::clone),
+                    restart: restart.cloned(),
                     index,
                     path,
                 }
@@ -241,7 +241,7 @@ impl Restart {
         let mut data = OpenOptions::new()
             .read(true)
             .write(true)
-            .create(true)
+            .create_new(true)
             .open(file)?;
 
         if capacity > 0 {

@@ -39,14 +39,6 @@ use {
 const INTERVAL_MS: u64 = 100;
 const CLEAN_INTERVAL_BLOCKS: u64 = 100;
 
-// This value is chosen to spread the dropping cost over 3 expiration checks
-// RecycleStores are fully populated almost all of its lifetime. So, otherwise
-// this would drop MAX_RECYCLE_STORES mmaps at once in the worst case...
-// (Anyway, the dropping part is outside the AccountsDb::recycle_stores lock
-// and dropped in this AccountsBackgroundServe, so this shouldn't matter much)
-const RECYCLE_STORE_EXPIRATION_INTERVAL_SECS: u64 =
-    solana_accounts_db::accounts_db::EXPIRATION_TTL_SECONDS / 3;
-
 pub type SnapshotRequestSender = Sender<SnapshotRequest>;
 pub type SnapshotRequestReceiver = Receiver<SnapshotRequest>;
 pub type DroppedSlotsSender = Sender<(Slot, BankId)>;
@@ -123,9 +115,10 @@ pub struct SnapshotRequest {
 impl Debug for SnapshotRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SnapshotRequest")
-            .field("request type", &self.request_kind)
+            .field("request kind", &self.request_kind)
             .field("bank slot", &self.snapshot_root_bank.slot())
-            .finish()
+            .field("block height", &self.snapshot_root_bank.block_height())
+            .finish_non_exhaustive()
     }
 }
 
@@ -154,7 +147,6 @@ impl SnapshotRequestHandler {
         &self,
         test_hash_calculation: bool,
         non_snapshot_time_us: u128,
-        last_full_snapshot_slot: &mut Option<Slot>,
         exit: &AtomicBool,
     ) -> Option<Result<u64, SnapshotError>> {
         let (
@@ -162,7 +154,7 @@ impl SnapshotRequestHandler {
             accounts_package_kind,
             num_outstanding_requests,
             num_re_enqueued_requests,
-        ) = self.get_next_snapshot_request(*last_full_snapshot_slot)?;
+        ) = self.get_next_snapshot_request()?;
 
         datapoint_info!(
             "handle_snapshot_requests",
@@ -178,7 +170,6 @@ impl SnapshotRequestHandler {
         Some(self.handle_snapshot_request(
             test_hash_calculation,
             non_snapshot_time_us,
-            last_full_snapshot_slot,
             snapshot_request,
             accounts_package_kind,
             exit,
@@ -196,7 +187,6 @@ impl SnapshotRequestHandler {
     /// ones re-enqueued.
     fn get_next_snapshot_request(
         &self,
-        last_full_snapshot_slot: Option<Slot>,
     ) -> Option<(
         SnapshotRequest,
         AccountsPackageKind,
@@ -207,11 +197,8 @@ impl SnapshotRequestHandler {
             .snapshot_request_receiver
             .try_iter()
             .map(|request| {
-                let accounts_package_kind = new_accounts_package_kind(
-                    &request,
-                    &self.snapshot_config,
-                    last_full_snapshot_slot,
-                );
+                let accounts_package_kind =
+                    new_accounts_package_kind(&request, &self.snapshot_config);
                 (request, accounts_package_kind)
             })
             .collect();
@@ -282,7 +269,7 @@ impl SnapshotRequestHandler {
                     .map(|(snapshot_request, _)| {
                         self.snapshot_request_sender
                             .try_send(snapshot_request)
-                            .expect("re-enqueue snapshot request")
+                            .expect("re-enqueue snapshot request");
                     })
                     .count();
 
@@ -300,15 +287,11 @@ impl SnapshotRequestHandler {
         &self,
         test_hash_calculation: bool,
         non_snapshot_time_us: u128,
-        last_full_snapshot_slot: &mut Option<Slot>,
         snapshot_request: SnapshotRequest,
         accounts_package_kind: AccountsPackageKind,
         exit: &AtomicBool,
     ) -> Result<u64, SnapshotError> {
-        debug!(
-            "handling snapshot request: {:?}, {:?}",
-            snapshot_request, accounts_package_kind
-        );
+        info!("handling snapshot request: {snapshot_request:?}, {accounts_package_kind:?}");
         let mut total_time = Measure::start("snapshot_request_receiver_total_time");
         let SnapshotRequest {
             snapshot_root_bank,
@@ -321,7 +304,14 @@ impl SnapshotRequestHandler {
         assert!(snapshot_root_bank.is_startup_verification_complete());
 
         if accounts_package_kind == AccountsPackageKind::Snapshot(SnapshotKind::FullSnapshot) {
-            *last_full_snapshot_slot = Some(snapshot_root_bank.slot());
+            // The latest full snapshot slot is what accounts-db uses to properly handle zero lamport
+            // accounts.  We are handling a full snapshot request here, and since taking a snapshot
+            // is not allowed to fail, we can update accounts-db now.
+            snapshot_root_bank
+                .rc
+                .accounts
+                .accounts_db
+                .set_latest_full_snapshot_slot(snapshot_root_bank.slot());
         }
 
         let previous_accounts_hash = test_hash_calculation.then(|| {
@@ -355,31 +345,27 @@ impl SnapshotRequestHandler {
         flush_accounts_cache_time.stop();
 
         let accounts_hash_for_testing = previous_accounts_hash.map(|previous_accounts_hash| {
-            let check_hash = false;
-
             let (this_accounts_hash, capitalization) = snapshot_root_bank
                 .accounts()
                 .accounts_db
-                .calculate_accounts_hash(
+                .calculate_accounts_hash_from(
                     CalcAccountsHashDataSource::Storages,
                     snapshot_root_bank.slot(),
                     &CalcAccountsHashConfig {
                         use_bg_thread_pool: true,
-                        check_hash,
                         ancestors: None,
                         epoch_schedule: snapshot_root_bank.epoch_schedule(),
                         rent_collector: snapshot_root_bank.rent_collector(),
                         store_detailed_debug_info_on_failure: false,
                     },
-                )
-                .unwrap();
+                );
             assert_eq!(previous_accounts_hash, this_accounts_hash);
             assert_eq!(capitalization, snapshot_root_bank.capitalization());
             this_accounts_hash
         });
 
         let mut clean_time = Measure::start("clean_time");
-        snapshot_root_bank.clean_accounts(*last_full_snapshot_slot);
+        snapshot_root_bank.clean_accounts();
         clean_time.stop();
 
         let (_, shrink_ancient_time_us) = measure_us!(snapshot_root_bank.shrink_ancient_slots());
@@ -394,27 +380,15 @@ impl SnapshotRequestHandler {
         let accounts_package = match request_kind {
             SnapshotRequestKind::Snapshot => match &accounts_package_kind {
                 AccountsPackageKind::Snapshot(_) => {
-                    let bank_snapshot_info = snapshot_bank_utils::add_bank_snapshot(
-                        &self.snapshot_config.bank_snapshots_dir,
-                        &snapshot_root_bank,
-                        &snapshot_storages,
-                        self.snapshot_config.snapshot_version,
-                        status_cache_slot_deltas,
-                    )?;
                     AccountsPackage::new_for_snapshot(
                         accounts_package_kind,
                         &snapshot_root_bank,
-                        &bank_snapshot_info,
-                        &self.snapshot_config.full_snapshot_archives_dir,
-                        &self.snapshot_config.incremental_snapshot_archives_dir,
                         snapshot_storages,
-                        self.snapshot_config.archive_format,
-                        self.snapshot_config.snapshot_version,
+                        status_cache_slot_deltas,
                         accounts_hash_for_testing,
                     )
                 }
                 AccountsPackageKind::AccountsHashVerifier => {
-                    // skip the bank snapshot, just make an accounts package to send to AHV
                     AccountsPackage::new_for_accounts_hash_verifier(
                         accounts_package_kind,
                         &snapshot_root_bank,
@@ -425,7 +399,6 @@ impl SnapshotRequestHandler {
                 AccountsPackageKind::EpochAccountsHash => panic!("Illegal account package type: EpochAccountsHash packages must be from an EpochAccountsHash request!"),
             },
             SnapshotRequestKind::EpochAccountsHash => {
-                // skip the bank snapshot, just make an accounts package to send to AHV
                 AccountsPackage::new_for_epoch_accounts_hash(
                     accounts_package_kind,
                     &snapshot_root_bank,
@@ -445,7 +418,7 @@ impl SnapshotRequestHandler {
         }
         snapshot_time.stop();
         info!(
-            "Took bank snapshot. accounts package kind: {:?}, slot: {}, bank hash: {}",
+            "Handled snapshot request. accounts package kind: {:?}, slot: {}, bank hash: {}",
             accounts_package_kind,
             snapshot_root_bank.slot(),
             snapshot_root_bank.hash(),
@@ -514,8 +487,7 @@ impl PrunedBanksRequestHandler {
         let num_banks_to_purge = banks_to_purge.len();
 
         // Group the banks into slices with the same slot
-        let grouped_banks_to_purge: Vec<_> =
-            GroupBy::new(banks_to_purge.as_slice(), |a, b| a.0 == b.0).collect();
+        let grouped_banks_to_purge: Vec<_> = banks_to_purge.chunk_by(|a, b| a.0 == b.0).collect();
 
         // Log whenever we need to handle banks with the same slot.  Purposely do this *before* we
         // call `purge_slot()` to ensure we get the datapoint (in case there's an assert/panic).
@@ -578,13 +550,11 @@ impl AbsRequestHandlers {
         &self,
         test_hash_calculation: bool,
         non_snapshot_time_us: u128,
-        last_full_snapshot_slot: &mut Option<Slot>,
         exit: &AtomicBool,
     ) -> Option<Result<u64, SnapshotError>> {
         self.snapshot_request_handler.handle_snapshot_requests(
             test_hash_calculation,
             non_snapshot_time_us,
-            last_full_snapshot_slot,
             exit,
         )
     }
@@ -600,12 +570,10 @@ impl AccountsBackgroundService {
         exit: Arc<AtomicBool>,
         request_handlers: AbsRequestHandlers,
         test_hash_calculation: bool,
-        mut last_full_snapshot_slot: Option<Slot>,
     ) -> Self {
         let mut last_cleaned_block_height = 0;
         let mut removed_slots_count = 0;
         let mut total_remove_slots_time = 0;
-        let mut last_expiration_check_time = Instant::now();
         let t_background = Builder::new()
             .name("solBgAccounts".to_string())
             .spawn(move || {
@@ -630,8 +598,6 @@ impl AccountsBackgroundService {
                             &mut removed_slots_count,
                             &mut total_remove_slots_time,
                         );
-
-                    Self::expire_old_recycle_stores(&bank, &mut last_expiration_check_time);
 
                     let non_snapshot_time = last_snapshot_end_time
                         .map(|last_snapshot_end_time: Instant| {
@@ -667,7 +633,6 @@ impl AccountsBackgroundService {
                             request_handlers.handle_snapshot_requests(
                                 test_hash_calculation,
                                 non_snapshot_time,
-                                &mut last_full_snapshot_slot,
                                 &exit,
                             )
                         })
@@ -705,7 +670,7 @@ impl AccountsBackgroundService {
                             // as any later snapshots that are taken are of
                             // slots >= bank.slot()
                             bank.force_flush_accounts_cache();
-                            bank.clean_accounts(last_full_snapshot_slot);
+                            bank.clean_accounts();
                             last_cleaned_block_height = bank.block_height();
                             // See justification below for why we skip 'shrink' here.
                             if bank.is_startup_verification_complete() {
@@ -759,16 +724,6 @@ impl AccountsBackgroundService {
     pub fn join(self) -> thread::Result<()> {
         self.t_background.join()
     }
-
-    fn expire_old_recycle_stores(bank: &Bank, last_expiration_check_time: &mut Instant) {
-        let now = Instant::now();
-        if now.duration_since(*last_expiration_check_time).as_secs()
-            > RECYCLE_STORE_EXPIRATION_INTERVAL_SECS
-        {
-            bank.expire_old_recycle_stores();
-            *last_expiration_check_time = now;
-        }
-    }
 }
 
 /// Get the AccountsPackageKind from a given SnapshotRequest
@@ -776,12 +731,17 @@ impl AccountsBackgroundService {
 fn new_accounts_package_kind(
     snapshot_request: &SnapshotRequest,
     snapshot_config: &SnapshotConfig,
-    last_full_snapshot_slot: Option<Slot>,
 ) -> AccountsPackageKind {
     let block_height = snapshot_request.snapshot_root_bank.block_height();
+    let latest_full_snapshot_slot = snapshot_request
+        .snapshot_root_bank
+        .rc
+        .accounts
+        .accounts_db
+        .latest_full_snapshot_slot();
     match snapshot_request.request_kind {
         SnapshotRequestKind::EpochAccountsHash => AccountsPackageKind::EpochAccountsHash,
-        _ => {
+        SnapshotRequestKind::Snapshot => {
             if snapshot_utils::should_take_full_snapshot(
                 block_height,
                 snapshot_config.full_snapshot_archive_interval_slots,
@@ -790,10 +750,10 @@ fn new_accounts_package_kind(
             } else if snapshot_utils::should_take_incremental_snapshot(
                 block_height,
                 snapshot_config.incremental_snapshot_archive_interval_slots,
-                last_full_snapshot_slot,
+                latest_full_snapshot_slot,
             ) {
                 AccountsPackageKind::Snapshot(SnapshotKind::IncrementalSnapshot(
-                    last_full_snapshot_slot.unwrap(),
+                    latest_full_snapshot_slot.unwrap(),
                 ))
             } else {
                 AccountsPackageKind::AccountsHashVerifier
@@ -825,56 +785,6 @@ fn cmp_requests_by_priority(
         accounts_package_kind_b,
     )
     .then(slot_a.cmp(&slot_b))
-}
-
-/// An iterator over a slice producing non-overlapping runs
-/// of elements using a predicate to separate them.
-///
-/// This can be used to extract sorted subslices.
-///
-/// (`Vec::group_by()`](https://doc.rust-lang.org/std/vec/struct.Vec.html#method.group_by)
-/// is currently a nightly-only experimental API.  Once the API is stablized, use it instead.
-///
-/// tracking issue: https://github.com/rust-lang/rust/issues/80552
-/// rust-lang PR: https://github.com/rust-lang/rust/pull/79895/
-/// implementation permalink: https://github.com/Kerollmops/rust/blob/8b53be660444d736bb6a6e1c6ba42c8180c968e7/library/core/src/slice/iter.rs#L2972-L3023
-struct GroupBy<'a, T: 'a, P> {
-    slice: &'a [T],
-    predicate: P,
-}
-impl<'a, T: 'a, P> GroupBy<'a, T, P>
-where
-    P: FnMut(&T, &T) -> bool,
-{
-    fn new(slice: &'a [T], predicate: P) -> Self {
-        GroupBy { slice, predicate }
-    }
-}
-impl<'a, T: 'a, P> Iterator for GroupBy<'a, T, P>
-where
-    P: FnMut(&T, &T) -> bool,
-{
-    type Item = &'a [T];
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.slice.is_empty() {
-            None
-        } else {
-            let mut len = 1;
-            let mut iter = self.slice.windows(2);
-            while let Some([l, r]) = iter.next() {
-                if (self.predicate)(l, r) {
-                    len += 1
-                } else {
-                    break;
-                }
-            }
-            let (head, tail) = self.slice.split_at(len);
-            self.slice = tail;
-            Some(head)
-        }
-    }
 }
 
 #[cfg(test)]
@@ -970,6 +880,20 @@ mod test {
             .epoch_accounts_hash_manager
             .set_valid(EpochAccountsHash::new(Hash::new_unique()), 0);
 
+        // We need to get and set accounts-db's latest full snapshot slot to test
+        // get_next_snapshot_request().  To workaround potential borrowing issues
+        // caused by make_banks() below, Arc::clone bank0 and add helper functions.
+        let bank0 = bank.clone();
+        fn latest_full_snapshot_slot(bank: &Bank) -> Option<Slot> {
+            bank.rc.accounts.accounts_db.latest_full_snapshot_slot()
+        }
+        fn set_latest_full_snapshot_slot(bank: &Bank, slot: Slot) {
+            bank.rc
+                .accounts
+                .accounts_db
+                .set_latest_full_snapshot_slot(slot);
+        }
+
         // Create new banks and send snapshot requests so that the following requests will be in
         // the channel before handling the requests:
         //
@@ -990,7 +914,7 @@ mod test {
         //
         // (slots not called out will all be AHV)
         // Also, incremental snapshots before slot 240 (the first full snapshot handled), will
-        // actually be AHV since the last full snapshot slot will be `None`.  This is expected and
+        // actually be AHV since the latest full snapshot slot will be `None`.  This is expected and
         // fine; but maybe unexpected for a reader/debugger without this additional context.
         let mut make_banks = |num_banks| {
             for _ in 0..num_banks {
@@ -1016,8 +940,9 @@ mod test {
         make_banks(303);
 
         // Ensure the EAH is handled 1st
+        assert_eq!(latest_full_snapshot_slot(&bank0), None,);
         let (snapshot_request, accounts_package_kind, ..) = snapshot_request_handler
-            .get_next_snapshot_request(None)
+            .get_next_snapshot_request()
             .unwrap();
         assert_eq!(
             accounts_package_kind,
@@ -1027,19 +952,22 @@ mod test {
 
         // Ensure the full snapshot from slot 240 is handled 2nd
         // (the older full snapshots are skipped and dropped)
+        assert_eq!(latest_full_snapshot_slot(&bank0), None,);
         let (snapshot_request, accounts_package_kind, ..) = snapshot_request_handler
-            .get_next_snapshot_request(None)
+            .get_next_snapshot_request()
             .unwrap();
         assert_eq!(
             accounts_package_kind,
             AccountsPackageKind::Snapshot(SnapshotKind::FullSnapshot)
         );
         assert_eq!(snapshot_request.snapshot_root_bank.slot(), 240);
+        set_latest_full_snapshot_slot(&bank0, 240);
 
         // Ensure the incremental snapshot from slot 300 is handled 3rd
         // (the older incremental snapshots are skipped and dropped)
+        assert_eq!(latest_full_snapshot_slot(&bank0), Some(240),);
         let (snapshot_request, accounts_package_kind, ..) = snapshot_request_handler
-            .get_next_snapshot_request(Some(240))
+            .get_next_snapshot_request()
             .unwrap();
         assert_eq!(
             accounts_package_kind,
@@ -1049,8 +977,9 @@ mod test {
 
         // Ensure the accounts hash verifier from slot 303 is handled 4th
         // (the older accounts hash verifiers are skipped and dropped)
+        assert_eq!(latest_full_snapshot_slot(&bank0), Some(240),);
         let (snapshot_request, accounts_package_kind, ..) = snapshot_request_handler
-            .get_next_snapshot_request(Some(240))
+            .get_next_snapshot_request()
             .unwrap();
         assert_eq!(
             accounts_package_kind,
@@ -1059,8 +988,9 @@ mod test {
         assert_eq!(snapshot_request.snapshot_root_bank.slot(), 303);
 
         // And now ensure the snapshot request channel is empty!
+        assert_eq!(latest_full_snapshot_slot(&bank0), Some(240),);
         assert!(snapshot_request_handler
-            .get_next_snapshot_request(Some(240))
+            .get_next_snapshot_request()
             .is_none());
 
         // Create more banks and send snapshot requests so that the following requests will be in
@@ -1079,18 +1009,21 @@ mod test {
         make_banks(240);
 
         // Ensure the full snapshot is handled 1st
+        assert_eq!(latest_full_snapshot_slot(&bank0), Some(240),);
         let (snapshot_request, accounts_package_kind, ..) = snapshot_request_handler
-            .get_next_snapshot_request(None)
+            .get_next_snapshot_request()
             .unwrap();
         assert_eq!(
             accounts_package_kind,
             AccountsPackageKind::Snapshot(SnapshotKind::FullSnapshot)
         );
         assert_eq!(snapshot_request.snapshot_root_bank.slot(), 480);
+        set_latest_full_snapshot_slot(&bank0, 480);
 
         // Ensure the EAH is handled 2nd
+        assert_eq!(latest_full_snapshot_slot(&bank0), Some(480),);
         let (snapshot_request, accounts_package_kind, ..) = snapshot_request_handler
-            .get_next_snapshot_request(Some(480))
+            .get_next_snapshot_request()
             .unwrap();
         assert_eq!(
             accounts_package_kind,
@@ -1099,8 +1032,9 @@ mod test {
         assert_eq!(snapshot_request.snapshot_root_bank.slot(), 500);
 
         // Ensure the incremental snapshot is handled 3rd
+        assert_eq!(latest_full_snapshot_slot(&bank0), Some(480),);
         let (snapshot_request, accounts_package_kind, ..) = snapshot_request_handler
-            .get_next_snapshot_request(Some(480))
+            .get_next_snapshot_request()
             .unwrap();
         assert_eq!(
             accounts_package_kind,
@@ -1109,8 +1043,9 @@ mod test {
         assert_eq!(snapshot_request.snapshot_root_bank.slot(), 540);
 
         // Ensure the accounts hash verifier is handled 4th
+        assert_eq!(latest_full_snapshot_slot(&bank0), Some(480),);
         let (snapshot_request, accounts_package_kind, ..) = snapshot_request_handler
-            .get_next_snapshot_request(Some(480))
+            .get_next_snapshot_request()
             .unwrap();
         assert_eq!(
             accounts_package_kind,
@@ -1119,8 +1054,9 @@ mod test {
         assert_eq!(snapshot_request.snapshot_root_bank.slot(), 543);
 
         // And now ensure the snapshot request channel is empty!
+        assert_eq!(latest_full_snapshot_slot(&bank0), Some(480),);
         assert!(snapshot_request_handler
-            .get_next_snapshot_request(Some(480))
+            .get_next_snapshot_request()
             .is_none());
     }
 
@@ -1186,20 +1122,5 @@ mod test {
         drop(fork0_bank0);
         let num_banks_purged = pruned_banks_request_handler.handle_request(&fork0_bank3);
         assert_eq!(num_banks_purged, 7);
-    }
-
-    // This test is for our copied impl of GroupBy, above.
-    // When it is removed, this test can be removed.
-    #[test]
-    fn test_group_by() {
-        let slice = &[1, 1, 1, 3, 3, 2, 2, 2, 1, 0];
-
-        let mut iter = GroupBy::new(slice, |a, b| a == b);
-        assert_eq!(iter.next(), Some(&[1, 1, 1][..]));
-        assert_eq!(iter.next(), Some(&[3, 3][..]));
-        assert_eq!(iter.next(), Some(&[2, 2, 2][..]));
-        assert_eq!(iter.next(), Some(&[1][..]));
-        assert_eq!(iter.next(), Some(&[0][..]));
-        assert_eq!(iter.next(), None);
     }
 }

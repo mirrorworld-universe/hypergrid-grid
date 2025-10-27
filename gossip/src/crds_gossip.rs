@@ -8,13 +8,13 @@ use {
     crate::{
         cluster_info::Ping,
         cluster_info_metrics::GossipStats,
+        contact_info::ContactInfo,
         crds::{Crds, GossipRoute},
         crds_gossip_error::CrdsGossipError,
         crds_gossip_pull::{CrdsFilter, CrdsGossipPull, CrdsTimeouts, ProcessPullStats},
         crds_gossip_push::CrdsGossipPush,
         crds_value::{CrdsData, CrdsValue},
         duplicate_shred::{self, DuplicateShredIndex, MAX_DUPLICATE_SHREDS},
-        legacy_contact_info::LegacyContactInfo as ContactInfo,
         ping_pong::PingCache,
     },
     itertools::Itertools,
@@ -90,6 +90,7 @@ impl CrdsGossip {
         leader_schedule: Option<F>,
         // Maximum serialized size of each DuplicateShred chunk payload.
         max_payload_size: usize,
+        shred_version: u16,
     ) -> Result<(), duplicate_shred::Error>
     where
         F: FnOnce(Slot) -> Option<Pubkey>,
@@ -114,6 +115,7 @@ impl CrdsGossip {
             leader_schedule,
             timestamp(),
             max_payload_size,
+            shred_version,
         )?;
         // Find the index of oldest duplicate shred.
         let mut num_dup_shreds = 0;
@@ -207,7 +209,7 @@ impl CrdsGossip {
         ping_cache: &Mutex<PingCache>,
         pings: &mut Vec<(SocketAddr, Ping)>,
         socket_addr_space: &SocketAddrSpace,
-    ) -> Result<HashMap<ContactInfo, Vec<CrdsFilter>>, CrdsGossipError> {
+    ) -> Result<Vec<(ContactInfo, Vec<CrdsFilter>)>, CrdsGossipError> {
         self.pull.new_pull_request(
             thread_pool,
             &self.crds,
@@ -221,14 +223,6 @@ impl CrdsGossip {
             pings,
             socket_addr_space,
         )
-    }
-
-    /// Process a pull request and create a response.
-    pub fn process_pull_requests<I>(&self, callers: I, now: u64)
-    where
-        I: IntoIterator<Item = CrdsValue>,
-    {
-        CrdsGossipPull::process_pull_requests(&self.crds, callers, now);
     }
 
     pub fn generate_pull_responses(
@@ -431,7 +425,7 @@ mod test {
             .write()
             .unwrap()
             .insert(
-                CrdsValue::new_unsigned(CrdsData::LegacyContactInfo(ci.clone())),
+                CrdsValue::new_unsigned(CrdsData::ContactInfo(ci.clone())),
                 0,
                 GossipRoute::LocalMessage,
             )

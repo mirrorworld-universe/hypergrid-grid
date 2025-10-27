@@ -1,4 +1,8 @@
 use {
+    agave_validator::{
+        admin_rpc_service, cli, dashboard::Dashboard, ledger_lockfile, lock_ledger,
+        println_name_value, redirect_stderr_to_file,
+    },
     clap::{crate_name, value_t, value_t_or_exit, values_t_or_exit},
     crossbeam_channel::unbounded,
     itertools::Itertools,
@@ -19,7 +23,6 @@ use {
         account::AccountSharedData,
         clock::Slot,
         epoch_schedule::EpochSchedule,
-        feature_set,
         native_token::sol_to_lamports,
         pubkey::Pubkey,
         rent::Rent,
@@ -28,10 +31,6 @@ use {
     },
     solana_streamer::socket::SocketAddrSpace,
     solana_test_validator::*,
-    solana_validator::{
-        admin_rpc_service, cli, dashboard::Dashboard, ledger_lockfile, lock_ledger,
-        println_name_value, redirect_stderr_to_file,
-    },
     std::{
         collections::HashSet,
         fs, io,
@@ -282,20 +281,25 @@ fn main() {
             .map(|v| v.into_iter().collect())
             .unwrap_or_default();
 
+    let clone_feature_set = matches.is_present("clone_feature_set");
+
     let warp_slot = if matches.is_present("warp_slot") {
         Some(match matches.value_of("warp_slot") {
             Some(_) => value_t_or_exit!(matches, "warp_slot", Slot),
-            None => {
-                cluster_rpc_client.as_ref().unwrap_or_else(|_| {
-                        println!("The --url argument must be provided if --warp-slot/-w is used without an explicit slot");
-                        exit(1);
-
-                }).get_slot()
-                    .unwrap_or_else(|err| {
-                        println!("Unable to get current cluster slot: {err}");
-                        exit(1);
-                    })
-            }
+            None => cluster_rpc_client
+                .as_ref()
+                .unwrap_or_else(|_| {
+                    println!(
+                        "The --url argument must be provided if --warp-slot/-w is used without an \
+                         explicit slot"
+                    );
+                    exit(1);
+                })
+                .get_slot()
+                .unwrap_or_else(|err| {
+                    println!("Unable to get current cluster slot: {err}");
+                    exit(1);
+                }),
         })
     } else {
         None
@@ -349,9 +353,7 @@ fn main() {
         exit(1);
     });
 
-    let mut features_to_deactivate = pubkeys_of(&matches, "deactivate_feature").unwrap_or_default();
-    // Remove this when client support is ready for the enable_partitioned_epoch_reward feature
-    features_to_deactivate.push(feature_set::enable_partitioned_epoch_reward::id());
+    let features_to_deactivate = pubkeys_of(&matches, "deactivate_feature").unwrap_or_default();
 
     if TestValidatorGenesis::ledger_exists(&ledger_path) {
         for (name, long) in &[
@@ -420,9 +422,11 @@ fn main() {
         None
     };
 
-    let rpc_bigtable_config = if matches.is_present("enable_rpc_bigtable_ledger_storage") {
+    let rpc_bigtable_config = if matches.is_present("enable_rpc_bigtable_ledger_storage")
+        || matches.is_present("enable_bigtable_ledger_upload")
+    {
         Some(RpcBigtableConfig {
-            enable_bigtable_ledger_upload: false,
+            enable_bigtable_ledger_upload: matches.is_present("enable_bigtable_ledger_upload"),
             bigtable_instance_name: value_t_or_exit!(matches, "rpc_bigtable_instance", String),
             bigtable_app_profile_id: value_t_or_exit!(
                 matches,
@@ -476,7 +480,7 @@ fn main() {
             accounts_to_clone,
             cluster_rpc_client
                 .as_ref()
-                .expect("bug: --url argument missing?"),
+                .expect("--clone-account requires --json-rpc-url argument"),
             false,
         ) {
             println!("Error: clone_accounts failed: {e}");
@@ -489,7 +493,7 @@ fn main() {
             accounts_to_maybe_clone,
             cluster_rpc_client
                 .as_ref()
-                .expect("bug: --url argument missing?"),
+                .expect("--maybe-clone requires --json-rpc-url argument"),
             true,
         ) {
             println!("Error: clone_accounts failed: {e}");
@@ -502,9 +506,20 @@ fn main() {
             upgradeable_programs_to_clone,
             cluster_rpc_client
                 .as_ref()
-                .expect("bug: --url argument missing?"),
+                .expect("--clone-upgradeable-program requires --json-rpc-url argument"),
         ) {
             println!("Error: clone_upgradeable_programs failed: {e}");
+            exit(1);
+        }
+    }
+
+    if clone_feature_set {
+        if let Err(e) = genesis.clone_feature_set(
+            cluster_rpc_client
+                .as_ref()
+                .expect("--clone-feature-set requires --json-rpc-url argument"),
+        ) {
+            println!("Error: clone_feature_set failed: {e}");
             exit(1);
         }
     }

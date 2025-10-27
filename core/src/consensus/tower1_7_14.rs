@@ -1,16 +1,19 @@
 use {
-    crate::consensus::{Result, SwitchForkDecision, TowerError},
+    crate::consensus::{BlockhashStatus, Result, SwitchForkDecision, TowerError},
     solana_sdk::{
         clock::Slot,
-        hash::Hash,
         pubkey::Pubkey,
         signature::{Signature, Signer},
     },
     solana_vote_program::vote_state::{vote_state_1_14_11::VoteState1_14_11, BlockTimestamp, Vote},
 };
 
-#[frozen_abi(digest = "9Kc3Cpak93xdL8bCnEwMWA8ZLGCBNfqh9PLo1o5RiPyT")]
-#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, AbiExample)]
+#[cfg_attr(
+    feature = "frozen-abi",
+    derive(AbiExample),
+    frozen_abi(digest = "5bwSGBqA1BVmgNtnTenfYtEt123cciEzpfqt6bUX1dJo")
+)]
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 pub struct Tower1_7_14 {
     pub(crate) node_pubkey: Pubkey,
     pub(crate) threshold_depth: usize,
@@ -22,7 +25,7 @@ pub struct Tower1_7_14 {
     // blockhash of the voted block itself, depending if the vote slot was refreshed.
     // For instance, a vote for slot 5, may be refreshed/resubmitted for inclusion in
     //  block 10, in  which case `last_vote_tx_blockhash` equals the blockhash of 10, not 5.
-    pub(crate) last_vote_tx_blockhash: Option<Hash>,
+    pub(crate) last_vote_tx_blockhash: BlockhashStatus,
     pub(crate) last_timestamp: BlockTimestamp,
     #[serde(skip)]
     // Restored last voted slot which cannot be found in SlotHistory at replayed root
@@ -36,8 +39,12 @@ pub struct Tower1_7_14 {
     pub(crate) last_switch_threshold_check: Option<(Slot, SwitchForkDecision)>,
 }
 
-#[frozen_abi(digest = "CxwFFxKfn6ez6wifDKr5WYr3eu2PsWUKdMYp3LX8Xj52")]
-#[derive(Default, Clone, Serialize, Deserialize, Debug, PartialEq, Eq, AbiExample)]
+#[cfg_attr(
+    feature = "frozen-abi",
+    derive(AbiExample),
+    frozen_abi(digest = "2ngfAgnN19JwF6FnFYPYp2aHQiZnnjzaYP1vSRMRiSaq")
+)]
+#[derive(Default, Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct SavedTower1_7_14 {
     pub(crate) signature: Signature,
     pub(crate) data: Vec<u8>,

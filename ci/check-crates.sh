@@ -21,7 +21,7 @@ declare skip_patterns=(
 )
 
 declare -A verified_crate_owners=(
-  ["solana-grimes"]=1
+  ["anza-team"]=1
 )
 
 # get Cargo.toml from git diff
@@ -54,7 +54,7 @@ for file in "${files[@]}"; do
   errors=$(echo "$response" | jq .errors)
   if [[ $errors != "null" ]]; then
     details=$(echo "$response" | jq .errors | jq -r ".[0].detail")
-    if [[ $details = *"Not Found"* ]]; then
+    if [[ $details = *"does not exist"* ]]; then
       ((error_count++))
       echo "❌ new crate $crate_name not found on crates.io. you can either
 

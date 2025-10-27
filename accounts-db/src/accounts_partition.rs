@@ -98,36 +98,6 @@ pub fn get_partition_from_slot_indexes(
     (start_partition_index, end_partition_index, partition_count)
 }
 
-/// used only by filler accounts in debug path
-/// previous means slot - 1, not parent
-// These functions/fields are only usable from a dev context (i.e. tests and benches)
-#[cfg(feature = "dev-context-only-utils")]
-pub fn variable_cycle_partition_from_previous_slot(
-    epoch_schedule: &EpochSchedule,
-    slot: Slot,
-) -> Partition {
-    // similar code to Bank::variable_cycle_partitions
-    let (current_epoch, current_slot_index) = epoch_schedule.get_epoch_and_slot_index(slot);
-    let (parent_epoch, mut parent_slot_index) =
-        epoch_schedule.get_epoch_and_slot_index(slot.saturating_sub(1));
-    let cycle_params = rent_single_epoch_collection_cycle_params(
-        current_epoch,
-        epoch_schedule.get_slots_in_epoch(current_epoch),
-    );
-
-    if parent_epoch < current_epoch {
-        parent_slot_index = 0;
-    }
-
-    let generated_for_gapped_epochs = false;
-    get_partition_from_slot_indexes(
-        cycle_params,
-        parent_slot_index,
-        current_slot_index,
-        generated_for_gapped_epochs,
-    )
-}
-
 /// return all end partition indexes for the given partition
 /// partition could be (0, 1, N). In this case we only return [1]
 ///  the single 'end_index' that covers this partition.
@@ -232,7 +202,7 @@ pub fn pubkey_range_from_partition(
 
     type Prefix = u64;
     const PREFIX_SIZE: usize = mem::size_of::<Prefix>();
-    const PREFIX_MAX: Prefix = Prefix::max_value();
+    const PREFIX_MAX: Prefix = Prefix::MAX;
 
     let mut start_pubkey = [0x00u8; 32];
     let mut end_pubkey = [0xffu8; 32];
@@ -349,7 +319,7 @@ pub fn partition_from_pubkey(
     partition_count: PartitionsPerCycle,
 ) -> PartitionIndex {
     type Prefix = u64;
-    const PREFIX_MAX: Prefix = Prefix::max_value();
+    const PREFIX_MAX: Prefix = Prefix::MAX;
 
     if partition_count == 1 {
         return 0;
@@ -533,11 +503,11 @@ pub(crate) mod tests {
         );
 
         fn should_cause_overflow(partition_count: u64) -> bool {
-            // Check `partition_width = (u64::max_value() + 1) / partition_count` is exact and
+            // Check `partition_width = (u64::MAX + 1) / partition_count` is exact and
             // does not have a remainder.
-            // This way, `partition_width * partition_count == (u64::max_value() + 1)`,
+            // This way, `partition_width * partition_count == (u64::MAX + 1)`,
             // so the test actually tests for overflow
-            (u64::max_value() - partition_count + 1) % partition_count == 0
+            (u64::MAX - partition_count + 1) % partition_count == 0
         }
 
         let max_exact = 64;

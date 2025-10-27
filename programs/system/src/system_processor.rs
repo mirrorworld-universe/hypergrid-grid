@@ -4,8 +4,9 @@ use {
         withdraw_nonce_account,
     },
     log::*,
+    solana_log_collector::ic_msg,
     solana_program_runtime::{
-        declare_process_instruction, ic_msg, invoke_context::InvokeContext,
+        declare_process_instruction, invoke_context::InvokeContext,
         sysvar_cache::get_sysvar_with_account_check,
     },
     solana_sdk::{
@@ -104,7 +105,7 @@ fn allocate(
         return Err(SystemError::InvalidAccountDataLength.into());
     }
 
-    account.set_data_length(space as usize, &invoke_context.feature_set)?;
+    account.set_data_length(space as usize)?;
 
     Ok(())
 }
@@ -126,7 +127,7 @@ fn assign(
         return Err(InstructionError::MissingRequiredSignature);
     }
 
-    account.set_owner(&owner.to_bytes(), &invoke_context.feature_set)
+    account.set_owner(&owner.to_bytes())
 }
 
 fn allocate_and_assign(
@@ -203,11 +204,11 @@ fn transfer_verified(
         return Err(SystemError::ResultWithNegativeLamports.into());
     }
 
-    from.checked_sub_lamports(lamports, &invoke_context.feature_set)?;
+    from.checked_sub_lamports(lamports)?;
     drop(from);
     let mut to = instruction_context
         .try_borrow_instruction_account(transaction_context, to_account_index)?;
-    to.checked_add_lamports(lamports, &invoke_context.feature_set)?;
+    to.checked_add_lamports(lamports)?;
     Ok(())
 }
 
@@ -481,9 +482,7 @@ declare_process_instruction!(Entrypoint, DEFAULT_COMPUTE_UNITS, |invoke_context|
             let nonce_versions: nonce::state::Versions = nonce_account.get_state()?;
             match nonce_versions.upgrade() {
                 None => Err(InstructionError::InvalidArgument),
-                Some(nonce_versions) => {
-                    nonce_account.set_state(&nonce_versions, &invoke_context.feature_set)
-                }
+                Some(nonce_versions) => nonce_account.set_state(&nonce_versions),
             }
         }
         SystemInstruction::Allocate { space } => {
@@ -544,7 +543,10 @@ declare_process_instruction!(Entrypoint, DEFAULT_COMPUTE_UNITS, |invoke_context|
 mod tests {
     #[allow(deprecated)]
     use solana_sdk::{
-        account::{self, Account, AccountSharedData, ReadableAccount},
+        account::{
+            self, create_account_shared_data_with_fields, to_account, Account, AccountSharedData,
+            ReadableAccount, DUMMY_INHERITABLE_ACCOUNT_FIELDS,
+        },
         fee_calculator::FeeCalculator,
         hash::{hash, Hash},
         instruction::{AccountMeta, Instruction, InstructionError},
@@ -554,8 +556,12 @@ mod tests {
                 Data as NonceData, DurableNonce, State as NonceState, Versions as NonceVersions,
             },
         },
-        nonce_account, recent_blockhashes_account, system_instruction, system_program,
-        sysvar::{self, recent_blockhashes::IterItem, rent::Rent},
+        nonce_account, system_instruction, system_program,
+        sysvar::{
+            self,
+            recent_blockhashes::{IntoIterSorted, IterItem, RecentBlockhashes, MAX_ENTRIES},
+            rent::Rent,
+        },
     };
     use {
         super::*,
@@ -564,6 +570,7 @@ mod tests {
         solana_program_runtime::{
             invoke_context::mock_process_instruction, with_mock_invoke_context,
         },
+        std::collections::BinaryHeap,
     };
 
     impl From<Pubkey> for Address {
@@ -597,11 +604,30 @@ mod tests {
     fn create_default_account() -> AccountSharedData {
         AccountSharedData::new(0, 0, &Pubkey::new_unique())
     }
+    #[allow(deprecated)]
+    fn create_recent_blockhashes_account_for_test<'a, I>(
+        recent_blockhash_iter: I,
+    ) -> AccountSharedData
+    where
+        I: IntoIterator<Item = IterItem<'a>>,
+    {
+        let mut account = create_account_shared_data_with_fields::<RecentBlockhashes>(
+            &RecentBlockhashes::default(),
+            DUMMY_INHERITABLE_ACCOUNT_FIELDS,
+        );
+        let sorted = BinaryHeap::from_iter(recent_blockhash_iter);
+        let sorted_iter = IntoIterSorted::new(sorted);
+        let recent_blockhash_iter = sorted_iter.take(MAX_ENTRIES);
+        let recent_blockhashes: RecentBlockhashes = recent_blockhash_iter.collect();
+        to_account(&recent_blockhashes, &mut account);
+        account
+    }
     fn create_default_recent_blockhashes_account() -> AccountSharedData {
         #[allow(deprecated)]
-        recent_blockhashes_account::create_account_with_data_for_test(
-            vec![IterItem(0u64, &Hash::default(), 0); sysvar::recent_blockhashes::MAX_ENTRIES],
-        )
+        create_recent_blockhashes_account_for_test(vec![
+            IterItem(0u64, &Hash::default(), 0);
+            sysvar::recent_blockhashes::MAX_ENTRIES
+        ])
     }
     fn create_default_rent_account() -> AccountSharedData {
         account::create_account_shared_data_for_test(&Rent::free())
@@ -1553,10 +1579,10 @@ mod tests {
         );
         let blockhash = hash(&serialize(&0).unwrap());
         #[allow(deprecated)]
-        let new_recent_blockhashes_account =
-            solana_sdk::recent_blockhashes_account::create_account_with_data_for_test(
-                vec![IterItem(0u64, &blockhash, 0); sysvar::recent_blockhashes::MAX_ENTRIES],
-            );
+        let new_recent_blockhashes_account = create_recent_blockhashes_account_for_test(vec![
+                IterItem(0u64, &blockhash, 0);
+                sysvar::recent_blockhashes::MAX_ENTRIES
+            ]);
         mock_process_instruction(
             &system_program::id(),
             Vec::new(),
@@ -1580,7 +1606,7 @@ mod tests {
             Ok(()),
             Entrypoint::vm,
             |invoke_context: &mut InvokeContext| {
-                invoke_context.blockhash = hash(&serialize(&0).unwrap());
+                invoke_context.environment_config.blockhash = hash(&serialize(&0).unwrap());
             },
             |_invoke_context| {},
         );
@@ -1839,8 +1865,7 @@ mod tests {
         #[allow(deprecated)]
         let blockhash_id = sysvar::recent_blockhashes::id();
         #[allow(deprecated)]
-        let new_recent_blockhashes_account =
-            solana_sdk::recent_blockhashes_account::create_account_with_data_for_test(vec![]);
+        let new_recent_blockhashes_account = create_recent_blockhashes_account_for_test(vec![]);
         process_instruction(
             &serialize(&SystemInstruction::InitializeNonceAccount(nonce_address)).unwrap(),
             vec![
@@ -1902,8 +1927,7 @@ mod tests {
             Ok(()),
         );
         #[allow(deprecated)]
-        let new_recent_blockhashes_account =
-            solana_sdk::recent_blockhashes_account::create_account_with_data_for_test(vec![]);
+        let new_recent_blockhashes_account = create_recent_blockhashes_account_for_test(vec![]);
         mock_process_instruction(
             &system_program::id(),
             Vec::new(),
@@ -1927,7 +1951,7 @@ mod tests {
             Err(SystemError::NonceNoRecentBlockhashes.into()),
             Entrypoint::vm,
             |invoke_context: &mut InvokeContext| {
-                invoke_context.blockhash = hash(&serialize(&0).unwrap());
+                invoke_context.environment_config.blockhash = hash(&serialize(&0).unwrap());
             },
             |_invoke_context| {},
         );
@@ -2064,5 +2088,55 @@ mod tests {
             accounts[0].deserialize_data::<NonceVersions>().unwrap(),
             upgraded_nonce_account
         );
+    }
+
+    #[test]
+    fn test_assign_native_loader_and_transfer() {
+        for size in [0, 10] {
+            let pubkey = Pubkey::new_unique();
+            let account = AccountSharedData::new(100, size, &system_program::id());
+            let accounts = process_instruction(
+                &bincode::serialize(&SystemInstruction::Assign {
+                    owner: solana_sdk::native_loader::id(),
+                })
+                .unwrap(),
+                vec![(pubkey, account.clone())],
+                vec![AccountMeta {
+                    pubkey,
+                    is_signer: true,
+                    is_writable: true,
+                }],
+                Ok(()),
+            );
+            assert_eq!(accounts[0].owner(), &solana_sdk::native_loader::id());
+            assert_eq!(accounts[0].lamports(), 100);
+
+            let pubkey2 = Pubkey::new_unique();
+            let accounts = process_instruction(
+                &bincode::serialize(&SystemInstruction::Transfer { lamports: 50 }).unwrap(),
+                vec![
+                    (
+                        pubkey2,
+                        AccountSharedData::new(100, 0, &system_program::id()),
+                    ),
+                    (pubkey, accounts[0].clone()),
+                ],
+                vec![
+                    AccountMeta {
+                        pubkey: pubkey2,
+                        is_signer: true,
+                        is_writable: true,
+                    },
+                    AccountMeta {
+                        pubkey,
+                        is_signer: false,
+                        is_writable: true,
+                    },
+                ],
+                Ok(()),
+            );
+            assert_eq!(accounts[1].owner(), &solana_sdk::native_loader::id());
+            assert_eq!(accounts[1].lamports(), 150);
+        }
     }
 }

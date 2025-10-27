@@ -5,10 +5,8 @@ use {
     fnv::FnvHasher,
     rand::{self, Rng},
     serde::{Deserialize, Serialize},
-    solana_sdk::{
-        sanitize::{Sanitize, SanitizeError},
-        timing::AtomicInterval,
-    },
+    solana_sanitize::{Sanitize, SanitizeError},
+    solana_sdk::timing::AtomicInterval,
     std::{
         cmp, fmt,
         hash::Hasher,
@@ -24,7 +22,8 @@ pub trait BloomHashIndex {
     fn hash_at_index(&self, hash_index: u64) -> u64;
 }
 
-#[derive(Serialize, Deserialize, Default, Clone, PartialEq, Eq, AbiExample)]
+#[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
+#[derive(Serialize, Deserialize, Default, Clone, PartialEq, Eq)]
 pub struct Bloom<T: BloomHashIndex> {
     pub keys: Vec<u64>,
     pub bits: BitVec<u64>,

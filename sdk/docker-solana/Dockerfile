@@ -33,8 +33,8 @@ EXPOSE 8008/udp
 # tpu_vote
 EXPOSE 8009/udp
 
-RUN apt update && \
-    apt-get install -y bzip2 libssl-dev && \
+RUN apt-get update && \
+    apt-get install -y bzip2 libssl-dev ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
 COPY usr/bin /usr/bin/

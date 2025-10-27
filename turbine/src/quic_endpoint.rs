@@ -4,23 +4,24 @@ use {
     futures::future::TryJoin,
     log::error,
     quinn::{
+        crypto::rustls::{QuicClientConfig, QuicServerConfig},
         ClientConfig, ConnectError, Connecting, Connection, ConnectionError, Endpoint,
         EndpointConfig, IdleTimeout, SendDatagramError, ServerConfig, TokioRuntime,
         TransportConfig, VarInt,
     },
-    rcgen::RcgenError,
-    rustls::{Certificate, PrivateKey},
+    rustls::{
+        pki_types::{CertificateDer, PrivateKeyDer},
+        CertificateError, KeyLogFile,
+    },
     solana_quic_client::nonblocking::quic_client::SkipServerVerification,
     solana_runtime::bank_forks::BankForks,
     solana_sdk::{pubkey::Pubkey, signature::Keypair},
-    solana_streamer::{
-        quic::SkipClientVerification, tls_certificates::new_self_signed_tls_certificate,
-    },
+    solana_streamer::{quic::SkipClientVerification, tls_certificates::new_dummy_x509_certificate},
     std::{
         cmp::Reverse,
         collections::{hash_map::Entry, HashMap},
         io::Error as IoError,
-        net::{IpAddr, SocketAddr, UdpSocket},
+        net::{SocketAddr, UdpSocket},
         sync::{
             atomic::{AtomicBool, AtomicU64, Ordering},
             Arc, RwLock,
@@ -67,8 +68,6 @@ pub type AsyncTryJoinHandle = TryJoin<JoinHandle<()>, JoinHandle<()>>;
 
 #[derive(Error, Debug)]
 pub enum Error {
-    #[error(transparent)]
-    CertificateError(#[from] RcgenError),
     #[error("Channel Send Error")]
     ChannelSendError,
     #[error(transparent)]
@@ -96,7 +95,6 @@ pub fn new_quic_endpoint(
     runtime: &tokio::runtime::Handle,
     keypair: &Keypair,
     socket: UdpSocket,
-    address: IpAddr,
     sender: Sender<(Pubkey, SocketAddr, Bytes)>,
     bank_forks: Arc<RwLock<BankForks>>,
 ) -> Result<
@@ -107,8 +105,8 @@ pub fn new_quic_endpoint(
     ),
     Error,
 > {
-    let (cert, key) = new_self_signed_tls_certificate(keypair, address)?;
-    let server_config = new_server_config(cert.clone(), key.clone())?;
+    let (cert, key) = new_dummy_x509_certificate(keypair);
+    let server_config = new_server_config(cert.clone(), key.clone_key())?;
     let client_config = new_client_config(cert, key)?;
     let mut endpoint = {
         // Endpoint::new requires entering the runtime context,
@@ -154,28 +152,36 @@ pub fn close_quic_endpoint(endpoint: &Endpoint) {
     );
 }
 
-fn new_server_config(cert: Certificate, key: PrivateKey) -> Result<ServerConfig, rustls::Error> {
+fn new_server_config(
+    cert: CertificateDer<'static>,
+    key: PrivateKeyDer<'static>,
+) -> Result<ServerConfig, rustls::Error> {
     let mut config = rustls::ServerConfig::builder()
-        .with_safe_defaults()
-        .with_client_cert_verifier(Arc::new(SkipClientVerification {}))
+        .with_client_cert_verifier(SkipClientVerification::new())
         .with_single_cert(vec![cert], key)?;
     config.alpn_protocols = vec![ALPN_TURBINE_PROTOCOL_ID.to_vec()];
-    let mut config = ServerConfig::with_crypto(Arc::new(config));
+    config.key_log = Arc::new(KeyLogFile::new());
+    let quic_server_config = QuicServerConfig::try_from(config)
+        .map_err(|_err| rustls::Error::InvalidCertificate(CertificateError::BadSignature))?;
+
+    let mut config = ServerConfig::with_crypto(Arc::new(quic_server_config));
     config
         .transport_config(Arc::new(new_transport_config()))
-        .use_retry(true)
         .migration(false);
     Ok(config)
 }
 
-fn new_client_config(cert: Certificate, key: PrivateKey) -> Result<ClientConfig, rustls::Error> {
+fn new_client_config(
+    cert: CertificateDer<'static>,
+    key: PrivateKeyDer<'static>,
+) -> Result<ClientConfig, rustls::Error> {
     let mut config = rustls::ClientConfig::builder()
-        .with_safe_defaults()
-        .with_custom_certificate_verifier(Arc::new(SkipServerVerification {}))
+        .dangerous()
+        .with_custom_certificate_verifier(SkipServerVerification::new())
         .with_client_auth_cert(vec![cert], key)?;
     config.enable_early_data = true;
     config.alpn_protocols = vec![ALPN_TURBINE_PROTOCOL_ID.to_vec()];
-    let mut config = ClientConfig::new(Arc::new(config));
+    let mut config = ClientConfig::new(Arc::new(QuicClientConfig::try_from(config).unwrap()));
     config.transport_config(Arc::new(new_transport_config()));
     Ok(config)
 }
@@ -206,18 +212,30 @@ async fn run_server(
 ) {
     let stats = Arc::<TurbineQuicStats>::default();
     let report_metrics_task =
-        tokio::task::spawn(report_metrics_task("repair_quic_server", stats.clone()));
-    while let Some(connecting) = endpoint.accept().await {
-        tokio::task::spawn(handle_connecting_task(
-            endpoint.clone(),
-            connecting,
-            sender.clone(),
-            bank_forks.clone(),
-            prune_cache_pending.clone(),
-            router.clone(),
-            cache.clone(),
-            stats.clone(),
-        ));
+        tokio::task::spawn(report_metrics_task("turbine_quic_server", stats.clone()));
+    while let Some(incoming) = endpoint.accept().await {
+        let remote_addr: SocketAddr = incoming.remote_address();
+        let connecting = incoming.accept();
+        match connecting {
+            Ok(connecting) => {
+                tokio::task::spawn(handle_connecting_task(
+                    endpoint.clone(),
+                    connecting,
+                    sender.clone(),
+                    bank_forks.clone(),
+                    prune_cache_pending.clone(),
+                    router.clone(),
+                    cache.clone(),
+                    stats.clone(),
+                ));
+            }
+            Err(error) => {
+                debug!(
+                    "Error while accepting incoming connection: {error:?} from {}",
+                    remote_addr
+                );
+            }
+        }
     }
     report_metrics_task.abort();
 }
@@ -233,7 +251,7 @@ async fn run_client(
 ) {
     let stats = Arc::<TurbineQuicStats>::default();
     let report_metrics_task =
-        tokio::task::spawn(report_metrics_task("repair_quic_client", stats.clone()));
+        tokio::task::spawn(report_metrics_task("turbine_quic_client", stats.clone()));
     while let Some((remote_address, bytes)) = receiver.recv().await {
         let Some(bytes) = try_route_bytes(&remote_address, bytes, &*router.read().await, &stats)
         else {
@@ -581,7 +599,7 @@ async fn prune_connection_cache(
     debug_assert!(prune_cache_pending.load(Ordering::Relaxed));
     let staked_nodes = {
         let root_bank = bank_forks.read().unwrap().root_bank();
-        root_bank.staked_nodes()
+        root_bank.current_epoch_staked_nodes()
     };
     {
         let mut cache = cache.lock().await;
@@ -634,11 +652,15 @@ struct TurbineQuicStats {
     connection_error_timed_out: AtomicU64,
     connection_error_transport_error: AtomicU64,
     connection_error_version_mismatch: AtomicU64,
+    connection_error_connection_limit_exceeded: AtomicU64,
     invalid_identity: AtomicU64,
     router_try_send_error_full: AtomicU64,
     send_datagram_error_connection_lost: AtomicU64,
     send_datagram_error_too_large: AtomicU64,
     send_datagram_error_unsupported_by_peer: AtomicU64,
+    connect_error_cids_exhausted: AtomicU64,
+    connect_error_invalid_server_name: AtomicU64,
+    connection_error_cids_exhausted: AtomicU64,
 }
 
 async fn report_metrics_task(name: &'static str, stats: Arc<TurbineQuicStats>) {
@@ -650,15 +672,8 @@ async fn report_metrics_task(name: &'static str, stats: Arc<TurbineQuicStats>) {
 
 fn record_error(err: &Error, stats: &TurbineQuicStats) {
     match err {
-        Error::CertificateError(_) => (),
         Error::ChannelSendError => (),
         Error::ConnectError(ConnectError::EndpointStopping) => {
-            add_metric!(stats.connect_error_other)
-        }
-        Error::ConnectError(ConnectError::TooManyConnections) => {
-            add_metric!(stats.connect_error_too_many_connections)
-        }
-        Error::ConnectError(ConnectError::InvalidDnsName(_)) => {
             add_metric!(stats.connect_error_other)
         }
         Error::ConnectError(ConnectError::InvalidRemoteAddress(_)) => {
@@ -702,6 +717,15 @@ fn record_error(err: &Error, stats: &TurbineQuicStats) {
             add_metric!(stats.send_datagram_error_connection_lost)
         }
         Error::TlsError(_) => (),
+        Error::ConnectError(ConnectError::CidsExhausted) => {
+            add_metric!(stats.connect_error_cids_exhausted)
+        }
+        Error::ConnectError(ConnectError::InvalidServerName(_)) => {
+            add_metric!(stats.connect_error_invalid_server_name)
+        }
+        Error::ConnectionError(ConnectionError::CidsExhausted) => {
+            add_metric!(stats.connection_error_cids_exhausted)
+        }
     }
 }
 
@@ -761,6 +785,11 @@ fn report_metrics(name: &'static str, stats: &TurbineQuicStats) {
         (
             "connection_error_version_mismatch",
             reset_metric!(stats.connection_error_version_mismatch),
+            i64
+        ),
+        (
+            "connection_error_connection_limit_exceeded",
+            reset_metric!(stats.connection_error_connection_limit_exceeded),
             i64
         ),
         (
@@ -838,7 +867,6 @@ mod tests {
                         runtime.handle(),
                         keypair,
                         socket,
-                        IpAddr::V4(Ipv4Addr::LOCALHOST),
                         sender,
                         bank_forks.clone(),
                     )

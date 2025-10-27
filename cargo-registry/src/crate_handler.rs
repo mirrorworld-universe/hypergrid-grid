@@ -9,7 +9,7 @@ use {
     },
     hyper::body::Bytes,
     log::*,
-    serde::{Deserialize, Serialize},
+    serde_derive::{Deserialize, Serialize},
     serde_json::from_slice,
     sha2::{Digest, Sha256},
     solana_cli::program_v4::{process_deploy_program, process_dump, read_and_verify_elf},
@@ -43,7 +43,6 @@ pub(crate) enum DependencyType {
     Normal,
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct Dependency {
     pub name: String,
@@ -111,7 +110,7 @@ impl Program {
             return Err("Signer doesn't match program ID".into());
         }
 
-        let mut program_data = read_and_verify_elf(self.path.as_ref())
+        let mut program_data = read_and_verify_elf(self.path.as_ref(), &client.rpc_client)
             .map_err(|e| format!("failed to read the program: {}", e))?;
 
         if APPEND_CRATE_TO_ELF {
@@ -339,7 +338,7 @@ impl UnpackedCrate {
         Program::from(self).deploy(client, signer)?;
 
         let mut entry: IndexEntry = self.meta.clone().into();
-        entry.cksum = self.cksum.clone();
+        entry.cksum.clone_from(&self.cksum);
         index.insert_entry(entry)?;
 
         info!("Successfully deployed the program");

@@ -4,13 +4,11 @@
 
 use {
     crate::{
-        account::{Account, AccountSharedData},
         clock::{UnixTimestamp, DEFAULT_TICKS_PER_SLOT},
         epoch_schedule::EpochSchedule,
         fee_calculator::FeeRateGovernor,
         hash::{hash, Hash},
         inflation::Inflation,
-        native_token::lamports_to_sol,
         poh_config::PohConfig,
         pubkey::Pubkey,
         rent::Rent,
@@ -22,6 +20,8 @@ use {
     bincode::{deserialize, serialize},
     chrono::{TimeZone, Utc},
     memmap2::Mmap,
+    solana_account::{Account, AccountSharedData},
+    solana_native_token::lamports_to_sol,
     std::{
         collections::BTreeMap,
         fmt,
@@ -41,7 +41,8 @@ pub const DEFAULT_GENESIS_DOWNLOAD_PATH: &str = "/genesis.tar.bz2";
 pub const UNUSED_DEFAULT: u64 = 1024;
 
 // The order can't align with release lifecycle only to remain ABI-compatible...
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, AbiEnumVisitor, AbiExample)]
+#[cfg_attr(feature = "frozen-abi", derive(AbiExample, AbiEnumVisitor))]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClusterType {
     Testnet,
     MainnetBeta,
@@ -56,7 +57,7 @@ impl ClusterType {
     pub fn get_genesis_hash(&self) -> Option<Hash> {
         match self {
             Self::MainnetBeta => {
-                Some(Hash::from_str("5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d").unwrap())
+                Some(Hash::from_str("9qoRTAHGWBZHYzMJGkt62wBbFRASj6H7CvoNsNyRw2h4").unwrap())
             }
             Self::Testnet => {
                 Some(Hash::from_str("4uhcVJyU9pJkvQyS88uRDiswHXSCkY3zQawwpjk2NsNY").unwrap())
@@ -83,8 +84,12 @@ impl FromStr for ClusterType {
     }
 }
 
-#[frozen_abi(digest = "3V3ZVRyzNhRfe8RJwDeGpeTP8xBWGGFBEbwTkvKKVjEa")]
-#[derive(Serialize, Deserialize, Debug, Clone, AbiExample, PartialEq)]
+#[cfg_attr(
+    feature = "frozen-abi",
+    derive(AbiExample),
+    frozen_abi(digest = "41wPwgEZLhp9AS4tjTQebW7cvHnkbSSTN19vaKwVett6")
+)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct GenesisConfig {
     /// when the network (bootstrap validator) was started relative to the UNIX Epoch
     pub creation_time: UnixTimestamp,

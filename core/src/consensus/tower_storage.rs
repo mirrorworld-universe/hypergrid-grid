@@ -14,7 +14,8 @@ use {
     },
 };
 
-#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq, AbiExample)]
+#[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub enum SavedTowerVersions {
     V1_17_14(SavedTower1_7_14),
     Current(SavedTower),
@@ -75,8 +76,12 @@ impl From<SavedTower1_7_14> for SavedTowerVersions {
     }
 }
 
-#[frozen_abi(digest = "Gaxfwvx5MArn52mKZQgzHmDCyn5YfCuTHvp5Et3rFfpp")]
-#[derive(Default, Clone, Serialize, Deserialize, Debug, PartialEq, Eq, AbiExample)]
+#[cfg_attr(
+    feature = "frozen-abi",
+    derive(AbiExample),
+    frozen_abi(digest = "JBXfVQ6BXHBGSNY919yEkXN4H7XxmAMA7QcGrf7DiWHP")
+)]
+#[derive(Default, Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct SavedTower {
     signature: Signature,
     data: Vec<u8>,
@@ -372,7 +377,7 @@ pub mod test {
         super::*,
         crate::consensus::{
             tower1_7_14::{SavedTower1_7_14, Tower1_7_14},
-            Tower,
+            BlockhashStatus, Tower,
         },
         solana_sdk::{hash::Hash, signature::Keypair},
         solana_vote_program::vote_state::{
@@ -403,7 +408,7 @@ pub mod test {
             vote_state: VoteState1_14_11::from(vote_state),
             last_vote: vote.clone(),
             last_timestamp: BlockTimestamp::default(),
-            last_vote_tx_blockhash: None,
+            last_vote_tx_blockhash: BlockhashStatus::Uninitialized,
             stray_restored_slot: Some(2),
             last_switch_threshold_check: Option::default(),
         };

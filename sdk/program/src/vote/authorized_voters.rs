@@ -1,10 +1,15 @@
+#[cfg(test)]
+use arbitrary::Arbitrary;
 use {
-    crate::{clock::Epoch, pubkey::Pubkey},
+    crate::pubkey::Pubkey,
     serde_derive::{Deserialize, Serialize},
+    solana_clock::Epoch,
     std::collections::BTreeMap,
 };
 
-#[derive(Debug, Default, Serialize, Deserialize, PartialEq, Eq, Clone, AbiExample)]
+#[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq, Eq, Clone)]
+#[cfg_attr(test, derive(Arbitrary))]
 pub struct AuthorizedVoters {
     authorized_voters: BTreeMap<Epoch, Pubkey>,
 }
@@ -74,7 +79,7 @@ impl AuthorizedVoters {
     }
 
     pub fn contains(&self, epoch: Epoch) -> bool {
-        self.authorized_voters.get(&epoch).is_some()
+        self.authorized_voters.contains_key(&epoch)
     }
 
     pub fn iter(&self) -> std::collections::btree_map::Iter<Epoch, Pubkey> {

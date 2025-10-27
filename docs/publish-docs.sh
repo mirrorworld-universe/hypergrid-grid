@@ -9,15 +9,15 @@ fi
 CONFIG_FILE=vercel.json
 
 if [[ -n $CI_TAG ]]; then
-  PROJECT_NAME=docs-solana-com
+  PROJECT_NAME=docs-anza-xyz
 else
   eval "$(../ci/channel-info.sh)"
   case $CHANNEL in
   edge)
-    PROJECT_NAME=edge-docs-solana-com
+    PROJECT_NAME=edge-docs-anza-xyz
     ;;
   beta)
-    PROJECT_NAME=beta-docs-solana-com
+    PROJECT_NAME=beta-docs-anza-xyz
     ;;
   *)
     PROJECT_NAME=docs
@@ -62,7 +62,7 @@ cat > "$CONFIG_FILE" <<EOF
     { "source": "/wallet-guide/file-system-wallet", "destination": "/cli/wallets/file-system" },
     { "source": "/wallet-guide/hardware-wallet", "destination": "/cli/wallets/hardware-wallet" },
     { "source": "/wallet-guide/hardware-wallet/ledger", "destination": "/cli/wallets/hardware-wallet/ledger" },
-    { "source": "/cluster/overview", "destination": "/clusters/index" },
+    { "source": "/cluster/overview", "destination": "/clusters" },
     { "source": "/cluster/bench-tps", "destination": "/clusters/benchmark" },
     { "source": "/cluster/performance-metrics", "destination": "/clusters/metrics" },
     { "source": "/running-validator", "destination": "/operations" },
@@ -151,4 +151,4 @@ EOF
   echo "VERCEL_TOKEN is undefined.  Needed for Vercel authentication."
   exit 1
 }
-vercel deploy . --local-config="$CONFIG_FILE" --confirm --token "$VERCEL_TOKEN" --prod
+vercel deploy . --local-config="$CONFIG_FILE" --yes --token "$VERCEL_TOKEN" --prod

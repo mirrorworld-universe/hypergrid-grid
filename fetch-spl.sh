@@ -7,6 +7,7 @@
 set -e
 
 upgradeableLoader=BPFLoaderUpgradeab1e11111111111111111111111
+upgradeAuthority=${SOLANA_RUN_SH_UPGRADE_AUTHORITY:-none}
 
 fetch_program() {
   declare name=$1
@@ -17,7 +18,7 @@ fetch_program() {
   declare so=spl_$name-$version.so
 
   if [[ $loader == "$upgradeableLoader" ]]; then
-    genesis_args+=(--upgradeable-program "$address" "$loader" "$so" none)
+    genesis_args+=(--upgradeable-program "$address" "$loader" "$so" "$upgradeAuthority")
   else
     genesis_args+=(--bpf-program "$address" "$loader" "$so")
   fi
@@ -45,7 +46,7 @@ fetch_program() {
 }
 
 fetch_program token 3.5.0 TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA BPFLoader2111111111111111111111111111111111
-fetch_program token-2022 0.9.0 TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb BPFLoaderUpgradeab1e11111111111111111111111
+fetch_program token-2022 5.0.2 TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb BPFLoaderUpgradeab1e11111111111111111111111
 fetch_program memo  1.0.0 Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDDwQDxFMNo BPFLoader1111111111111111111111111111111111
 fetch_program memo  3.0.0 MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr BPFLoader2111111111111111111111111111111111
 fetch_program associated-token-account 1.1.2 ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL BPFLoader2111111111111111111111111111111111

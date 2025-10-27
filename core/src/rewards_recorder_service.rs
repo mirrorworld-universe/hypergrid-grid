@@ -1,9 +1,9 @@
 use {
     crossbeam_channel::{Receiver, RecvTimeoutError, Sender},
-    solana_accounts_db::stake_rewards::RewardInfo,
     solana_ledger::blockstore::Blockstore,
-    solana_sdk::{clock::Slot, pubkey::Pubkey},
-    solana_transaction_status::Reward,
+    solana_runtime::bank::KeyedRewardsAndNumPartitions,
+    solana_sdk::clock::Slot,
+    solana_transaction_status::{Reward, RewardsAndNumPartitions},
     std::{
         sync::{
             atomic::{AtomicBool, AtomicU64, Ordering},
@@ -14,7 +14,7 @@ use {
     },
 };
 
-pub type RewardsBatch = (Slot, Vec<(Pubkey, RewardInfo)>);
+pub type RewardsBatch = (Slot, KeyedRewardsAndNumPartitions);
 pub type RewardsRecorderReceiver = Receiver<RewardsMessage>;
 pub type RewardsRecorderSender = Sender<RewardsMessage>;
 
@@ -56,7 +56,13 @@ impl RewardsRecorderService {
         blockstore: &Blockstore,
     ) -> Result<(), RecvTimeoutError> {
         match rewards_receiver.recv_timeout(Duration::from_secs(1))? {
-            RewardsMessage::Batch((slot, rewards)) => {
+            RewardsMessage::Batch((
+                slot,
+                KeyedRewardsAndNumPartitions {
+                    keyed_rewards: rewards,
+                    num_partitions,
+                },
+            )) => {
                 let rpc_rewards = rewards
                     .into_iter()
                     .map(|(pubkey, reward_info)| Reward {
@@ -69,7 +75,13 @@ impl RewardsRecorderService {
                     .collect();
 
                 blockstore
-                    .write_rewards(slot, rpc_rewards)
+                    .write_rewards(
+                        slot,
+                        RewardsAndNumPartitions {
+                            rewards: rpc_rewards,
+                            num_partitions,
+                        },
+                    )
                     .expect("Expect database write to succeed");
             }
             RewardsMessage::Complete(slot) => {

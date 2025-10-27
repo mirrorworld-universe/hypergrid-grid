@@ -17,8 +17,8 @@ use {
     serde::{Deserialize, Serialize},
     serde_json::{Map, Value},
     solana_account_decoder::{
-        parse_account_data::AccountAdditionalData, parse_token::UiTokenAccount, UiAccount,
-        UiAccountEncoding, UiDataSliceConfig,
+        encode_ui_account, parse_account_data::AccountAdditionalDataV2,
+        parse_token::UiTokenAccount, UiAccountEncoding, UiDataSliceConfig,
     },
     solana_clap_utils::keypair::SignOnly,
     solana_rpc_client_api::response::{
@@ -104,6 +104,51 @@ impl OutputFormat {
     }
 }
 
+#[derive(Serialize)]
+pub struct CliPrioritizationFeeStats {
+    pub fees: Vec<CliPrioritizationFee>,
+    pub min: u64,
+    pub max: u64,
+    pub average: u64,
+    pub num_slots: u64,
+}
+
+impl QuietDisplay for CliPrioritizationFeeStats {}
+impl VerboseDisplay for CliPrioritizationFeeStats {
+    fn write_str(&self, f: &mut dyn std::fmt::Write) -> fmt::Result {
+        writeln!(f, "{:<11} prioritization_fee", "slot")?;
+        for fee in &self.fees {
+            write!(f, "{}", fee)?;
+        }
+        write!(f, "{}", self)
+    }
+}
+
+impl fmt::Display for CliPrioritizationFeeStats {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        writeln!(
+            f,
+            "Fees in recent {} slots: Min: {} Max: {} Average: {}",
+            self.num_slots, self.min, self.max, self.average
+        )
+    }
+}
+
+#[derive(Serialize)]
+pub struct CliPrioritizationFee {
+    pub slot: Slot,
+    pub prioritization_fee: u64,
+}
+
+impl QuietDisplay for CliPrioritizationFee {}
+impl VerboseDisplay for CliPrioritizationFee {}
+
+impl fmt::Display for CliPrioritizationFee {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        writeln!(f, "{:<11} {}", self.slot, self.prioritization_fee)
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct CliAccount {
     #[serde(flatten)]
@@ -114,7 +159,7 @@ pub struct CliAccount {
 
 pub struct CliAccountNewConfig {
     pub data_encoding: UiAccountEncoding,
-    pub additional_data: Option<AccountAdditionalData>,
+    pub additional_data: Option<AccountAdditionalDataV2>,
     pub data_slice_config: Option<UiDataSliceConfig>,
     pub use_lamports_unit: bool,
 }
@@ -156,7 +201,7 @@ impl CliAccount {
         Self {
             keyed_account: RpcKeyedAccount {
                 pubkey: address.to_string(),
-                account: UiAccount::encode(
+                account: encode_ui_account(
                     address,
                     account,
                     data_encoding,
@@ -978,7 +1023,7 @@ pub struct CliKeyedEpochReward {
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CliEpochRewardshMetadata {
+pub struct CliEpochRewardsMetadata {
     pub epoch: Epoch,
     pub effective_slot: Slot,
     pub block_time: UnixTimestamp,
@@ -988,7 +1033,7 @@ pub struct CliEpochRewardshMetadata {
 #[serde(rename_all = "camelCase")]
 pub struct CliKeyedEpochRewards {
     #[serde(flatten, skip_serializing_if = "Option::is_none")]
-    pub epoch_metadata: Option<CliEpochRewardshMetadata>,
+    pub epoch_metadata: Option<CliEpochRewardsMetadata>,
     pub rewards: Vec<CliKeyedEpochReward>,
 }
 
@@ -1266,6 +1311,84 @@ impl VerboseDisplay for CliStakeState {
     }
 }
 
+fn show_inactive_stake(
+    me: &CliStakeState,
+    f: &mut fmt::Formatter,
+    delegated_stake: u64,
+) -> fmt::Result {
+    if let Some(deactivation_epoch) = me.deactivation_epoch {
+        if me.current_epoch > deactivation_epoch {
+            let deactivating_stake = me.deactivating_stake.or(me.active_stake);
+            if let Some(deactivating_stake) = deactivating_stake {
+                writeln!(
+                    f,
+                    "Inactive Stake: {}",
+                    build_balance_message(
+                        delegated_stake - deactivating_stake,
+                        me.use_lamports_unit,
+                        true
+                    ),
+                )?;
+                writeln!(
+                    f,
+                    "Deactivating Stake: {}",
+                    build_balance_message(deactivating_stake, me.use_lamports_unit, true),
+                )?;
+            }
+        }
+        writeln!(
+            f,
+            "Stake deactivates starting from epoch: {deactivation_epoch}"
+        )?;
+    }
+    if let Some(delegated_vote_account_address) = &me.delegated_vote_account_address {
+        writeln!(
+            f,
+            "Delegated Vote Account Address: {delegated_vote_account_address}"
+        )?;
+    }
+    Ok(())
+}
+
+fn show_active_stake(
+    me: &CliStakeState,
+    f: &mut fmt::Formatter,
+    delegated_stake: u64,
+) -> fmt::Result {
+    if me
+        .deactivation_epoch
+        .map(|d| me.current_epoch <= d)
+        .unwrap_or(true)
+    {
+        let active_stake = me.active_stake.unwrap_or(0);
+        writeln!(
+            f,
+            "Active Stake: {}",
+            build_balance_message(active_stake, me.use_lamports_unit, true),
+        )?;
+        let activating_stake = me.activating_stake.or_else(|| {
+            if me.active_stake.is_none() {
+                Some(delegated_stake)
+            } else {
+                None
+            }
+        });
+        if let Some(activating_stake) = activating_stake {
+            writeln!(
+                f,
+                "Activating Stake: {}",
+                build_balance_message(activating_stake, me.use_lamports_unit, true),
+            )?;
+            writeln!(
+                f,
+                "Stake activates starting from epoch: {}",
+                me.activation_epoch.unwrap()
+            )?;
+        }
+    }
+    Ok(())
+}
+
 impl fmt::Display for CliStakeState {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fn show_authorized(f: &mut fmt::Formatter, authorized: &CliAuthorized) -> fmt::Result {
@@ -1329,79 +1452,8 @@ impl fmt::Display for CliStakeState {
                         "Delegated Stake: {}",
                         build_balance_message(delegated_stake, self.use_lamports_unit, true)
                     )?;
-                    if self
-                        .deactivation_epoch
-                        .map(|d| self.current_epoch <= d)
-                        .unwrap_or(true)
-                    {
-                        let active_stake = self.active_stake.unwrap_or(0);
-                        writeln!(
-                            f,
-                            "Active Stake: {}",
-                            build_balance_message(active_stake, self.use_lamports_unit, true),
-                        )?;
-                        let activating_stake = self.activating_stake.or_else(|| {
-                            if self.active_stake.is_none() {
-                                Some(delegated_stake)
-                            } else {
-                                None
-                            }
-                        });
-                        if let Some(activating_stake) = activating_stake {
-                            writeln!(
-                                f,
-                                "Activating Stake: {}",
-                                build_balance_message(
-                                    activating_stake,
-                                    self.use_lamports_unit,
-                                    true
-                                ),
-                            )?;
-                            writeln!(
-                                f,
-                                "Stake activates starting from epoch: {}",
-                                self.activation_epoch.unwrap()
-                            )?;
-                        }
-                    }
-
-                    if let Some(deactivation_epoch) = self.deactivation_epoch {
-                        if self.current_epoch > deactivation_epoch {
-                            let deactivating_stake = self.deactivating_stake.or(self.active_stake);
-                            if let Some(deactivating_stake) = deactivating_stake {
-                                writeln!(
-                                    f,
-                                    "Inactive Stake: {}",
-                                    build_balance_message(
-                                        delegated_stake - deactivating_stake,
-                                        self.use_lamports_unit,
-                                        true
-                                    ),
-                                )?;
-                                writeln!(
-                                    f,
-                                    "Deactivating Stake: {}",
-                                    build_balance_message(
-                                        deactivating_stake,
-                                        self.use_lamports_unit,
-                                        true
-                                    ),
-                                )?;
-                            }
-                        }
-                        writeln!(
-                            f,
-                            "Stake deactivates starting from epoch: {deactivation_epoch}"
-                        )?;
-                    }
-                    if let Some(delegated_vote_account_address) =
-                        &self.delegated_vote_account_address
-                    {
-                        writeln!(
-                            f,
-                            "Delegated Vote Account Address: {delegated_vote_account_address}"
-                        )?;
-                    }
+                    show_active_stake(self, f, delegated_stake)?;
+                    show_inactive_stake(self, f, delegated_stake)?;
                 } else {
                     writeln!(f, "Stake account is undelegated")?;
                 }
@@ -1648,7 +1700,23 @@ impl VerboseDisplay for CliAuthorizedVoters {}
 
 impl fmt::Display for CliAuthorizedVoters {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:?}", self.authorized_voters)
+        if let Some((_epoch, current_authorized_voter)) = self.authorized_voters.first_key_value() {
+            write!(f, "{current_authorized_voter}")?;
+        } else {
+            write!(f, "None")?;
+        }
+        if self.authorized_voters.len() > 1 {
+            let (epoch, upcoming_authorized_voter) = self
+                .authorized_voters
+                .last_key_value()
+                .expect("CliAuthorizedVoters::authorized_voters.len() > 1");
+            writeln!(f)?;
+            write!(
+                f,
+                "  New Vote Authority as of Epoch {epoch}: {upcoming_authorized_voter}"
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -2075,6 +2143,7 @@ impl fmt::Display for CliTokenAccount {
 #[serde(rename_all = "camelCase")]
 pub struct CliProgramId {
     pub program_id: String,
+    pub signature: Option<String>,
 }
 
 impl QuietDisplay for CliProgramId {}
@@ -2082,7 +2151,12 @@ impl VerboseDisplay for CliProgramId {}
 
 impl fmt::Display for CliProgramId {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        writeln_name_value(f, "Program Id:", &self.program_id)
+        writeln_name_value(f, "Program Id:", &self.program_id)?;
+        if let Some(ref signature) = self.signature {
+            writeln!(f)?;
+            writeln_name_value(f, "Signature:", signature)?;
+        }
+        Ok(())
     }
 }
 
@@ -2839,6 +2913,8 @@ pub struct CliGossipNode {
     pub version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub feature_set: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tpu_quic_port: Option<u16>,
 }
 
 impl CliGossipNode {
@@ -2853,6 +2929,7 @@ impl CliGossipNode {
             pubsub_host: info.pubsub.map(|addr| addr.to_string()),
             version: info.version,
             feature_set: info.feature_set,
+            tpu_quic_port: info.tpu_quic.map(|addr| addr.port()),
         }
     }
 }
@@ -2878,13 +2955,14 @@ impl fmt::Display for CliGossipNode {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "{:15} | {:44} | {:6} | {:5} | {:21} | {:8}| {}",
+            "{:15} | {:44} | {:6} | {:5} | {:8} | {:21} | {:8}| {}",
             unwrap_to_string_or_none(self.ip_address.as_ref()),
             self.identity_label
                 .as_ref()
                 .unwrap_or(&self.identity_pubkey),
             unwrap_to_string_or_none(self.gossip_port.as_ref()),
             unwrap_to_string_or_none(self.tpu_port.as_ref()),
+            unwrap_to_string_or_none(self.tpu_quic_port.as_ref()),
             unwrap_to_string_or_none(self.rpc_host.as_ref()),
             unwrap_to_string_or_default(self.version.as_ref(), "unknown"),
             unwrap_to_string_or_default(self.feature_set.as_ref(), "unknown"),
@@ -2903,9 +2981,9 @@ impl fmt::Display for CliGossipNodes {
         writeln!(
             f,
             "IP Address      | Identity                                     \
-             | Gossip | TPU   | RPC Address           | Version | Feature Set\n\
+             | Gossip | TPU   | TPU-QUIC | RPC Address           | Version | Feature Set\n\
              ----------------+----------------------------------------------+\
-             --------+-------+-----------------------+---------+----------------",
+             --------+-------+----------+-----------------------+---------+----------------",
         )?;
         for node in self.0.iter() {
             writeln!(f, "{node}")?;
@@ -3373,12 +3451,12 @@ mod tests {
             ..CliVoteAccount::default()
         };
         let s = format!("{c}");
-        assert_eq!(s, "Account Balance: 0.00001 SOL\nValidator Identity: 11111111111111111111111111111111\nVote Authority: {}\nWithdraw Authority: \nCredits: 0\nCommission: 0%\nRoot Slot: ~\nRecent Timestamp: 1970-01-01T00:00:00Z from slot 0\nEpoch Rewards:\n  Epoch   Reward Slot  Time                        Amount              New Balance         Percent Change             APR  Commission\n  1       100          1970-01-01 00:00:00 UTC  ◎0.000000010        ◎0.000000100               11.000%          10.00%          1%\n  2       200          1970-01-12 13:46:40 UTC  ◎0.000000012        ◎0.000000100               11.000%          13.00%          1%\n");
+        assert_eq!(s, "Account Balance: 0.00001 SOL\nValidator Identity: 11111111111111111111111111111111\nVote Authority: None\nWithdraw Authority: \nCredits: 0\nCommission: 0%\nRoot Slot: ~\nRecent Timestamp: 1970-01-01T00:00:00Z from slot 0\nEpoch Rewards:\n  Epoch   Reward Slot  Time                        Amount              New Balance         Percent Change             APR  Commission\n  1       100          1970-01-01 00:00:00 UTC  ◎0.000000010        ◎0.000000100               11.000%          10.00%          1%\n  2       200          1970-01-12 13:46:40 UTC  ◎0.000000012        ◎0.000000100               11.000%          13.00%          1%\n");
         println!("{s}");
 
         c.use_csv = true;
         let s = format!("{c}");
-        assert_eq!(s, "Account Balance: 0.00001 SOL\nValidator Identity: 11111111111111111111111111111111\nVote Authority: {}\nWithdraw Authority: \nCredits: 0\nCommission: 0%\nRoot Slot: ~\nRecent Timestamp: 1970-01-01T00:00:00Z from slot 0\nEpoch Rewards:\nEpoch,Reward Slot,Time,Amount,New Balance,Percent Change,APR,Commission\n1,100,1970-01-01 00:00:00 UTC,0.00000001,0.0000001,11%,10.00%,1%\n2,200,1970-01-12 13:46:40 UTC,0.000000012,0.0000001,11%,13.00%,1%\n");
+        assert_eq!(s, "Account Balance: 0.00001 SOL\nValidator Identity: 11111111111111111111111111111111\nVote Authority: None\nWithdraw Authority: \nCredits: 0\nCommission: 0%\nRoot Slot: ~\nRecent Timestamp: 1970-01-01T00:00:00Z from slot 0\nEpoch Rewards:\nEpoch,Reward Slot,Time,Amount,New Balance,Percent Change,APR,Commission\n1,100,1970-01-01 00:00:00 UTC,0.00000001,0.0000001,11%,10.00%,1%\n2,200,1970-01-12 13:46:40 UTC,0.000000012,0.0000001,11%,13.00%,1%\n");
         println!("{s}");
     }
 }

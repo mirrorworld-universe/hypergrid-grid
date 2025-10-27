@@ -8,7 +8,7 @@ use {
         signature::Signature,
         transaction::SanitizedTransaction,
     },
-    solana_transaction_status::{Reward, TransactionStatusMeta},
+    solana_transaction_status::{Reward, RewardsAndNumPartitions, TransactionStatusMeta},
     std::{any::Any, error, io},
     thiserror::Error,
 };
@@ -251,11 +251,27 @@ pub struct ReplicaBlockInfoV3<'a> {
     pub entry_count: u64,
 }
 
+/// Extending ReplicaBlockInfo by sending RewardsAndNumPartitions.
+#[derive(Clone, Debug)]
+#[repr(C)]
+pub struct ReplicaBlockInfoV4<'a> {
+    pub parent_slot: Slot,
+    pub parent_blockhash: &'a str,
+    pub slot: Slot,
+    pub blockhash: &'a str,
+    pub rewards: &'a RewardsAndNumPartitions,
+    pub block_time: Option<UnixTimestamp>,
+    pub block_height: Option<u64>,
+    pub executed_transaction_count: u64,
+    pub entry_count: u64,
+}
+
 #[repr(u32)]
 pub enum ReplicaBlockInfoVersions<'a> {
     V0_0_1(&'a ReplicaBlockInfo<'a>),
     V0_0_2(&'a ReplicaBlockInfoV2<'a>),
     V0_0_3(&'a ReplicaBlockInfoV3<'a>),
+    V0_0_4(&'a ReplicaBlockInfoV4<'a>),
 }
 
 /// Errors returned by plugin calls
@@ -290,7 +306,7 @@ pub enum GeyserPluginError {
 }
 
 /// The current status of a slot
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[repr(u32)]
 pub enum SlotStatus {
     /// The highest slot of the heaviest fork processed by the node. Ledger state at this slot is
@@ -303,6 +319,18 @@ pub enum SlotStatus {
 
     /// The highest slot that has been voted on by supermajority of the cluster, ie. is confirmed.
     Confirmed,
+
+    /// First Shred Received
+    FirstShredReceived,
+
+    /// All shreds for the slot have been received.
+    Completed,
+
+    /// A new bank fork is created with the slot
+    CreatedBank,
+
+    /// A slot is marked dead
+    Dead(String),
 }
 
 impl SlotStatus {
@@ -311,6 +339,10 @@ impl SlotStatus {
             SlotStatus::Confirmed => "confirmed",
             SlotStatus::Processed => "processed",
             SlotStatus::Rooted => "rooted",
+            SlotStatus::FirstShredReceived => "first_shread_received",
+            SlotStatus::Completed => "completed",
+            SlotStatus::CreatedBank => "created_bank",
+            SlotStatus::Dead(_error) => "dead",
         }
     }
 }
@@ -327,7 +359,7 @@ pub trait GeyserPlugin: Any + Send + Sync + std::fmt::Debug {
     /// # Examples
     ///
     /// ```
-    /// use solana_geyser_plugin_interface::geyser_plugin_interface::{GeyserPlugin,
+    /// use agave_geyser_plugin_interface::geyser_plugin_interface::{GeyserPlugin,
     /// GeyserPluginError, Result};
     ///
     /// #[derive(Debug)]
@@ -391,7 +423,7 @@ pub trait GeyserPlugin: Any + Send + Sync + std::fmt::Debug {
         &self,
         slot: Slot,
         parent: Option<u64>,
-        status: SlotStatus,
+        status: &SlotStatus,
     ) -> Result<()> {
         Ok(())
     }

@@ -1,13 +1,15 @@
 use {
-    solana_cost_model::transaction_cost::TransactionCost,
-    solana_runtime::transaction_priority_details::TransactionPriorityDetails,
-    solana_sdk::{slot_history::Slot, transaction::SanitizedTransaction},
+    crate::banking_stage::{
+        immutable_deserialized_packet::ImmutableDeserializedPacket, scheduler_messages::MaxAge,
+    },
+    solana_sdk::transaction::SanitizedTransaction,
+    std::sync::Arc,
 };
 
 /// Simple wrapper type to tie a sanitized transaction to max age slot.
 pub(crate) struct SanitizedTransactionTTL {
     pub(crate) transaction: SanitizedTransaction,
-    pub(crate) max_age_slot: Slot,
+    pub(crate) max_age: MaxAge,
 }
 
 /// TransactionState is used to track the state of a transaction in the transaction scheduler
@@ -34,77 +36,92 @@ pub(crate) enum TransactionState {
     /// The transaction is available for scheduling.
     Unprocessed {
         transaction_ttl: SanitizedTransactionTTL,
-        transaction_priority_details: TransactionPriorityDetails,
-        transaction_cost: TransactionCost,
-        forwarded: bool,
+        packet: Arc<ImmutableDeserializedPacket>,
+        priority: u64,
+        cost: u64,
+        should_forward: bool,
     },
     /// The transaction is currently scheduled or being processed.
     Pending {
-        transaction_priority_details: TransactionPriorityDetails,
-        transaction_cost: TransactionCost,
-        forwarded: bool,
+        packet: Arc<ImmutableDeserializedPacket>,
+        priority: u64,
+        cost: u64,
+        should_forward: bool,
     },
+    /// Only used during transition.
+    Transitioning,
 }
 
 impl TransactionState {
     /// Creates a new `TransactionState` in the `Unprocessed` state.
     pub(crate) fn new(
         transaction_ttl: SanitizedTransactionTTL,
-        transaction_priority_details: TransactionPriorityDetails,
-        transaction_cost: TransactionCost,
+        packet: Arc<ImmutableDeserializedPacket>,
+        priority: u64,
+        cost: u64,
     ) -> Self {
+        let should_forward = !packet.original_packet().meta().forwarded()
+            && packet.original_packet().meta().is_from_staked_node();
         Self::Unprocessed {
             transaction_ttl,
-            transaction_priority_details,
-            transaction_cost,
-            forwarded: false,
+            packet,
+            priority,
+            cost,
+            should_forward,
         }
     }
 
-    /// Returns a reference to the priority details of the transaction.
-    pub(crate) fn transaction_priority_details(&self) -> &TransactionPriorityDetails {
-        match self {
-            Self::Unprocessed {
-                transaction_priority_details,
-                ..
-            } => transaction_priority_details,
-            Self::Pending {
-                transaction_priority_details,
-                ..
-            } => transaction_priority_details,
-        }
-    }
-
-    /// Returns a reference to the transaction cost of the transaction.
-    pub(crate) fn transaction_cost(&self) -> &TransactionCost {
-        match self {
-            Self::Unprocessed {
-                transaction_cost, ..
-            } => transaction_cost,
-            Self::Pending {
-                transaction_cost, ..
-            } => transaction_cost,
-        }
-    }
-
-    /// Returns the priority of the transaction.
+    /// Return the priority of the transaction.
+    /// This is *not* the same as the `compute_unit_price` of the transaction.
+    /// The priority is used to order transactions for processing.
     pub(crate) fn priority(&self) -> u64 {
-        self.transaction_priority_details().priority
-    }
-
-    /// Returns whether or not the transaction has already been forwarded.
-    pub(crate) fn forwarded(&self) -> bool {
         match self {
-            Self::Unprocessed { forwarded, .. } => *forwarded,
-            Self::Pending { forwarded, .. } => *forwarded,
+            Self::Unprocessed { priority, .. } => *priority,
+            Self::Pending { priority, .. } => *priority,
+            Self::Transitioning => unreachable!(),
         }
     }
 
-    /// Sets the transaction as forwarded.
-    pub(crate) fn set_forwarded(&mut self) {
+    /// Return the cost of the transaction.
+    pub(crate) fn cost(&self) -> u64 {
         match self {
-            Self::Unprocessed { forwarded, .. } => *forwarded = true,
-            Self::Pending { forwarded, .. } => *forwarded = true,
+            Self::Unprocessed { cost, .. } => *cost,
+            Self::Pending { cost, .. } => *cost,
+            Self::Transitioning => unreachable!(),
+        }
+    }
+
+    /// Return whether packet should be attempted to be forwarded.
+    pub(crate) fn should_forward(&self) -> bool {
+        match self {
+            Self::Unprocessed {
+                should_forward: forwarded,
+                ..
+            } => *forwarded,
+            Self::Pending {
+                should_forward: forwarded,
+                ..
+            } => *forwarded,
+            Self::Transitioning => unreachable!(),
+        }
+    }
+
+    /// Mark the packet as forwarded.
+    /// This is used to prevent the packet from being forwarded multiple times.
+    pub(crate) fn mark_forwarded(&mut self) {
+        match self {
+            Self::Unprocessed { should_forward, .. } => *should_forward = false,
+            Self::Pending { should_forward, .. } => *should_forward = false,
+            Self::Transitioning => unreachable!(),
+        }
+    }
+
+    /// Return the packet of the transaction.
+    pub(crate) fn packet(&self) -> &Arc<ImmutableDeserializedPacket> {
+        match self {
+            Self::Unprocessed { packet, .. } => packet,
+            Self::Pending { packet, .. } => packet,
+            Self::Transitioning => unreachable!(),
         }
     }
 
@@ -119,20 +136,23 @@ impl TransactionState {
         match self.take() {
             TransactionState::Unprocessed {
                 transaction_ttl,
-                transaction_priority_details,
-                transaction_cost,
-                forwarded,
+                packet,
+                priority,
+                cost,
+                should_forward: forwarded,
             } => {
                 *self = TransactionState::Pending {
-                    transaction_priority_details,
-                    transaction_cost,
-                    forwarded,
+                    packet,
+                    priority,
+                    cost,
+                    should_forward: forwarded,
                 };
                 transaction_ttl
             }
             TransactionState::Pending { .. } => {
                 panic!("transaction already pending");
             }
+            Self::Transitioning => unreachable!(),
         }
     }
 
@@ -146,17 +166,20 @@ impl TransactionState {
         match self.take() {
             TransactionState::Unprocessed { .. } => panic!("already unprocessed"),
             TransactionState::Pending {
-                transaction_priority_details,
-                transaction_cost,
-                forwarded,
+                packet,
+                priority,
+                cost,
+                should_forward: forwarded,
             } => {
                 *self = Self::Unprocessed {
                     transaction_ttl,
-                    transaction_priority_details,
-                    transaction_cost,
-                    forwarded,
+                    packet,
+                    priority,
+                    cost,
+                    should_forward: forwarded,
                 }
             }
+            Self::Transitioning => unreachable!(),
         }
     }
 
@@ -170,25 +193,14 @@ impl TransactionState {
                 transaction_ttl, ..
             } => transaction_ttl,
             Self::Pending { .. } => panic!("transaction is pending"),
+            Self::Transitioning => unreachable!(),
         }
     }
 
     /// Internal helper to transitioning between states.
     /// Replaces `self` with a dummy state that will immediately be overwritten in transition.
     fn take(&mut self) -> Self {
-        core::mem::replace(
-            self,
-            Self::Pending {
-                transaction_priority_details: TransactionPriorityDetails {
-                    priority: 0,
-                    compute_unit_limit: 0,
-                },
-                transaction_cost: TransactionCost::SimpleVote {
-                    writable_accounts: vec![],
-                },
-                forwarded: false,
-            },
-        )
+        core::mem::replace(self, Self::Transitioning)
     }
 }
 
@@ -196,14 +208,14 @@ impl TransactionState {
 mod tests {
     use {
         super::*,
-        solana_cost_model::transaction_cost::UsageCostDetails,
         solana_sdk::{
-            compute_budget::ComputeBudgetInstruction, hash::Hash, message::Message,
-            signature::Keypair, signer::Signer, system_instruction, transaction::Transaction,
+            clock::Slot, compute_budget::ComputeBudgetInstruction, hash::Hash, message::Message,
+            packet::Packet, signature::Keypair, signer::Signer, system_instruction,
+            transaction::Transaction,
         },
     };
 
-    fn create_transaction_state(priority: u64) -> TransactionState {
+    fn create_transaction_state(compute_unit_price: u64) -> TransactionState {
         let from_keypair = Keypair::new();
         let ixs = vec![
             system_instruction::transfer(
@@ -211,27 +223,27 @@ mod tests {
                 &solana_sdk::pubkey::new_rand(),
                 1,
             ),
-            ComputeBudgetInstruction::set_compute_unit_price(priority),
+            ComputeBudgetInstruction::set_compute_unit_price(compute_unit_price),
         ];
         let message = Message::new(&ixs, Some(&from_keypair.pubkey()));
         let tx = Transaction::new(&[&from_keypair], message, Hash::default());
-        let transaction_cost = TransactionCost::Transaction(UsageCostDetails {
-            signature_cost: 5000,
-            ..UsageCostDetails::default()
-        });
 
+        let packet = Arc::new(
+            ImmutableDeserializedPacket::new(Packet::from_data(None, tx.clone()).unwrap()).unwrap(),
+        );
         let transaction_ttl = SanitizedTransactionTTL {
             transaction: SanitizedTransaction::from_transaction_for_tests(tx),
-            max_age_slot: Slot::MAX,
+            max_age: MaxAge {
+                epoch_invalidation_slot: Slot::MAX,
+                alt_invalidation_slot: Slot::MAX,
+            },
         };
-
+        const TEST_TRANSACTION_COST: u64 = 5000;
         TransactionState::new(
             transaction_ttl,
-            TransactionPriorityDetails {
-                priority,
-                compute_unit_limit: 0,
-            },
-            transaction_cost,
+            packet,
+            compute_unit_price,
+            TEST_TRANSACTION_COST,
         )
     }
 
@@ -265,11 +277,11 @@ mod tests {
         // Manually clone `SanitizedTransactionTTL`
         let SanitizedTransactionTTL {
             transaction,
-            max_age_slot,
+            max_age,
         } = transaction_state.transaction_ttl();
         let transaction_ttl = SanitizedTransactionTTL {
             transaction: transaction.clone(),
-            max_age_slot: *max_age_slot,
+            max_age: *max_age,
         };
         transaction_state.transition_to_unprocessed(transaction_ttl); // invalid transition
     }
@@ -294,12 +306,12 @@ mod tests {
     }
 
     #[test]
-    fn test_transaction_priority_details() {
+    fn test_priority() {
         let priority = 15;
         let mut transaction_state = create_transaction_state(priority);
         assert_eq!(transaction_state.priority(), priority);
 
-        // ensure priority is not lost through state transitions
+        // ensure compute unit price is not lost through state transitions
         let transaction_ttl = transaction_state.transition_to_pending();
         assert_eq!(transaction_state.priority(), priority);
         transaction_state.transition_to_unprocessed(transaction_ttl);
@@ -315,7 +327,13 @@ mod tests {
             transaction_state,
             TransactionState::Unprocessed { .. }
         ));
-        assert_eq!(transaction_ttl.max_age_slot, Slot::MAX);
+        assert_eq!(
+            transaction_ttl.max_age,
+            MaxAge {
+                epoch_invalidation_slot: Slot::MAX,
+                alt_invalidation_slot: Slot::MAX,
+            }
+        );
 
         let _ = transaction_state.transition_to_pending();
         assert!(matches!(
@@ -333,7 +351,13 @@ mod tests {
             transaction_state,
             TransactionState::Unprocessed { .. }
         ));
-        assert_eq!(transaction_ttl.max_age_slot, Slot::MAX);
+        assert_eq!(
+            transaction_ttl.max_age,
+            MaxAge {
+                epoch_invalidation_slot: Slot::MAX,
+                alt_invalidation_slot: Slot::MAX,
+            }
+        );
 
         // ensure transaction_ttl is not lost through state transitions
         let transaction_ttl = transaction_state.transition_to_pending();
@@ -348,6 +372,12 @@ mod tests {
             transaction_state,
             TransactionState::Unprocessed { .. }
         ));
-        assert_eq!(transaction_ttl.max_age_slot, Slot::MAX);
+        assert_eq!(
+            transaction_ttl.max_age,
+            MaxAge {
+                epoch_invalidation_slot: Slot::MAX,
+                alt_invalidation_slot: Slot::MAX,
+            }
+        );
     }
 }

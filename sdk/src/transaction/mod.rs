@@ -111,6 +111,8 @@
 
 #![cfg(feature = "full")]
 
+#[cfg(target_arch = "wasm32")]
+use crate::wasm_bindgen;
 use {
     crate::{
         hash::Hash,
@@ -120,23 +122,23 @@ use {
         precompiles::verify_if_precompile,
         program_utils::limited_deserialize,
         pubkey::Pubkey,
-        sanitize::{Sanitize, SanitizeError},
-        short_vec,
         signature::{Signature, SignerError},
         signers::Signers,
-        wasm_bindgen,
     },
     serde::Serialize,
+    solana_feature_set as feature_set,
     solana_program::{system_instruction::SystemInstruction, system_program},
-    solana_sdk::feature_set,
+    solana_sanitize::{Sanitize, SanitizeError},
+    solana_short_vec as short_vec,
     std::result,
 };
 
-mod error;
 mod sanitized;
 mod versioned;
 
-pub use {error::*, sanitized::*, versioned::*};
+#[deprecated(since = "2.1.0", note = "Use solana_transaction_error crate instead")]
+pub use solana_transaction_error::*;
+pub use {sanitized::*, versioned::*};
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub enum TransactionVerificationMode {
@@ -167,9 +169,13 @@ pub type Result<T> = result::Result<T, TransactionError>;
 /// if the caller has knowledge that the first account of the constructed
 /// transaction's `Message` is both a signer and the expected fee-payer, then
 /// redundantly specifying the fee-payer is not strictly required.
-#[wasm_bindgen]
-#[frozen_abi(digest = "FZtncnS1Xk8ghHfKiXE5oGiUbw2wJhmfXQuNgQR3K6Mc")]
-#[derive(Debug, PartialEq, Default, Eq, Clone, Serialize, Deserialize, AbiExample)]
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(
+    feature = "frozen-abi",
+    derive(AbiExample),
+    frozen_abi(digest = "686AAhRhjXpqKidmJEdHHcJCL9XxCxebu8Xmku9shp83")
+)]
+#[derive(Debug, PartialEq, Default, Eq, Clone, Serialize, Deserialize)]
 pub struct Transaction {
     /// A set of signatures of a serialized [`Message`], signed by the first
     /// keys of the `Message`'s [`account_keys`], where the number of signatures
@@ -180,11 +186,29 @@ pub struct Transaction {
     /// [`MessageHeader`]: crate::message::MessageHeader
     /// [`num_required_signatures`]: crate::message::MessageHeader::num_required_signatures
     // NOTE: Serialization-related changes must be paired with the direct read at sigverify.
-    #[wasm_bindgen(skip)]
     #[serde(with = "short_vec")]
     pub signatures: Vec<Signature>,
 
     /// The message to sign.
+    pub message: Message,
+}
+
+/// wasm-bindgen version of the Transaction struct.
+/// This duplication is required until https://github.com/rustwasm/wasm-bindgen/issues/3671
+/// is fixed. This must not diverge from the regular non-wasm Transaction struct.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+#[cfg_attr(
+    feature = "frozen-abi",
+    derive(AbiExample),
+    frozen_abi(digest = "H7xQFcd1MtMv9QKZWGatBAXwhg28tpeX59P3s8ZZLAY4")
+)]
+#[derive(Debug, PartialEq, Default, Eq, Clone, Serialize, Deserialize)]
+pub struct Transaction {
+    #[wasm_bindgen(skip)]
+    #[serde(with = "short_vec")]
+    pub signatures: Vec<Signature>,
+
     #[wasm_bindgen(skip)]
     pub message: Message,
 }
@@ -1056,13 +1080,21 @@ impl Transaction {
             return Err(TransactionError::InvalidAccountIndex);
         }
 
-        signers
+        for (index, account_key) in self
+            .message
+            .account_keys
             .iter()
             .enumerate()
-            .for_each(|(i, (pubkey, signature))| {
-                self.signatures[i] = *signature;
-                self.message.account_keys[i] = *pubkey;
-            });
+            .take(num_required_signatures)
+        {
+            if let Some((_pubkey, signature)) =
+                signers.iter().find(|(key, _signature)| account_key == key)
+            {
+                self.signatures[index] = *signature
+            } else {
+                return Err(TransactionError::InvalidAccountIndex);
+            }
+        }
 
         self.verify()
     }
@@ -1074,6 +1106,7 @@ impl Transaction {
     }
 }
 
+/// Returns true if transaction begins with an advance nonce instruction.
 pub fn uses_durable_nonce(tx: &Transaction) -> Option<&CompiledInstruction> {
     let message = tx.message();
     message
@@ -1090,23 +1123,7 @@ pub fn uses_durable_nonce(tx: &Transaction) -> Option<&CompiledInstruction> {
                 limited_deserialize(&instruction.data),
                 Ok(SystemInstruction::AdvanceNonceAccount)
             )
-            // Nonce account is writable
-            && matches!(
-                instruction.accounts.first(),
-                Some(index) if message.is_writable(*index as usize)
-            )
         })
-}
-
-#[deprecated]
-pub fn get_nonce_pubkey_from_instruction<'a>(
-    ix: &CompiledInstruction,
-    tx: &'a Transaction,
-) -> Option<&'a Pubkey> {
-    ix.accounts.first().and_then(|idx| {
-        let idx = *idx as usize;
-        tx.message().account_keys.get(idx)
-    })
 }
 
 #[cfg(test)]
@@ -1119,7 +1136,7 @@ mod tests {
             hash::hash,
             instruction::AccountMeta,
             signature::{Keypair, Presigner, Signer},
-            system_instruction, sysvar,
+            system_instruction,
         },
         bincode::{deserialize, serialize, serialized_size},
         std::mem::size_of,
@@ -1584,32 +1601,6 @@ mod tests {
     }
 
     #[test]
-    fn tx_uses_ro_nonce_account() {
-        let from_keypair = Keypair::new();
-        let from_pubkey = from_keypair.pubkey();
-        let nonce_keypair = Keypair::new();
-        let nonce_pubkey = nonce_keypair.pubkey();
-        let account_metas = vec![
-            AccountMeta::new_readonly(nonce_pubkey, false),
-            #[allow(deprecated)]
-            AccountMeta::new_readonly(sysvar::recent_blockhashes::id(), false),
-            AccountMeta::new_readonly(nonce_pubkey, true),
-        ];
-        let nonce_instruction = Instruction::new_with_bincode(
-            system_program::id(),
-            &system_instruction::SystemInstruction::AdvanceNonceAccount,
-            account_metas,
-        );
-        let tx = Transaction::new_signed_with_payer(
-            &[nonce_instruction],
-            Some(&from_pubkey),
-            &[&from_keypair, &nonce_keypair],
-            Hash::default(),
-        );
-        assert!(uses_durable_nonce(&tx).is_none());
-    }
-
-    #[test]
     fn tx_uses_nonce_wrong_first_nonce_ix_fail() {
         let from_keypair = Keypair::new();
         let from_pubkey = from_keypair.pubkey();
@@ -1627,34 +1618,6 @@ mod tests {
         let message = Message::new(&instructions, Some(&nonce_pubkey));
         let tx = Transaction::new(&[&from_keypair, &nonce_keypair], message, Hash::default());
         assert!(uses_durable_nonce(&tx).is_none());
-    }
-
-    #[test]
-    fn get_nonce_pub_from_ix_ok() {
-        let (_, nonce_pubkey, tx) = nonced_transfer_tx();
-        let nonce_ix = uses_durable_nonce(&tx).unwrap();
-        assert_eq!(
-            get_nonce_pubkey_from_instruction(nonce_ix, &tx),
-            Some(&nonce_pubkey),
-        );
-    }
-
-    #[test]
-    fn get_nonce_pub_from_ix_no_accounts_fail() {
-        let (_, _, tx) = nonced_transfer_tx();
-        let nonce_ix = uses_durable_nonce(&tx).unwrap();
-        let mut nonce_ix = nonce_ix.clone();
-        nonce_ix.accounts.clear();
-        assert_eq!(get_nonce_pubkey_from_instruction(&nonce_ix, &tx), None,);
-    }
-
-    #[test]
-    fn get_nonce_pub_from_ix_bad_acc_idx_fail() {
-        let (_, _, tx) = nonced_transfer_tx();
-        let nonce_ix = uses_durable_nonce(&tx).unwrap();
-        let mut nonce_ix = nonce_ix.clone();
-        nonce_ix.accounts[0] = 255u8;
-        assert_eq!(get_nonce_pubkey_from_instruction(&nonce_ix, &tx), None,);
     }
 
     #[test]
@@ -1687,5 +1650,37 @@ mod tests {
         let tx = instructions_to_tx(&[], Box::new(vec![signer]));
 
         assert!(tx.is_signed());
+    }
+
+    #[test]
+    fn test_replace_signatures() {
+        let program_id = Pubkey::default();
+        let keypair0 = Keypair::new();
+        let keypair1 = Keypair::new();
+        let pubkey0 = keypair0.pubkey();
+        let pubkey1 = keypair1.pubkey();
+        let ix = Instruction::new_with_bincode(
+            program_id,
+            &0,
+            vec![
+                AccountMeta::new(pubkey0, true),
+                AccountMeta::new(pubkey1, true),
+            ],
+        );
+        let message = Message::new(&[ix], Some(&pubkey0));
+        let expected_account_keys = message.account_keys.clone();
+        let mut tx = Transaction::new_unsigned(message);
+        tx.sign(&[&keypair0, &keypair1], Hash::new_unique());
+
+        let signature0 = keypair0.sign_message(&tx.message_data());
+        let signature1 = keypair1.sign_message(&tx.message_data());
+
+        // Replace signatures with order swapped
+        tx.replace_signatures(&[(pubkey1, signature1), (pubkey0, signature0)])
+            .unwrap();
+        // Order of account_keys should not change
+        assert_eq!(tx.message.account_keys, expected_account_keys);
+        // Order of signatures should match original account_keys list
+        assert_eq!(tx.signatures, &[signature0, signature1]);
     }
 }

@@ -139,7 +139,8 @@ pub fn get_closest_completion(
                             (
                                 "error",
                                 format!(
-                                    "last_index + 1 < shred_count. last_index={last_index} shred_count={shred_count}",
+                                    "last_index + 1 < shred_count. last_index={last_index} \
+                                     shred_count={shred_count}",
                                 ),
                                 String
                             ),
@@ -153,9 +154,9 @@ pub fn get_closest_completion(
                             (
                                 "error",
                                 format!(
-                                    "last_index < slot_meta.consumed. last_index={} slot_meta.consumed={}",
-                                    last_index,
-                                    slot_meta.consumed,
+                                    "last_index < slot_meta.consumed. last_index={} \
+                                     slot_meta.consumed={}",
+                                    last_index, slot_meta.consumed,
                                 ),
                                 String
                             ),
@@ -186,7 +187,7 @@ pub fn get_closest_completion(
                 continue;
             }
             let slot_meta = slot_meta_cache.get(&path_slot).unwrap().as_ref().unwrap();
-            let new_repairs = RepairService::generate_repairs_for_slot(
+            let new_repairs = RepairService::generate_repairs_for_slot_throttled_by_tick(
                 blockstore,
                 path_slot,
                 slot_meta,
@@ -270,7 +271,7 @@ pub mod test {
             &mut processed_slots,
             1,
         );
-        assert_eq!(repairs, [ShredRepairType::Shred(1, 3)]);
+        assert_eq!(repairs, [ShredRepairType::Shred(1, 30)]);
     }
 
     fn add_tree_with_missing_shreds(

@@ -139,14 +139,10 @@ impl LeaderScheduleCache {
                     .map(move |i| i as Slot + first_slot)
             })
             .skip_while(|slot| {
-                match blockstore {
-                    None => false,
-                    // Skip slots we have already sent a shred for.
-                    Some(blockstore) => match blockstore.meta(*slot).unwrap() {
-                        Some(meta) => meta.received > 0,
-                        None => false,
-                    },
-                }
+                // Skip slots we already have shreds for
+                blockstore
+                    .map(|bs| bs.has_existing_shreds_for_slot(*slot))
+                    .unwrap_or(false)
             });
         let first_slot = schedule.next()?;
         let max_slot = first_slot.saturating_add(max_slot_range);
@@ -393,11 +389,11 @@ mod tests {
             pubkey
         );
         assert_eq!(
-            cache.next_leader_slot(&pubkey, 0, &bank, None, std::u64::MAX),
+            cache.next_leader_slot(&pubkey, 0, &bank, None, u64::MAX),
             Some((1, 863_999))
         );
         assert_eq!(
-            cache.next_leader_slot(&pubkey, 1, &bank, None, std::u64::MAX),
+            cache.next_leader_slot(&pubkey, 1, &bank, None, u64::MAX),
             Some((2, 863_999))
         );
         assert_eq!(
@@ -406,7 +402,7 @@ mod tests {
                 2 * genesis_config.epoch_schedule.slots_per_epoch - 1, // no schedule generated for epoch 2
                 &bank,
                 None,
-                std::u64::MAX
+                u64::MAX
             ),
             None
         );
@@ -417,7 +413,7 @@ mod tests {
                 0,
                 &bank,
                 None,
-                std::u64::MAX
+                u64::MAX
             ),
             None
         );
@@ -445,7 +441,7 @@ mod tests {
         // Check that the next leader slot after 0 is slot 1
         assert_eq!(
             cache
-                .next_leader_slot(&pubkey, 0, &bank, Some(&blockstore), std::u64::MAX)
+                .next_leader_slot(&pubkey, 0, &bank, Some(&blockstore), u64::MAX)
                 .unwrap()
                 .0,
             1
@@ -457,7 +453,7 @@ mod tests {
         blockstore.insert_shreds(shreds, None, false).unwrap();
         assert_eq!(
             cache
-                .next_leader_slot(&pubkey, 0, &bank, Some(&blockstore), std::u64::MAX)
+                .next_leader_slot(&pubkey, 0, &bank, Some(&blockstore), u64::MAX)
                 .unwrap()
                 .0,
             1
@@ -470,7 +466,7 @@ mod tests {
         blockstore.insert_shreds(shreds, None, false).unwrap();
         assert_eq!(
             cache
-                .next_leader_slot(&pubkey, 0, &bank, Some(&blockstore), std::u64::MAX)
+                .next_leader_slot(&pubkey, 0, &bank, Some(&blockstore), u64::MAX)
                 .unwrap()
                 .0,
             3
@@ -483,7 +479,7 @@ mod tests {
                 2 * genesis_config.epoch_schedule.slots_per_epoch - 1, // no schedule generated for epoch 2
                 &bank,
                 Some(&blockstore),
-                std::u64::MAX
+                u64::MAX
             ),
             None
         );
@@ -494,7 +490,7 @@ mod tests {
                 0,
                 &bank,
                 Some(&blockstore),
-                std::u64::MAX
+                u64::MAX
             ),
             None
         );
@@ -554,12 +550,12 @@ mod tests {
 
         // If the max root isn't set, we'll get None
         assert!(cache
-            .next_leader_slot(&node_pubkey, 0, &bank, None, std::u64::MAX)
+            .next_leader_slot(&node_pubkey, 0, &bank, None, u64::MAX)
             .is_none());
 
         cache.set_root(&bank);
         let res = cache
-            .next_leader_slot(&node_pubkey, 0, &bank, None, std::u64::MAX)
+            .next_leader_slot(&node_pubkey, 0, &bank, None, u64::MAX)
             .unwrap();
 
         assert_eq!(res.0, expected_slot);
@@ -620,7 +616,7 @@ mod tests {
         cache.set_max_schedules(0);
         assert_eq!(cache.max_schedules(), MAX_SCHEDULES);
 
-        cache.set_max_schedules(std::usize::MAX);
-        assert_eq!(cache.max_schedules(), std::usize::MAX);
+        cache.set_max_schedules(usize::MAX);
+        assert_eq!(cache.max_schedules(), usize::MAX);
     }
 }

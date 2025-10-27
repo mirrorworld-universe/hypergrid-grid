@@ -12,13 +12,16 @@ use {
         },
         precompiles::verify_if_precompile,
         pubkey::Pubkey,
-        sanitize::Sanitize,
+        reserved_account_keys::ReservedAccountKeys,
         signature::Signature,
         simple_vote_transaction_checker::is_simple_vote_transaction,
-        solana_sdk::feature_set,
-        transaction::{Result, Transaction, TransactionError, VersionedTransaction},
+        transaction::{Result, Transaction, VersionedTransaction},
     },
-    solana_program::message::SanitizedVersionedMessage,
+    solana_feature_set as feature_set,
+    solana_program::{instruction::InstructionError, message::SanitizedVersionedMessage},
+    solana_sanitize::Sanitize,
+    solana_transaction_error::TransactionError,
+    std::collections::HashSet,
 };
 
 /// Maximum number of accounts that a transaction may lock.
@@ -66,17 +69,22 @@ impl SanitizedTransaction {
         message_hash: Hash,
         is_simple_vote_tx: bool,
         address_loader: impl AddressLoader,
+        reserved_account_keys: &HashSet<Pubkey>,
     ) -> Result<Self> {
         let signatures = tx.signatures;
         let SanitizedVersionedMessage { message } = tx.message;
         let message = match message {
             VersionedMessage::Legacy(message) => {
-                SanitizedMessage::Legacy(LegacyMessage::new(message))
+                SanitizedMessage::Legacy(LegacyMessage::new(message, reserved_account_keys))
             }
             VersionedMessage::V0(message) => {
                 let loaded_addresses =
                     address_loader.load_addresses(&message.address_table_lookups)?;
-                SanitizedMessage::V0(v0::LoadedMessage::new(message, loaded_addresses))
+                SanitizedMessage::V0(v0::LoadedMessage::new(
+                    message,
+                    loaded_addresses,
+                    reserved_account_keys,
+                ))
             }
         };
 
@@ -96,6 +104,7 @@ impl SanitizedTransaction {
         message_hash: impl Into<MessageHash>,
         is_simple_vote_tx: Option<bool>,
         address_loader: impl AddressLoader,
+        reserved_account_keys: &HashSet<Pubkey>,
     ) -> Result<Self> {
         let sanitized_versioned_tx = SanitizedVersionedTransaction::try_from(tx)?;
         let is_simple_vote_tx = is_simple_vote_tx
@@ -109,15 +118,23 @@ impl SanitizedTransaction {
             message_hash,
             is_simple_vote_tx,
             address_loader,
+            reserved_account_keys,
         )
     }
 
-    pub fn try_from_legacy_transaction(tx: Transaction) -> Result<Self> {
+    /// Create a sanitized transaction from a legacy transaction
+    pub fn try_from_legacy_transaction(
+        tx: Transaction,
+        reserved_account_keys: &HashSet<Pubkey>,
+    ) -> Result<Self> {
         tx.sanitize()?;
 
         Ok(Self {
             message_hash: tx.message.hash(),
-            message: SanitizedMessage::Legacy(LegacyMessage::new(tx.message)),
+            message: SanitizedMessage::Legacy(LegacyMessage::new(
+                tx.message,
+                reserved_account_keys,
+            )),
             is_simple_vote_tx: false,
             signatures: tx.signatures,
         })
@@ -125,7 +142,7 @@ impl SanitizedTransaction {
 
     /// Create a sanitized transaction from a legacy transaction. Used for tests only.
     pub fn from_transaction_for_tests(tx: Transaction) -> Self {
-        Self::try_from_legacy_transaction(tx).unwrap()
+        Self::try_from_legacy_transaction(tx, &ReservedAccountKeys::empty_key_set()).unwrap()
     }
 
     /// Return the first signature for this transaction.
@@ -246,14 +263,21 @@ impl SanitizedTransaction {
 
     /// Verify the precompiled programs in this transaction
     pub fn verify_precompiles(&self, feature_set: &feature_set::FeatureSet) -> Result<()> {
-        for (program_id, instruction) in self.message.program_instructions_iter() {
+        for (index, (program_id, instruction)) in
+            self.message.program_instructions_iter().enumerate()
+        {
             verify_if_precompile(
                 program_id,
                 instruction,
                 self.message().instructions(),
                 feature_set,
             )
-            .map_err(|_| TransactionError::InvalidAccountIndex)?;
+            .map_err(|err| {
+                TransactionError::InstructionError(
+                    index as u8,
+                    InstructionError::Custom(err as u32),
+                )
+            })?;
         }
         Ok(())
     }
@@ -271,6 +295,20 @@ impl SanitizedTransaction {
             Ok(())
         }
     }
+
+    #[cfg(feature = "dev-context-only-utils")]
+    pub fn new_for_tests(
+        message: SanitizedMessage,
+        signatures: Vec<Signature>,
+        is_simple_vote_tx: bool,
+    ) -> SanitizedTransaction {
+        SanitizedTransaction {
+            message,
+            message_hash: Hash::new_unique(),
+            signatures,
+            is_simple_vote_tx,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -278,7 +316,10 @@ impl SanitizedTransaction {
 mod tests {
     use {
         super::*,
-        crate::signer::{keypair::Keypair, Signer},
+        crate::{
+            reserved_account_keys::ReservedAccountKeys,
+            signer::{keypair::Keypair, Signer},
+        },
         solana_program::vote::{self, state::Vote},
     };
 
@@ -303,6 +344,7 @@ mod tests {
                 MessageHash::Compute,
                 None,
                 SimpleAddressLoader::Disabled,
+                &ReservedAccountKeys::empty_key_set(),
             )
             .unwrap();
             assert!(vote_transaction.is_simple_vote_transaction());
@@ -315,6 +357,7 @@ mod tests {
                 MessageHash::Compute,
                 Some(false),
                 SimpleAddressLoader::Disabled,
+                &ReservedAccountKeys::empty_key_set(),
             )
             .unwrap();
             assert!(!vote_transaction.is_simple_vote_transaction());
@@ -329,6 +372,7 @@ mod tests {
                 MessageHash::Compute,
                 None,
                 SimpleAddressLoader::Disabled,
+                &ReservedAccountKeys::empty_key_set(),
             )
             .unwrap();
             assert!(!vote_transaction.is_simple_vote_transaction());
@@ -341,6 +385,7 @@ mod tests {
                 MessageHash::Compute,
                 Some(true),
                 SimpleAddressLoader::Disabled,
+                &ReservedAccountKeys::empty_key_set(),
             )
             .unwrap();
             assert!(vote_transaction.is_simple_vote_transaction());

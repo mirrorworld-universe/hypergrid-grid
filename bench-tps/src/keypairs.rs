@@ -1,11 +1,9 @@
 use {
-    crate::{
-        bench::{fund_keypairs, generate_and_fund_keypairs},
-        bench_tps_client::BenchTpsClient,
-    },
+    crate::bench::{fund_keypairs, generate_and_fund_keypairs},
     log::*,
     solana_genesis::Base64Account,
     solana_sdk::signature::{Keypair, Signer},
+    solana_tps_client::TpsClient,
     std::{collections::HashMap, fs::File, path::Path, process::exit, sync::Arc},
 };
 
@@ -16,10 +14,11 @@ pub fn get_keypairs<T>(
     num_lamports_per_account: u64,
     client_ids_and_stake_file: &str,
     read_from_client_file: bool,
+    skip_tx_account_data_size: bool,
     enable_padding: bool,
 ) -> Vec<Keypair>
 where
-    T: 'static + BenchTpsClient + Send + Sync + ?Sized,
+    T: 'static + TpsClient + Send + Sync + ?Sized,
 {
     if read_from_client_file {
         let path = Path::new(client_ids_and_stake_file);
@@ -57,6 +56,7 @@ where
             &keypairs,
             keypairs.len().saturating_sub(keypair_count) as u64,
             last_balance,
+            skip_tx_account_data_size,
             enable_padding,
         )
         .unwrap_or_else(|e| {
@@ -70,6 +70,7 @@ where
             id,
             keypair_count,
             num_lamports_per_account,
+            skip_tx_account_data_size,
             enable_padding,
         )
         .unwrap_or_else(|e| {

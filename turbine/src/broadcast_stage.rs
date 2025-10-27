@@ -20,7 +20,7 @@ use {
     solana_measure::measure::Measure,
     solana_metrics::{inc_new_counter_error, inc_new_counter_info},
     solana_poh::poh_recorder::WorkingBankEntry,
-    solana_runtime::bank_forks::BankForks,
+    solana_runtime::{bank::MAX_LEADER_SCHEDULE_STAKES, bank_forks::BankForks},
     solana_sdk::{
         clock::Slot,
         pubkey::Pubkey,
@@ -31,9 +31,9 @@ use {
         sendmmsg::{batch_send, SendPktsError},
         socket::SocketAddrSpace,
     },
+    static_assertions::const_assert_eq,
     std::{
         collections::{HashMap, HashSet},
-        iter::repeat_with,
         net::{SocketAddr, UdpSocket},
         sync::{
             atomic::{AtomicBool, Ordering},
@@ -53,10 +53,10 @@ pub(crate) mod broadcast_utils;
 mod fail_entry_verification_broadcast_run;
 mod standard_broadcast_run;
 
-const CLUSTER_NODES_CACHE_NUM_EPOCH_CAP: usize = 8;
+const_assert_eq!(CLUSTER_NODES_CACHE_NUM_EPOCH_CAP, 5);
+const CLUSTER_NODES_CACHE_NUM_EPOCH_CAP: usize = MAX_LEADER_SCHEDULE_STAKES as usize;
 const CLUSTER_NODES_CACHE_TTL: Duration = Duration::from_secs(5);
 
-pub(crate) const NUM_INSERT_THREADS: usize = 2;
 pub(crate) type RecordReceiver = Receiver<(Arc<Vec<Shred>>, Option<BroadcastShredBatchInfo>)>;
 pub(crate) type TransmitReceiver = Receiver<(Arc<Vec<Shred>>, Option<BroadcastShredBatchInfo>)>;
 
@@ -66,6 +66,10 @@ pub enum Error {
     Blockstore(#[from] solana_ledger::blockstore::BlockstoreError),
     #[error(transparent)]
     ClusterInfo(#[from] solana_gossip::cluster_info::ClusterInfoError),
+    #[error("Duplicate slot broadcast: {0}")]
+    DuplicateSlotBroadcast(Slot),
+    #[error("Invalid Merkle root, slot: {slot}, index: {index}")]
+    InvalidMerkleRoot { slot: Slot, index: u64 },
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -76,8 +80,14 @@ pub enum Error {
     Send,
     #[error(transparent)]
     Serialize(#[from] std::boxed::Box<bincode::ErrorKind>),
+    #[error("Shred not found, slot: {slot}, index: {index}")]
+    ShredNotFound { slot: Slot, index: u64 },
     #[error(transparent)]
     TransportError(#[from] solana_sdk::transport::TransportError),
+    #[error("Unknown last index, slot: {0}")]
+    UnknownLastIndex(Slot),
+    #[error("Unknown slot meta, slot: {0}")]
+    UnknownSlotMeta(Slot),
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -255,6 +265,7 @@ impl BroadcastStage {
     /// * `window` - Cache of Shreds that we have broadcast
     /// * `receiver` - Receive channel for Shreds to be retransmitted to all the layer 1 nodes.
     /// * `exit_sender` - Set to true when this service exits, allows rest of Tpu to exit cleanly.
+    ///
     /// Otherwise, when a Tpu closes, it only closes the stages that come after it. The stages
     /// that come before could be blocked on a receive, and never notice that they need to
     /// exit. Now, if any stage of the Tpu closes, it will lead to closing the WriteStage (b/c
@@ -271,7 +282,7 @@ impl BroadcastStage {
         blockstore: Arc<Blockstore>,
         bank_forks: Arc<RwLock<BankForks>>,
         quic_endpoint_sender: AsyncSender<(SocketAddr, Bytes)>,
-        broadcast_stage_run: impl BroadcastRun + Send + 'static + Clone,
+        mut broadcast_stage_run: impl BroadcastRun + Send + 'static + Clone,
     ) -> Self {
         let (socket_sender, socket_receiver) = unbounded();
         let (blockstore_sender, blockstore_receiver) = unbounded();
@@ -321,25 +332,24 @@ impl BroadcastStage {
                 .spawn(run_transmit)
                 .unwrap()
         }));
-        thread_hdls.extend(
-            repeat_with(|| {
-                let blockstore_receiver = blockstore_receiver.clone();
-                let mut bs_record = broadcast_stage_run.clone();
-                let btree = blockstore.clone();
-                let run_record = move || loop {
-                    let res = bs_record.record(&blockstore_receiver, &btree);
-                    let res = Self::handle_error(res, "solana-broadcaster-record");
-                    if let Some(res) = res {
-                        return res;
-                    }
-                };
-                Builder::new()
-                    .name("solBroadcastRec".to_string())
-                    .spawn(run_record)
-                    .unwrap()
-            })
-            .take(NUM_INSERT_THREADS),
-        );
+
+        // Blockstore::insert_threads() obtains and holds a write lock for the entire function.
+        // Until this changes, only a single inserter thread is necessary.
+        thread_hdls.push({
+            let blockstore = blockstore.clone();
+            let run_record = move || loop {
+                let res = broadcast_stage_run.record(&blockstore_receiver, &blockstore);
+                let res = Self::handle_error(res, "solana-broadcaster-record");
+                if let Some(res) = res {
+                    return res;
+                }
+            };
+            Builder::new()
+                .name("solBroadcastRec".to_string())
+                .spawn(run_record)
+                .unwrap()
+        });
+
         let retransmit_thread = Builder::new()
             .name("solBroadcastRtx".to_string())
             .spawn(move || loop {
@@ -503,6 +513,7 @@ pub mod test {
     use {
         super::*,
         crossbeam_channel::unbounded,
+        rand::Rng,
         solana_entry::entry::create_ticks,
         solana_gossip::cluster_info::{ClusterInfo, Node},
         solana_ledger::{
@@ -544,6 +555,8 @@ pub mod test {
             &Keypair::new(),
             &entries,
             true, // is_last_in_slot
+            // chained_merkle_root
+            Some(Hash::new_from_array(rand::thread_rng().gen())),
             0,    // next_shred_index,
             0,    // next_code_index
             true, // merkle_variant

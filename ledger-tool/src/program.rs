@@ -1,18 +1,20 @@
 use {
     crate::{args::*, canonicalize_ledger_path, ledger_utils::*},
-    clap::{value_t, App, AppSettings, Arg, ArgMatches, SubCommand},
+    clap::{App, AppSettings, Arg, ArgMatches, SubCommand},
     log::*,
-    serde::{Deserialize, Serialize},
+    serde_derive::{Deserialize, Serialize},
     serde_json::Result,
     solana_bpf_loader_program::{
         create_vm, load_program_from_bytes, serialization::serialize_parameters,
         syscalls::create_program_runtime_environment_v1,
     },
     solana_cli_output::{OutputFormat, QuietDisplay, VerboseDisplay},
-    solana_ledger::{blockstore_options::AccessType, use_snapshot_archives_at_startup},
+    solana_ledger::blockstore_options::AccessType,
     solana_program_runtime::{
         invoke_context::InvokeContext,
-        loaded_programs::{LoadProgramMetrics, LoadedProgramType, DELAY_VISIBILITY_SLOT_OFFSET},
+        loaded_programs::{
+            LoadProgramMetrics, ProgramCacheEntryType, DELAY_VISIBILITY_SLOT_OFFSET,
+        },
         with_mock_invoke_context,
     },
     solana_rbpf::{
@@ -21,18 +23,20 @@ use {
     },
     solana_runtime::bank::Bank,
     solana_sdk::{
-        account::AccountSharedData,
+        account::{create_account_shared_data_for_test, AccountSharedData},
         account_utils::StateMut,
         bpf_loader_upgradeable::{self, UpgradeableLoaderState},
         pubkey::Pubkey,
         slot_history::Slot,
+        sysvar,
         transaction_context::{IndexOfAccount, InstructionAccount},
     },
     std::{
+        collections::HashMap,
         fmt::{self, Debug, Formatter},
         fs::File,
         io::{Read, Seek, Write},
-        path::{Path, PathBuf},
+        path::Path,
         process::exit,
         sync::Arc,
         time::{Duration, Instant},
@@ -71,24 +75,16 @@ fn load_accounts(path: &Path) -> Result<Input> {
 
 fn load_blockstore(ledger_path: &Path, arg_matches: &ArgMatches<'_>) -> Arc<Bank> {
     let process_options = parse_process_options(ledger_path, arg_matches);
-    let snapshot_archive_path = value_t!(arg_matches, "snapshot_archive_path", String)
-        .ok()
-        .map(PathBuf::from);
-    let incremental_snapshot_archive_path =
-        value_t!(arg_matches, "incremental_snapshot_archive_path", String)
-            .ok()
-            .map(PathBuf::from);
 
     let genesis_config = open_genesis_config_by(ledger_path, arg_matches);
     info!("genesis hash: {}", genesis_config.hash());
     let blockstore = open_blockstore(ledger_path, arg_matches, AccessType::Secondary);
-    let (bank_forks, ..) = load_and_process_ledger_or_exit(
+    let LoadAndProcessLedgerOutput { bank_forks, .. } = load_and_process_ledger_or_exit(
         arg_matches,
         &genesis_config,
         Arc::new(blockstore),
         process_options,
-        snapshot_archive_path,
-        incremental_snapshot_archive_path,
+        None,
     );
     let bank = bank_forks.read().unwrap().working_bank();
     bank
@@ -107,22 +103,9 @@ impl ProgramSubCommand for App<'_, '_> {
             )
             .required(true)
             .index(1);
-        let max_genesis_arg = Arg::with_name("max_genesis_archive_unpacked_size")
-            .long("max-genesis-archive-unpacked-size")
-            .value_name("NUMBER")
-            .takes_value(true)
-            .default_value("10485760")
-            .help("maximum total uncompressed size of unpacked genesis archive");
-        let use_snapshot_archives_at_startup =
-            Arg::with_name(use_snapshot_archives_at_startup::cli::NAME)
-                .long(use_snapshot_archives_at_startup::cli::LONG_ARG)
-                .takes_value(true)
-                .possible_values(use_snapshot_archives_at_startup::cli::POSSIBLE_VALUES)
-                .default_value(
-                    use_snapshot_archives_at_startup::cli::default_value_for_ledger_tool(),
-                )
-                .help(use_snapshot_archives_at_startup::cli::HELP)
-                .long_help(use_snapshot_archives_at_startup::cli::LONG_HELP);
+
+        let load_genesis_config_arg = load_genesis_arg();
+        let snapshot_config_args = snapshot_args();
 
         self.subcommand(
             SubCommand::with_name("program")
@@ -174,8 +157,8 @@ and the following fields are required
                         .takes_value(true)
                         .default_value("0"),
                 )
-                .arg(&max_genesis_arg)
-                .arg(&use_snapshot_archives_at_startup)
+                .arg(&load_genesis_config_arg)
+                .args(&snapshot_config_args)
                 .arg(
                     Arg::with_name("memory")
                         .help("Heap memory for the program to run on")
@@ -322,7 +305,7 @@ fn load_program<'a>(
     };
     let account_size = contents.len();
     let program_runtime_environment = create_program_runtime_environment_v1(
-        &invoke_context.feature_set,
+        invoke_context.get_feature_set(),
         invoke_context.get_compute_budget(),
         false, /* deployment */
         true,  /* debugging_features */
@@ -343,7 +326,7 @@ fn load_program<'a>(
         );
         match result {
             Ok(loaded_program) => match loaded_program.program {
-                LoadedProgramType::LegacyV1(program) => Ok(program),
+                ProgramCacheEntryType::Loaded(program) => Ok(program),
                 _ => unreachable!(),
             },
             Err(err) => Err(format!("Loading executable failed: {err:?}")),
@@ -444,60 +427,79 @@ pub fn program(ledger_path: &Path, matches: &ArgMatches<'_>) {
                 );
                 program_id
             });
-            for (index, account_info) in input.accounts.into_iter().enumerate() {
-                let pubkey = account_info.key.parse::<Pubkey>().unwrap_or_else(|err| {
-                    eprintln!("Invalid key in input {}, error {}", account_info.key, err);
-                    exit(1);
-                });
-                let data = account_info.data.unwrap_or(vec![]);
-                let space = data.len();
-                let account = if let Some(account) = bank.get_account_with_fixed_root(&pubkey) {
-                    let owner = *account.owner();
-                    if bpf_loader_upgradeable::check_id(&owner) {
-                        if let Ok(UpgradeableLoaderState::Program {
-                            programdata_address,
-                        }) = account.state()
-                        {
-                            debug!("Program data address {}", programdata_address);
-                            if bank
-                                .get_account_with_fixed_root(&programdata_address)
-                                .is_some()
+            // Maps a public key to the transaction account index
+            let mut txn_acct_indices =
+                HashMap::<Pubkey, usize>::with_capacity(input.accounts.len());
+            instruction_accounts = input
+                .accounts
+                .into_iter()
+                .map(|account_info| {
+                    let pubkey = account_info.key.parse::<Pubkey>().unwrap_or_else(|err| {
+                        eprintln!("Invalid key in input {}, error {}", account_info.key, err);
+                        exit(1);
+                    });
+                    let data = account_info.data.unwrap_or_default();
+                    let space = data.len();
+                    let account = if let Some(account) = bank.get_account_with_fixed_root(&pubkey) {
+                        let owner = *account.owner();
+                        // Sonic: get remote flag from account
+                        let remote = account.remote;
+                        if bpf_loader_upgradeable::check_id(&owner) {
+                            if let Ok(UpgradeableLoaderState::Program {
+                                programdata_address,
+                            }) = account.state()
                             {
-                                cached_account_keys.push(pubkey);
+                                debug!("Program data address {}", programdata_address);
+                                if bank
+                                    .get_account_with_fixed_root(&programdata_address)
+                                    .is_some()
+                                {
+                                    cached_account_keys.push(pubkey);
+                                }
                             }
                         }
-                    }
-                    // Override account data and lamports from input file if provided
-                    if space > 0 {
-                        let lamports = account_info.lamports.unwrap_or(account.lamports());
+                        // Override account data and lamports from input file if provided
+                        if space > 0 {
+                            let lamports = account_info.lamports.unwrap_or(account.lamports());
+                            let mut account = AccountSharedData::new(lamports, space, &owner);
+                            account.set_data_from_slice(&data);
+                            account.remote = remote;
+                            account
+                        } else {
+                            account
+                        }
+                    } else {
+                        let owner = account_info
+                            .owner
+                            .unwrap_or(Pubkey::new_unique().to_string());
+                        let owner = owner.parse::<Pubkey>().unwrap_or_else(|err| {
+                            eprintln!("Invalid owner key in input {owner}, error {err}");
+                            Pubkey::new_unique()
+                        });
+                        let lamports = account_info.lamports.unwrap_or(0);
                         let mut account = AccountSharedData::new(lamports, space, &owner);
                         account.set_data_from_slice(&data);
                         account
+                    };
+                    // Sonic: get remote
+                    let remote = account.remote;
+                    let txn_acct_index = if let Some(idx) = txn_acct_indices.get(&pubkey) {
+                        *idx
                     } else {
-                        account
+                        let idx = transaction_accounts.len();
+                        txn_acct_indices.insert(pubkey, idx);
+                        transaction_accounts.push((pubkey, account));
+                        idx
+                    };
+                    InstructionAccount {
+                        index_in_transaction: txn_acct_index as IndexOfAccount,
+                        index_in_caller: txn_acct_index as IndexOfAccount,
+                        index_in_callee: txn_acct_index as IndexOfAccount,
+                        is_signer: account_info.is_signer.unwrap_or(false),
+                        is_writable: !remote && account_info.is_writable.unwrap_or(false), // Sonic: writable only if not remote
                     }
-                } else {
-                    let owner = account_info
-                        .owner
-                        .unwrap_or(Pubkey::new_unique().to_string());
-                    let owner = owner.parse::<Pubkey>().unwrap_or_else(|err| {
-                        eprintln!("Invalid owner key in input {owner}, error {err}");
-                        Pubkey::new_unique()
-                    });
-                    let lamports = account_info.lamports.unwrap_or(0);
-                    let mut account = AccountSharedData::new(lamports, space, &owner);
-                    account.set_data_from_slice(&data);
-                    account
-                };
-                transaction_accounts.push((pubkey, account));
-                instruction_accounts.push(InstructionAccount {
-                    index_in_transaction: index as IndexOfAccount,
-                    index_in_caller: index as IndexOfAccount,
-                    index_in_callee: index as IndexOfAccount,
-                    is_signer: account_info.is_signer.unwrap_or(false),
-                    is_writable: account_info.is_writable.unwrap_or(false),
-                });
-            }
+                })
+                .collect();
             input.instruction_data
         }
     };
@@ -510,23 +512,25 @@ pub fn program(ledger_path: &Path, matches: &ArgMatches<'_>) {
         program_id, // ID of the loaded program. It can modify accounts with the same owner key
         AccountSharedData::new(0, 0, &loader_id),
     ));
+    transaction_accounts.push((
+        sysvar::epoch_schedule::id(),
+        create_account_shared_data_for_test(bank.epoch_schedule()),
+    ));
     let interpreted = matches.value_of("mode").unwrap() != "jit";
     with_mock_invoke_context!(invoke_context, transaction_context, transaction_accounts);
 
     // Adding `DELAY_VISIBILITY_SLOT_OFFSET` to slots to accommodate for delay visibility of the program
-    let mut loaded_programs = LoadedProgramsForTxBatch::new(
-        bank.slot() + DELAY_VISIBILITY_SLOT_OFFSET,
-        bank.loaded_programs_cache
-            .read()
-            .unwrap()
-            .environments
-            .clone(),
-    );
+    let mut program_cache_for_tx_batch =
+        bank.new_program_cache_for_tx_batch_for_slot(bank.slot() + DELAY_VISIBILITY_SLOT_OFFSET);
     for key in cached_account_keys {
-        loaded_programs.replenish(key, bank.load_program(&key, false, None));
+        program_cache_for_tx_batch.replenish(
+            key,
+            bank.load_program(&key, false, bank.epoch())
+                .expect("Couldn't find program account"),
+        );
         debug!("Loaded program {}", key);
     }
-    invoke_context.programs_loaded_for_tx_batch = &loaded_programs;
+    invoke_context.program_cache_for_tx_batch = &mut program_cache_for_tx_batch;
 
     invoke_context
         .transaction_context
@@ -545,7 +549,6 @@ pub fn program(ledger_path: &Path, matches: &ArgMatches<'_>) {
             .get_current_instruction_context()
             .unwrap(),
         true, // copy_account_data
-        &invoke_context.feature_set,
     )
     .unwrap();
 
@@ -559,7 +562,7 @@ pub fn program(ledger_path: &Path, matches: &ArgMatches<'_>) {
         account_lengths,
         &mut invoke_context,
     );
-    let mut vm = vm.unwrap();
+    let (mut vm, _, _) = vm.unwrap();
     let start_time = Instant::now();
     if matches.value_of("mode").unwrap() == "debugger" {
         vm.debug_port = Some(matches.value_of("port").unwrap().parse::<u16>().unwrap());

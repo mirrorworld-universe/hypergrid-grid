@@ -4,10 +4,7 @@ use {
         hash::{Hash, Hasher},
     },
     log::*,
-    serde::{
-        ser::{Error as SerdeError, *},
-        Serialize, Serializer,
-    },
+    serde::ser::{Error as SerdeError, *},
     std::{any::type_name, io::Write},
     thiserror::Error,
 };
@@ -130,7 +127,7 @@ impl AbiDigester {
             value.serialize(self.create_new())
         } else {
             // Don't call value.visit_for_abi(...) to prefer autoref specialization
-            // resolution for IgnoreAsHelper
+            // resolution for TransparentAsHelper
             <&T>::visit_for_abi(&value, &mut self.create_new())
         }
     }
@@ -163,7 +160,6 @@ impl AbiDigester {
         self.update(&[&label]);
     }
 
-    #[allow(clippy::unnecessary_wraps)]
     fn digest_primitive<T: Serialize>(mut self) -> Result<AbiDigester, DigestError> {
         self.update_with_type::<T>("primitive");
         Ok(self)
@@ -192,7 +188,6 @@ impl AbiDigester {
         self.create_child()?.digest_data(v).map(|_| ())
     }
 
-    #[allow(clippy::unnecessary_wraps)]
     fn check_for_enum(
         &mut self,
         label: &'static str,
@@ -545,22 +540,22 @@ mod tests {
     type TestTypeAlias = i32;
 
     #[frozen_abi(digest = "Apwkp9Ah9zKirzwuSzVoU9QRc43EghpkD1nGVakJLfUY")]
-    #[derive(Serialize, AbiExample)]
+    #[derive(serde_derive::Serialize, AbiExample)]
     struct TestStruct {
         test_field: i8,
         test_field2: i8,
     }
 
     #[frozen_abi(digest = "4LbuvQLX78XPbm4hqqZcHFHpseDJcw4qZL9EUZXSi2Ss")]
-    #[derive(Serialize, AbiExample)]
+    #[derive(serde_derive::Serialize, AbiExample)]
     struct TestTupleStruct(i8, i8);
 
     #[frozen_abi(digest = "FNHa6mNYJZa59Fwbipep5dXRXcFreaDHn9jEUZEH1YLv")]
-    #[derive(Serialize, AbiExample)]
+    #[derive(serde_derive::Serialize, AbiExample)]
     struct TestNewtypeStruct(i8);
 
     #[frozen_abi(digest = "Hbs1X2X7TF2gFEfsspwfZ1JKr8ZGbLY3uidQBebqcMYt")]
-    #[derive(Serialize, AbiExample)]
+    #[derive(serde_derive::Serialize, AbiExample)]
     struct Foo<'a> {
         #[serde(with = "serde_bytes")]
         data1: Vec<u8>,
@@ -571,21 +566,21 @@ mod tests {
     }
 
     #[frozen_abi(digest = "5qio5qYurHDv6fq5kcwP2ue2RBEazSZF8CPk2kUuwC2j")]
-    #[derive(Serialize, AbiExample)]
+    #[derive(serde_derive::Serialize, AbiExample)]
     struct TestStructReversed {
         test_field2: i8,
         test_field: i8,
     }
 
     #[frozen_abi(digest = "DLLrTWprsMjdJGR447A4mui9HpqxbKdsFXBfaWPcwhny")]
-    #[derive(Serialize, AbiExample)]
+    #[derive(serde_derive::Serialize, AbiExample)]
     struct TestStructAnotherType {
         test_field: i16,
         test_field2: i8,
     }
 
     #[frozen_abi(digest = "GMeECsxg37a5qznstWXeeX3d6HXs6j12oB4SKaZZuNJk")]
-    #[derive(Serialize, AbiExample)]
+    #[derive(serde_derive::Serialize, AbiExample)]
     struct TestNest {
         nested_field: [TestStruct; 5],
     }
@@ -594,26 +589,26 @@ mod tests {
     type TestUnitStruct = std::marker::PhantomData<i8>;
 
     #[frozen_abi(digest = "6kj3mPXbzWTwZho48kZWxZjuseLU2oiqhbpqca4DmcRq")]
-    #[derive(Serialize, AbiExample, AbiEnumVisitor)]
+    #[derive(serde_derive::Serialize, AbiExample, AbiEnumVisitor)]
     enum TestEnum {
         Variant1,
         Variant2,
     }
 
     #[frozen_abi(digest = "3WqYwnbQEdu6iPZi5LJa2b5kw55hxBtZdqFqiViFCKPo")]
-    #[derive(Serialize, AbiExample, AbiEnumVisitor)]
+    #[derive(serde_derive::Serialize, AbiExample, AbiEnumVisitor)]
     enum TestTupleVariant {
         Variant1(u8, u16),
         Variant2(u8, u16),
     }
 
     #[frozen_abi(digest = "4E9gJjvKiETBeZ8dybZPAQ7maaHTHFucmLqgX2m6yrBh")]
-    #[derive(Serialize, AbiExample)]
+    #[derive(serde_derive::Serialize, AbiExample)]
     struct TestVecEnum {
         enums: Vec<TestTupleVariant>,
     }
 
-    #[derive(Serialize, AbiExample)]
+    #[derive(serde_derive::Serialize, AbiExample)]
     struct TestGenericStruct<T: Ord> {
         test_field: T,
     }
@@ -621,7 +616,7 @@ mod tests {
     #[frozen_abi(digest = "2Dr5k3Z513mV4KrGeUfcMwjsVHLmVyLiZarmfnXawEbf")]
     type TestConcreteStruct = TestGenericStruct<i64>;
 
-    #[derive(Serialize, AbiExample, AbiEnumVisitor)]
+    #[derive(serde_derive::Serialize, AbiExample, AbiEnumVisitor)]
     enum TestGenericEnum<T: serde::Serialize + Sized + Ord> {
         TestVariant(T),
     }
@@ -650,7 +645,7 @@ mod tests {
     #[frozen_abi(digest = "7rH7gnEhJ8YouzqPT6VPyUDELvL51DGednSPcoLXG2rg")]
     type TestOptionWithIsize = Option<isize>;
 
-    #[derive(Serialize, AbiExample, AbiEnumVisitor)]
+    #[derive(serde_derive::Serialize, AbiExample, AbiEnumVisitor)]
     enum TestMyOption<T: serde::Serialize + Sized + Ord> {
         None,
         Some(T),
@@ -662,11 +657,11 @@ mod tests {
     type TestBitVec = bv::BitVec<u64>;
 
     mod bitflags_abi {
-        use crate::abi_example::{AbiExample, EvenAsOpaque, IgnoreAsHelper};
+        use crate::abi_example::{AbiExample, EvenAsOpaque, TransparentAsHelper};
 
         bitflags::bitflags! {
             #[frozen_abi(digest = "HhKNkaeAd7AohTb8S8sPKjAWwzxWY2DPz5FvkWmx5bSH")]
-            #[derive(Serialize, Deserialize)]
+            #[derive(serde_derive::Serialize, serde_derive::Deserialize)]
             struct TestFlags: u8 {
                 const TestBit = 0b0000_0001;
             }
@@ -678,7 +673,7 @@ mod tests {
             }
         }
 
-        impl IgnoreAsHelper for TestFlags {}
+        impl TransparentAsHelper for TestFlags {}
         // This (EvenAsOpaque) marker trait is needed for bitflags-generated types because we can't
         // impl AbiExample for its private type:
         // thread '...TestFlags_frozen_abi...' panicked at ...:
@@ -689,13 +684,44 @@ mod tests {
         }
     }
 
+    mod serde_with_abi {
+        use serde_with::{serde_as, Bytes};
+
+        // This is a minimized testcase based on solana_sdk::packet::Packet
+        #[serde_as]
+        #[derive(serde_derive::Serialize, AbiExample)]
+        #[frozen_abi(digest = "DcR9EB87D4uQBjUrsendvcFgS5KSF7okjnxGx8ZaDE8Z")]
+        struct U8ArrayWithBytes {
+            #[serde_as(as = "Bytes")]
+            foo: [u8; 42],
+        }
+
+        #[serde_as]
+        #[derive(serde_derive::Serialize, AbiExample)]
+        #[frozen_abi(digest = "CVqaXh4pWCiUyAuZ6dZPCmbCEtJyNH3e6uwUpJzymT6b")]
+        struct U8ArrayWithGenericAs {
+            #[serde_as(as = "[_; 42]")]
+            foo: [u8; 42],
+        }
+
+        // This is a minimized testcase based on solana_lattice_hash::lt_hash::LtHash
+        #[serde_as]
+        #[derive(serde_derive::Serialize, AbiExample)]
+        #[frozen_abi(digest = "A1J57qgtrhpqk6vD4tjV1CHLPagacBKsXJBBUB5mdp5W")]
+        struct NotU8ArrayWithGenericAs {
+            #[serde_as(as = "[_; 42]")]
+            bar: [u16; 42],
+        }
+    }
+
     mod skip_should_be_same {
         #[frozen_abi(digest = "4LbuvQLX78XPbm4hqqZcHFHpseDJcw4qZL9EUZXSi2Ss")]
-        #[derive(Serialize, AbiExample)]
+        #[derive(serde_derive::Serialize, AbiExample)]
+        #[allow(dead_code)]
         struct TestTupleStruct(i8, i8, #[serde(skip)] i8);
 
         #[frozen_abi(digest = "Hk7BYjZ71upWQJAx2PqoNcapggobPmFbMJd34xVdvRso")]
-        #[derive(Serialize, AbiExample)]
+        #[derive(serde_derive::Serialize, AbiExample)]
         struct TestStruct {
             test_field: i8,
             #[serde(skip)]
@@ -703,7 +729,7 @@ mod tests {
         }
 
         #[frozen_abi(digest = "6kj3mPXbzWTwZho48kZWxZjuseLU2oiqhbpqca4DmcRq")]
-        #[derive(Serialize, AbiExample, AbiEnumVisitor)]
+        #[derive(serde_derive::Serialize, AbiExample, AbiEnumVisitor)]
         enum TestEnum {
             Variant1,
             Variant2,
@@ -713,7 +739,7 @@ mod tests {
         }
 
         #[frozen_abi(digest = "3WqYwnbQEdu6iPZi5LJa2b5kw55hxBtZdqFqiViFCKPo")]
-        #[derive(Serialize, AbiExample, AbiEnumVisitor)]
+        #[derive(serde_derive::Serialize, AbiExample, AbiEnumVisitor)]
         enum TestTupleVariant {
             Variant1(u8, u16),
             Variant2(u8, u16, #[serde(skip)] u32),
@@ -721,10 +747,10 @@ mod tests {
     }
 
     #[frozen_abi(digest = "B1PcwZdUfGnxaRid9e6ZwkST3NZ2KUEYobA1DkxWrYLP")]
-    #[derive(Serialize, AbiExample)]
+    #[derive(serde_derive::Serialize, AbiExample)]
     struct TestArcWeak(std::sync::Weak<u64>);
 
     #[frozen_abi(digest = "4R8uCLR1BVU1aFgkSaNyKcFD1FeM6rGdsjbJBFpnqx4v")]
-    #[derive(Serialize, AbiExample)]
+    #[derive(serde_derive::Serialize, AbiExample)]
     struct TestRcWeak(std::rc::Weak<u64>);
 }

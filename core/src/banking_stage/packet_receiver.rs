@@ -9,12 +9,8 @@ use {
     crate::{banking_trace::BankingPacketReceiver, tracer_packet_stats::TracerPacketStats},
     crossbeam_channel::RecvTimeoutError,
     solana_measure::{measure::Measure, measure_us},
-    solana_runtime::bank_forks::BankForks,
     solana_sdk::{saturating_add_assign, timing::timestamp},
-    std::{
-        sync::{atomic::Ordering, Arc, RwLock},
-        time::Duration,
-    },
+    std::{sync::atomic::Ordering, time::Duration},
 };
 
 pub struct PacketReceiver {
@@ -23,14 +19,10 @@ pub struct PacketReceiver {
 }
 
 impl PacketReceiver {
-    pub fn new(
-        id: u32,
-        banking_packet_receiver: BankingPacketReceiver,
-        bank_forks: Arc<RwLock<BankForks>>,
-    ) -> Self {
+    pub fn new(id: u32, banking_packet_receiver: BankingPacketReceiver) -> Self {
         Self {
             id,
-            packet_deserializer: PacketDeserializer::new(banking_packet_receiver, bank_forks),
+            packet_deserializer: PacketDeserializer::new(banking_packet_receiver),
         }
     }
 
@@ -49,6 +41,11 @@ impl PacketReceiver {
                 .receive_packets(
                     recv_timeout,
                     unprocessed_transaction_storage.max_receive_size(),
+                    |packet| {
+                        packet.check_insufficent_compute_unit_limit()?;
+                        packet.check_excessive_precompiles()?;
+                        Ok(packet)
+                    },
                 )
                 // Consumes results if Ok, otherwise we keep the Err
                 .map(|receive_packet_results| {
@@ -76,8 +73,11 @@ impl PacketReceiver {
     fn get_receive_timeout(
         unprocessed_transaction_storage: &UnprocessedTransactionStorage,
     ) -> Duration {
-        // Gossip thread will almost always not wait because the transaction storage will most likely not be empty
-        if !unprocessed_transaction_storage.is_empty() {
+        // Gossip thread (does not process) should not continuously receive with 0 duration.
+        // This can cause the thread to run at 100% CPU because it is continuously polling.
+        if !unprocessed_transaction_storage.should_not_process()
+            && !unprocessed_transaction_storage.is_empty()
+        {
             // If there are buffered packets, run the equivalent of try_recv to try reading more
             // packets. This prevents starving BankingStage::consume_buffered_packets due to
             // buffered_packet_batches containing transactions that exceed the cost model for
@@ -94,8 +94,7 @@ impl PacketReceiver {
         ReceivePacketResults {
             deserialized_packets,
             new_tracer_stats_option,
-            passed_sigverify_count,
-            failed_sigverify_count,
+            packet_stats,
         }: ReceivePacketResults,
         unprocessed_transaction_storage: &mut UnprocessedTransactionStorage,
         banking_stage_stats: &mut BankingStageStats,
@@ -105,13 +104,10 @@ impl PacketReceiver {
         let packet_count = deserialized_packets.len();
         debug!("@{:?} txs: {} id: {}", timestamp(), packet_count, self.id);
 
+        slot_metrics_tracker.increment_received_packet_counts(packet_stats);
         if let Some(new_sigverify_stats) = &new_tracer_stats_option {
             tracer_packet_stats.aggregate_sigverify_tracer_packet_stats(new_sigverify_stats);
         }
-
-        // Track all the packets incoming from sigverify, both valid and invalid
-        slot_metrics_tracker.increment_total_new_valid_packets(passed_sigverify_count);
-        slot_metrics_tracker.increment_newly_failed_sigverify_count(failed_sigverify_count);
 
         let mut dropped_packets_count = 0;
         let mut newly_buffered_packets_count = 0;

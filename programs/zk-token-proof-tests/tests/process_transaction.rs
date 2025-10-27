@@ -25,7 +25,7 @@ use {
     std::mem::size_of,
 };
 
-const VERIFY_INSTRUCTION_TYPES: [ProofInstruction; 14] = [
+const VERIFY_INSTRUCTION_TYPES: [ProofInstruction; 16] = [
     ProofInstruction::VerifyZeroBalance,
     ProofInstruction::VerifyWithdraw,
     ProofInstruction::VerifyCiphertextCiphertextEquality,
@@ -40,6 +40,8 @@ const VERIFY_INSTRUCTION_TYPES: [ProofInstruction; 14] = [
     ProofInstruction::VerifyGroupedCiphertext2HandlesValidity,
     ProofInstruction::VerifyBatchedGroupedCiphertext2HandlesValidity,
     ProofInstruction::VerifyFeeSigma,
+    ProofInstruction::VerifyGroupedCiphertext3HandlesValidity,
+    ProofInstruction::VerifyBatchedGroupedCiphertext3HandlesValidity,
 ];
 
 #[tokio::test]
@@ -887,6 +889,147 @@ async fn test_fee_sigma() {
     .await;
 }
 
+#[tokio::test]
+async fn test_grouped_ciphertext_3_handles_validity() {
+    let source_keypair = ElGamalKeypair::new_rand();
+    let source_pubkey = source_keypair.pubkey();
+
+    let destination_keypair = ElGamalKeypair::new_rand();
+    let destination_pubkey = destination_keypair.pubkey();
+
+    let auditor_keypair = ElGamalKeypair::new_rand();
+    let auditor_pubkey = auditor_keypair.pubkey();
+
+    let amount: u64 = 55;
+    let opening = PedersenOpening::new_rand();
+    let grouped_ciphertext = GroupedElGamal::encrypt_with(
+        [source_pubkey, destination_pubkey, auditor_pubkey],
+        amount,
+        &opening,
+    );
+
+    let success_proof_data = GroupedCiphertext3HandlesValidityProofData::new(
+        source_pubkey,
+        destination_pubkey,
+        auditor_pubkey,
+        &grouped_ciphertext,
+        amount,
+        &opening,
+    )
+    .unwrap();
+
+    let incorrect_opening = PedersenOpening::new_rand();
+    let fail_proof_data = GroupedCiphertext3HandlesValidityProofData::new(
+        source_pubkey,
+        destination_pubkey,
+        auditor_pubkey,
+        &grouped_ciphertext,
+        amount,
+        &incorrect_opening,
+    )
+    .unwrap();
+
+    test_verify_proof_without_context(
+        ProofInstruction::VerifyGroupedCiphertext3HandlesValidity,
+        &success_proof_data,
+        &fail_proof_data,
+    )
+    .await;
+
+    test_verify_proof_with_context(
+        ProofInstruction::VerifyGroupedCiphertext3HandlesValidity,
+        size_of::<ProofContextState<GroupedCiphertext3HandlesValidityProofContext>>(),
+        &success_proof_data,
+        &fail_proof_data,
+    )
+    .await;
+
+    test_close_context_state(
+        ProofInstruction::VerifyGroupedCiphertext3HandlesValidity,
+        size_of::<ProofContextState<GroupedCiphertext3HandlesValidityProofContext>>(),
+        &success_proof_data,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_batched_grouped_ciphertext_3_handles_validity() {
+    let source_keypair = ElGamalKeypair::new_rand();
+    let source_pubkey = source_keypair.pubkey();
+
+    let destination_keypair = ElGamalKeypair::new_rand();
+    let destination_pubkey = destination_keypair.pubkey();
+
+    let auditor_keypair = ElGamalKeypair::new_rand();
+    let auditor_pubkey = auditor_keypair.pubkey();
+
+    let amount_lo: u64 = 55;
+    let amount_hi: u64 = 22;
+
+    let opening_lo = PedersenOpening::new_rand();
+    let opening_hi = PedersenOpening::new_rand();
+
+    let grouped_ciphertext_lo = GroupedElGamal::encrypt_with(
+        [source_pubkey, destination_pubkey, auditor_pubkey],
+        amount_lo,
+        &opening_lo,
+    );
+    let grouped_ciphertext_hi = GroupedElGamal::encrypt_with(
+        [source_pubkey, destination_pubkey, auditor_pubkey],
+        amount_hi,
+        &opening_hi,
+    );
+
+    let success_proof_data = BatchedGroupedCiphertext3HandlesValidityProofData::new(
+        source_pubkey,
+        destination_pubkey,
+        auditor_pubkey,
+        &grouped_ciphertext_lo,
+        &grouped_ciphertext_hi,
+        amount_lo,
+        amount_hi,
+        &opening_lo,
+        &opening_hi,
+    )
+    .unwrap();
+
+    let incorrect_opening = PedersenOpening::new_rand();
+    let fail_proof_data = BatchedGroupedCiphertext3HandlesValidityProofData::new(
+        source_pubkey,
+        destination_pubkey,
+        auditor_pubkey,
+        &grouped_ciphertext_lo,
+        &grouped_ciphertext_hi,
+        amount_lo,
+        amount_hi,
+        &incorrect_opening,
+        &opening_hi,
+    )
+    .unwrap();
+
+    test_verify_proof_without_context(
+        ProofInstruction::VerifyBatchedGroupedCiphertext3HandlesValidity,
+        &success_proof_data,
+        &fail_proof_data,
+    )
+    .await;
+
+    test_verify_proof_with_context(
+        ProofInstruction::VerifyBatchedGroupedCiphertext3HandlesValidity,
+        size_of::<ProofContextState<BatchedGroupedCiphertext3HandlesValidityProofContext>>(),
+        &success_proof_data,
+        &fail_proof_data,
+    )
+    .await;
+
+    test_close_context_state(
+        ProofInstruction::VerifyBatchedGroupedCiphertext3HandlesValidity,
+        size_of::<ProofContextState<BatchedGroupedCiphertext3HandlesValidityProofContext>>(),
+        &success_proof_data,
+    )
+    .await;
+}
+
 async fn test_verify_proof_without_context<T, U>(
     proof_instruction: ProofInstruction,
     success_proof_data: &T,
@@ -922,7 +1065,6 @@ async fn test_verify_proof_without_context<T, U>(
 
     let client = &mut context.banks_client;
     let payer = &context.payer;
-    let recent_blockhash = context.last_blockhash;
 
     // verify a valid proof (wihtout creating a context account)
     let instructions = vec![proof_instruction.encode_verify_proof(None, success_proof_data)];
@@ -930,7 +1072,7 @@ async fn test_verify_proof_without_context<T, U>(
         &instructions.with_max_compute_unit_limit(),
         Some(&payer.pubkey()),
         &[payer],
-        recent_blockhash,
+        client.get_latest_blockhash().await.unwrap(),
     );
     client.process_transaction(transaction).await.unwrap();
 
@@ -940,7 +1082,7 @@ async fn test_verify_proof_without_context<T, U>(
         &instructions.with_max_compute_unit_limit(),
         Some(&payer.pubkey()),
         &[payer],
-        recent_blockhash,
+        client.get_latest_blockhash().await.unwrap(),
     );
     let err = client
         .process_transaction(transaction)
@@ -964,7 +1106,7 @@ async fn test_verify_proof_without_context<T, U>(
             &instruction.with_max_compute_unit_limit(),
             Some(&payer.pubkey()),
             &[payer],
-            recent_blockhash,
+            client.get_latest_blockhash().await.unwrap(),
         );
         let err = client
             .process_transaction(transaction)
@@ -984,7 +1126,7 @@ async fn test_verify_proof_without_context<T, U>(
         &instruction,
         Some(&payer.pubkey()),
         &[payer],
-        recent_blockhash,
+        client.get_latest_blockhash().await.unwrap(),
     );
     client.process_transaction(transaction).await.unwrap();
 
@@ -995,7 +1137,7 @@ async fn test_verify_proof_without_context<T, U>(
         &instruction,
         Some(&payer.pubkey()),
         &[payer],
-        recent_blockhash,
+        client.get_latest_blockhash().await.unwrap(),
     );
     client
         .process_transaction(transaction)
@@ -1025,7 +1167,6 @@ async fn test_verify_proof_with_context<T, U>(
 
     let client = &mut context.banks_client;
     let payer = &context.payer;
-    let recent_blockhash = context.last_blockhash;
 
     let context_state_account = Keypair::new();
     let context_state_authority = Keypair::new();
@@ -1050,7 +1191,7 @@ async fn test_verify_proof_with_context<T, U>(
         &instructions.with_max_compute_unit_limit(),
         Some(&payer.pubkey()),
         &[payer, &context_state_account],
-        recent_blockhash,
+        client.get_latest_blockhash().await.unwrap(),
     );
     let err = client
         .process_transaction(transaction)
@@ -1077,7 +1218,7 @@ async fn test_verify_proof_with_context<T, U>(
         &instructions.with_max_compute_unit_limit(),
         Some(&payer.pubkey()),
         &[payer, &context_state_account],
-        recent_blockhash,
+        client.get_latest_blockhash().await.unwrap(),
     );
     let err = client
         .process_transaction(transaction)
@@ -1104,7 +1245,7 @@ async fn test_verify_proof_with_context<T, U>(
         &instructions.with_max_compute_unit_limit(),
         Some(&payer.pubkey()),
         &[payer, &context_state_account],
-        recent_blockhash,
+        client.get_latest_blockhash().await.unwrap(),
     );
     let err = client
         .process_transaction(transaction)
@@ -1137,7 +1278,7 @@ async fn test_verify_proof_with_context<T, U>(
             &instructions.with_max_compute_unit_limit(),
             Some(&payer.pubkey()),
             &[payer, &context_state_account],
-            recent_blockhash,
+            client.get_latest_blockhash().await.unwrap(),
         );
         let err = client
             .process_transaction(transaction)
@@ -1165,7 +1306,7 @@ async fn test_verify_proof_with_context<T, U>(
         &instructions.with_max_compute_unit_limit(),
         Some(&payer.pubkey()),
         &[payer, &context_state_account],
-        recent_blockhash,
+        client.get_latest_blockhash().await.unwrap(),
     );
     client.process_transaction(transaction).await.unwrap();
 
@@ -1176,7 +1317,7 @@ async fn test_verify_proof_with_context<T, U>(
         &instructions.with_max_compute_unit_limit(),
         Some(&payer.pubkey()),
         &[payer],
-        recent_blockhash,
+        client.get_latest_blockhash().await.unwrap(),
     );
     let err = client
         .process_transaction(transaction)
@@ -1209,7 +1350,7 @@ async fn test_verify_proof_with_context<T, U>(
         &instructions.with_max_compute_unit_limit(),
         Some(&payer.pubkey()),
         &[payer, &context_state_account_and_authority],
-        recent_blockhash,
+        client.get_latest_blockhash().await.unwrap(),
     );
     client.process_transaction(transaction).await.unwrap();
 }
@@ -1251,7 +1392,6 @@ async fn test_verify_proof_from_account_with_context<T, U>(
 
     let client = &mut context.banks_client;
     let payer = &context.payer;
-    let recent_blockhash = context.last_blockhash;
 
     let context_state_account = Keypair::new();
     let context_state_authority = Keypair::new();
@@ -1280,7 +1420,7 @@ async fn test_verify_proof_from_account_with_context<T, U>(
         &instructions,
         Some(&payer.pubkey()),
         &[payer, &context_state_account],
-        recent_blockhash,
+        client.get_latest_blockhash().await.unwrap(),
     );
     let err = client
         .process_transaction(transaction)
@@ -1311,7 +1451,7 @@ async fn test_verify_proof_from_account_with_context<T, U>(
         &instructions,
         Some(&payer.pubkey()),
         &[payer, &context_state_account],
-        recent_blockhash,
+        client.get_latest_blockhash().await.unwrap(),
     );
     client.process_transaction(transaction).await.unwrap();
 
@@ -1325,7 +1465,7 @@ async fn test_verify_proof_from_account_with_context<T, U>(
         &instructions,
         Some(&payer.pubkey()),
         &[payer],
-        recent_blockhash,
+        client.get_latest_blockhash().await.unwrap(),
     );
     let err = client
         .process_transaction(transaction)
@@ -1362,7 +1502,7 @@ async fn test_verify_proof_from_account_with_context<T, U>(
         &instructions,
         Some(&payer.pubkey()),
         &[payer, &context_state_account_and_authority],
-        recent_blockhash,
+        client.get_latest_blockhash().await.unwrap(),
     );
     client.process_transaction(transaction).await.unwrap();
 }
@@ -1383,7 +1523,6 @@ async fn test_close_context_state<T, U>(
 
     let client = &mut context.banks_client;
     let payer = &context.payer;
-    let recent_blockhash = context.last_blockhash;
 
     let context_state_account = Keypair::new();
     let context_state_authority = Keypair::new();
@@ -1410,7 +1549,7 @@ async fn test_close_context_state<T, U>(
         &instructions.with_max_compute_unit_limit(),
         Some(&payer.pubkey()),
         &[payer, &context_state_account],
-        recent_blockhash,
+        client.get_latest_blockhash().await.unwrap(),
     );
     client.process_transaction(transaction).await.unwrap();
 
@@ -1427,7 +1566,7 @@ async fn test_close_context_state<T, U>(
         &vec![instruction].with_max_compute_unit_limit(),
         Some(&payer.pubkey()),
         &[payer, &incorrect_authority],
-        recent_blockhash,
+        client.get_latest_blockhash().await.unwrap(),
     );
     let err = client
         .process_transaction(transaction)
@@ -1451,7 +1590,7 @@ async fn test_close_context_state<T, U>(
         &vec![instruction.clone()].with_max_compute_unit_limit(),
         Some(&payer.pubkey()),
         &[payer, &context_state_authority],
-        recent_blockhash,
+        client.get_latest_blockhash().await.unwrap(),
     );
     client.process_transaction(transaction).await.unwrap();
 
@@ -1477,7 +1616,7 @@ async fn test_close_context_state<T, U>(
         &instructions.with_max_compute_unit_limit(),
         Some(&payer.pubkey()),
         &[payer, &context_state_account, &context_state_authority],
-        recent_blockhash,
+        client.get_latest_blockhash().await.unwrap(),
     );
     client.process_transaction(transaction).await.unwrap();
 
@@ -1503,7 +1642,7 @@ async fn test_close_context_state<T, U>(
         &instructions.with_max_compute_unit_limit(),
         Some(&payer.pubkey()),
         &[payer, &context_state_account, &context_state_authority],
-        recent_blockhash,
+        client.get_latest_blockhash().await.unwrap(),
     );
     client.process_transaction(transaction).await.unwrap();
 
@@ -1529,7 +1668,7 @@ async fn test_close_context_state<T, U>(
         &instructions.with_max_compute_unit_limit(),
         Some(&payer.pubkey()),
         &[payer, &context_state_account, &context_state_authority],
-        recent_blockhash,
+        client.get_latest_blockhash().await.unwrap(),
     );
     let err = client
         .process_transaction(transaction)
@@ -1563,7 +1702,7 @@ async fn test_close_context_state<T, U>(
         &instructions.with_max_compute_unit_limit(),
         Some(&payer.pubkey()),
         &[payer, &context_state_account_and_authority],
-        recent_blockhash,
+        client.get_latest_blockhash().await.unwrap(),
     );
     client.process_transaction(transaction).await.unwrap();
 }
@@ -1578,7 +1717,7 @@ impl WithMaxComputeUnitLimit for Vec<solana_sdk::instruction::Instruction> {
     fn with_max_compute_unit_limit(mut self) -> Self {
         self.push(
             solana_sdk::compute_budget::ComputeBudgetInstruction::set_compute_unit_limit(
-                solana_program_runtime::compute_budget_processor::MAX_COMPUTE_UNIT_LIMIT,
+                solana_compute_budget::compute_budget_limits::MAX_COMPUTE_UNIT_LIMIT,
             ),
         );
         self

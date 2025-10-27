@@ -47,6 +47,13 @@ impl ShredCode {
         }
     }
 
+    pub(super) fn chained_merkle_root(&self) -> Result<Hash, Error> {
+        match self {
+            Self::Legacy(_) => Err(Error::InvalidShredType),
+            Self::Merkle(shred) => shred.chained_merkle_root(),
+        }
+    }
+
     pub(super) fn merkle_root(&self) -> Result<Hash, Error> {
         match self {
             Self::Legacy(_) => Err(Error::InvalidShredType),
@@ -97,6 +104,13 @@ impl ShredCode {
                 erasure_mismatch(shred, other)
                     || shred.common_header().signature != other.common_header().signature
             }
+        }
+    }
+
+    pub(super) fn retransmitter_signature(&self) -> Result<Signature, Error> {
+        match self {
+            Self::Legacy(_) => Err(Error::InvalidShredVariant),
+            Self::Merkle(shred) => shred.retransmitter_signature(),
         }
     }
 }

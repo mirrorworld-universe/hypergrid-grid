@@ -3,7 +3,7 @@ use {
         cluster_slots_service::cluster_slots::ClusterSlots,
         repair::{
             duplicate_repair_status::get_ancestor_hash_repair_sample_size,
-            quic_endpoint::{LocalRequest, RemoteRequest},
+            quic_endpoint::RemoteRequest,
             repair_response,
             repair_service::{OutstandingShredRepairs, RepairStats, REPAIR_MS},
             request_response::RequestResponse,
@@ -11,7 +11,8 @@ use {
         },
     },
     bincode::{serialize, Options},
-    crossbeam_channel::{Receiver, RecvTimeoutError, Sender},
+    bytes::Bytes,
+    crossbeam_channel::{Receiver, RecvTimeoutError},
     lru::LruCache,
     rand::{
         distributions::{Distribution, WeightedError, WeightedIndex},
@@ -19,7 +20,7 @@ use {
     },
     solana_gossip::{
         cluster_info::{ClusterInfo, ClusterInfoError},
-        contact_info::{LegacyContactInfo as ContactInfo, LegacyContactInfo, Protocol},
+        contact_info::{ContactInfo, Protocol},
         ping_pong::{self, PingCache, Pong},
         weighted_shuffle::WeightedShuffle,
     },
@@ -41,7 +42,7 @@ use {
         pubkey::{Pubkey, PUBKEY_BYTES},
         signature::{Signable, Signature, Signer, SIGNATURE_BYTES},
         signer::keypair::Keypair,
-        timing::{duration_as_ms, timestamp},
+        timing::timestamp,
     },
     solana_streamer::{
         sendmmsg::{batch_send, SendPktsError},
@@ -59,7 +60,7 @@ use {
         thread::{Builder, JoinHandle},
         time::{Duration, Instant},
     },
-    tokio::sync::{mpsc::Sender as AsyncSender, oneshot::Sender as OneShotSender},
+    tokio::sync::mpsc::Sender as AsyncSender,
 };
 
 /// the number of slots to respond with when responding to `Orphan` requests
@@ -140,8 +141,12 @@ impl AncestorHashesRepairType {
     }
 }
 
-#[derive(Debug, AbiEnumVisitor, AbiExample, Deserialize, Serialize)]
-#[frozen_abi(digest = "AKpurCovzn6rsji4aQrP3hUdEHxjtXUfT7AatZXN7Rpz")]
+#[cfg_attr(
+    feature = "frozen-abi",
+    derive(AbiEnumVisitor, AbiExample),
+    frozen_abi(digest = "9SdneX58ekpqLJBzUwfwJsK2fZc9mN4vTcaS4temEjkP")
+)]
+#[derive(Debug, Deserialize, Serialize)]
 pub enum AncestorHashesResponse {
     Hashes(Vec<(Slot, Hash)>),
     Ping(Ping),
@@ -192,7 +197,8 @@ struct ServeRepairStats {
     err_id_mismatch: usize,
 }
 
-#[derive(Debug, AbiExample, Deserialize, Serialize)]
+#[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct RepairRequestHeader {
     signature: Signature,
     sender: Pubkey,
@@ -216,16 +222,20 @@ impl RepairRequestHeader {
 pub(crate) type Ping = ping_pong::Ping<[u8; REPAIR_PING_TOKEN_SIZE]>;
 
 /// Window protocol messages
-#[derive(Debug, AbiEnumVisitor, AbiExample, Deserialize, Serialize)]
-#[frozen_abi(digest = "3VzVe3kMrG6ijkVPyCGeJVA9hQjWcFEZbAQPc5Zizrjm")]
+#[cfg_attr(
+    feature = "frozen-abi",
+    derive(AbiEnumVisitor, AbiExample),
+    frozen_abi(digest = "3E2R8jiSt9QfVHdX3MgW3UdeNWfor7zNjJcLJLz2K1JY")
+)]
+#[derive(Debug, Deserialize, Serialize)]
 pub enum RepairProtocol {
-    LegacyWindowIndex(LegacyContactInfo, Slot, u64),
-    LegacyHighestWindowIndex(LegacyContactInfo, Slot, u64),
-    LegacyOrphan(LegacyContactInfo, Slot),
-    LegacyWindowIndexWithNonce(LegacyContactInfo, Slot, u64, Nonce),
-    LegacyHighestWindowIndexWithNonce(LegacyContactInfo, Slot, u64, Nonce),
-    LegacyOrphanWithNonce(LegacyContactInfo, Slot, Nonce),
-    LegacyAncestorHashes(LegacyContactInfo, Slot, Nonce),
+    LegacyWindowIndex,
+    LegacyHighestWindowIndex,
+    LegacyOrphan,
+    LegacyWindowIndexWithNonce,
+    LegacyHighestWindowIndexWithNonce,
+    LegacyOrphanWithNonce,
+    LegacyAncestorHashes,
     Pong(ping_pong::Pong),
     WindowIndex {
         header: RepairRequestHeader,
@@ -260,39 +270,43 @@ fn discard_malformed_repair_requests(
     requests.len()
 }
 
-#[derive(Debug, AbiEnumVisitor, AbiExample, Deserialize, Serialize)]
-#[frozen_abi(digest = "CkffjyMPCwuJgk9NiCMELXLCecAnTPZqpKEnUCb3VyVf")]
+#[cfg_attr(
+    feature = "frozen-abi",
+    derive(AbiEnumVisitor, AbiExample),
+    frozen_abi(digest = "CpKVYghdpMDRMiGjZpa71dcnB7rCVHLVogZbB3AGDKAK")
+)]
+#[derive(Debug, Deserialize, Serialize)]
 pub(crate) enum RepairResponse {
     Ping(Ping),
 }
 
 impl RepairProtocol {
-    fn sender(&self) -> &Pubkey {
+    fn sender(&self) -> Option<&Pubkey> {
         match self {
-            Self::LegacyWindowIndex(ci, _, _) => ci.pubkey(),
-            Self::LegacyHighestWindowIndex(ci, _, _) => ci.pubkey(),
-            Self::LegacyOrphan(ci, _) => ci.pubkey(),
-            Self::LegacyWindowIndexWithNonce(ci, _, _, _) => ci.pubkey(),
-            Self::LegacyHighestWindowIndexWithNonce(ci, _, _, _) => ci.pubkey(),
-            Self::LegacyOrphanWithNonce(ci, _, _) => ci.pubkey(),
-            Self::LegacyAncestorHashes(ci, _, _) => ci.pubkey(),
-            Self::Pong(pong) => pong.from(),
-            Self::WindowIndex { header, .. } => &header.sender,
-            Self::HighestWindowIndex { header, .. } => &header.sender,
-            Self::Orphan { header, .. } => &header.sender,
-            Self::AncestorHashes { header, .. } => &header.sender,
+            Self::LegacyWindowIndex
+            | Self::LegacyHighestWindowIndex
+            | Self::LegacyOrphan
+            | Self::LegacyWindowIndexWithNonce
+            | Self::LegacyHighestWindowIndexWithNonce
+            | Self::LegacyOrphanWithNonce
+            | Self::LegacyAncestorHashes => None,
+            Self::Pong(pong) => Some(pong.from()),
+            Self::WindowIndex { header, .. } => Some(&header.sender),
+            Self::HighestWindowIndex { header, .. } => Some(&header.sender),
+            Self::Orphan { header, .. } => Some(&header.sender),
+            Self::AncestorHashes { header, .. } => Some(&header.sender),
         }
     }
 
     fn supports_signature(&self) -> bool {
         match self {
-            Self::LegacyWindowIndex(_, _, _)
-            | Self::LegacyHighestWindowIndex(_, _, _)
-            | Self::LegacyOrphan(_, _)
-            | Self::LegacyWindowIndexWithNonce(_, _, _, _)
-            | Self::LegacyHighestWindowIndexWithNonce(_, _, _, _)
-            | Self::LegacyOrphanWithNonce(_, _, _)
-            | Self::LegacyAncestorHashes(_, _, _) => false,
+            Self::LegacyWindowIndex
+            | Self::LegacyHighestWindowIndex
+            | Self::LegacyOrphan
+            | Self::LegacyWindowIndexWithNonce
+            | Self::LegacyHighestWindowIndexWithNonce
+            | Self::LegacyOrphanWithNonce
+            | Self::LegacyAncestorHashes => false,
             Self::Pong(_)
             | Self::WindowIndex { .. }
             | Self::HighestWindowIndex { .. }
@@ -308,13 +322,13 @@ impl RepairProtocol {
             | RepairProtocol::AncestorHashes { .. } => 1,
             RepairProtocol::Orphan { .. } => MAX_ORPHAN_REPAIR_RESPONSES,
             RepairProtocol::Pong(_) => 0, // no response
-            RepairProtocol::LegacyWindowIndex(_, _, _)
-            | RepairProtocol::LegacyHighestWindowIndex(_, _, _)
-            | RepairProtocol::LegacyOrphan(_, _)
-            | RepairProtocol::LegacyWindowIndexWithNonce(_, _, _, _)
-            | RepairProtocol::LegacyHighestWindowIndexWithNonce(_, _, _, _)
-            | RepairProtocol::LegacyOrphanWithNonce(_, _, _)
-            | RepairProtocol::LegacyAncestorHashes(_, _, _) => 0, // unsupported
+            RepairProtocol::LegacyWindowIndex
+            | RepairProtocol::LegacyHighestWindowIndex
+            | RepairProtocol::LegacyOrphan
+            | RepairProtocol::LegacyWindowIndexWithNonce
+            | RepairProtocol::LegacyHighestWindowIndexWithNonce
+            | RepairProtocol::LegacyOrphanWithNonce
+            | RepairProtocol::LegacyAncestorHashes => 0, // unsupported
         }
     }
 
@@ -380,9 +394,9 @@ impl RepairPeers {
 struct RepairRequestWithMeta {
     request: RepairProtocol,
     from_addr: SocketAddr,
+    protocol: Protocol,
     stake: u64,
     whitelisted: bool,
-    response_sender: Option<OneShotSender<Vec<Vec<u8>>>>,
 }
 
 impl ServeRepair {
@@ -482,13 +496,13 @@ impl ServeRepair {
                     ping_cache.add(pong, *from_addr, Instant::now());
                     (None, "Pong")
                 }
-                RepairProtocol::LegacyWindowIndex(_, _, _)
-                | RepairProtocol::LegacyWindowIndexWithNonce(_, _, _, _)
-                | RepairProtocol::LegacyHighestWindowIndex(_, _, _)
-                | RepairProtocol::LegacyHighestWindowIndexWithNonce(_, _, _, _)
-                | RepairProtocol::LegacyOrphan(_, _)
-                | RepairProtocol::LegacyOrphanWithNonce(_, _, _)
-                | RepairProtocol::LegacyAncestorHashes(_, _, _) => {
+                RepairProtocol::LegacyWindowIndex
+                | RepairProtocol::LegacyWindowIndexWithNonce
+                | RepairProtocol::LegacyHighestWindowIndex
+                | RepairProtocol::LegacyHighestWindowIndexWithNonce
+                | RepairProtocol::LegacyOrphan
+                | RepairProtocol::LegacyOrphanWithNonce
+                | RepairProtocol::LegacyAncestorHashes => {
                     error!("Unexpected legacy request: {request:?}");
                     debug_assert!(
                         false,
@@ -504,7 +518,7 @@ impl ServeRepair {
     }
 
     fn report_time_spent(label: &str, time: &Duration, extra: &str) {
-        let count = duration_as_ms(time);
+        let count = time.as_millis();
         if count > 5 {
             info!("{} took: {} ms {}", label, count, extra);
         }
@@ -526,30 +540,33 @@ impl ServeRepair {
         }
         Self::verify_signed_packet(my_id, &remote_request.bytes, &request)?;
         if let Some(remote_pubkey) = remote_request.remote_pubkey {
-            if &remote_pubkey != request.sender() {
+            if Some(&remote_pubkey) != request.sender() {
                 error!(
-                    "remote pubkey {remote_pubkey} != request sender {}",
+                    "remote pubkey {remote_pubkey} != request sender {:?}",
                     request.sender()
                 );
             }
         }
-        if request.sender() == my_id {
+        if request.sender() == Some(my_id) {
             error!("self repair: from_addr={from_addr} my_id={my_id} request={request:?}");
             return Err(Error::from(RepairVerifyError::SelfRepair));
         }
         let stake = *epoch_staked_nodes
             .as_ref()
-            .and_then(|stakes| stakes.get(request.sender()))
+            .and_then(|stakes| stakes.get(request.sender()?))
             .unwrap_or(&0);
 
-        let whitelisted = whitelist.contains(request.sender());
+        let whitelisted = request
+            .sender()
+            .map(|pubkey| whitelist.contains(pubkey))
+            .unwrap_or_default();
 
         Ok(RepairRequestWithMeta {
             request,
             from_addr,
+            protocol: remote_request.protocol(),
             stake,
             whitelisted,
-            response_sender: remote_request.response_sender,
         })
     }
 
@@ -620,6 +637,7 @@ impl ServeRepair {
         blockstore: &Blockstore,
         requests_receiver: &Receiver<RemoteRequest>,
         response_sender: &PacketBatchSender,
+        repair_response_quic_sender: &AsyncSender<(SocketAddr, Bytes)>,
         stats: &mut ServeRepairStats,
         data_budget: &DataBudget,
     ) -> std::result::Result<(), RecvTimeoutError> {
@@ -694,6 +712,7 @@ impl ServeRepair {
             blockstore,
             decoded_requests,
             response_sender,
+            repair_response_quic_sender,
             stats,
             data_budget,
         );
@@ -790,11 +809,12 @@ impl ServeRepair {
         *stats = ServeRepairStats::default();
     }
 
-    pub fn listen(
+    pub(crate) fn listen(
         self,
         blockstore: Arc<Blockstore>,
         requests_receiver: Receiver<RemoteRequest>,
         response_sender: PacketBatchSender,
+        repair_response_quic_sender: AsyncSender<(SocketAddr, Bytes)>,
         exit: Arc<AtomicBool>,
     ) -> JoinHandle<()> {
         const INTERVAL_MS: u64 = 1000;
@@ -824,6 +844,7 @@ impl ServeRepair {
                         &blockstore,
                         &requests_receiver,
                         &response_sender,
+                        &repair_response_quic_sender,
                         &mut stats,
                         &data_budget,
                     );
@@ -846,13 +867,13 @@ impl ServeRepair {
 
     fn verify_signed_packet(my_id: &Pubkey, bytes: &[u8], request: &RepairProtocol) -> Result<()> {
         match request {
-            RepairProtocol::LegacyWindowIndex(_, _, _)
-            | RepairProtocol::LegacyHighestWindowIndex(_, _, _)
-            | RepairProtocol::LegacyOrphan(_, _)
-            | RepairProtocol::LegacyWindowIndexWithNonce(_, _, _, _)
-            | RepairProtocol::LegacyHighestWindowIndexWithNonce(_, _, _, _)
-            | RepairProtocol::LegacyOrphanWithNonce(_, _, _)
-            | RepairProtocol::LegacyAncestorHashes(_, _, _) => {
+            RepairProtocol::LegacyWindowIndex
+            | RepairProtocol::LegacyHighestWindowIndex
+            | RepairProtocol::LegacyOrphan
+            | RepairProtocol::LegacyWindowIndexWithNonce
+            | RepairProtocol::LegacyHighestWindowIndexWithNonce
+            | RepairProtocol::LegacyOrphanWithNonce
+            | RepairProtocol::LegacyAncestorHashes => {
                 return Err(Error::from(RepairVerifyError::Unsigned));
             }
             RepairProtocol::Pong(pong) => {
@@ -885,7 +906,9 @@ impl ServeRepair {
                     );
                     return Err(Error::from(RepairVerifyError::Malformed));
                 };
-                let from_id = request.sender();
+                let Some(from_id) = request.sender() else {
+                    return Err(Error::from(RepairVerifyError::SigVerify));
+                };
                 let signed_data = [leading_buf, trailing_buf].concat();
                 if !header.signature.verify(from_id.as_ref(), &signed_data) {
                     return Err(Error::from(RepairVerifyError::SigVerify));
@@ -903,8 +926,10 @@ impl ServeRepair {
     ) -> (bool, Option<Packet>) {
         let mut rng = rand::thread_rng();
         let mut pingf = move || Ping::new_rand(&mut rng, identity_keypair).ok();
-        let (check, ping) =
-            ping_cache.check(Instant::now(), (*request.sender(), *from_addr), &mut pingf);
+        let (check, ping) = request
+            .sender()
+            .map(|&sender| ping_cache.check(Instant::now(), (sender, *from_addr), &mut pingf))
+            .unwrap_or_default();
         let ping_pkt = if let Some(ping) = ping {
             match request {
                 RepairProtocol::WindowIndex { .. }
@@ -918,13 +943,13 @@ impl ServeRepair {
                     Packet::from_data(Some(from_addr), ping).ok()
                 }
                 RepairProtocol::Pong(_) => None,
-                RepairProtocol::LegacyWindowIndex(_, _, _)
-                | RepairProtocol::LegacyHighestWindowIndex(_, _, _)
-                | RepairProtocol::LegacyOrphan(_, _)
-                | RepairProtocol::LegacyWindowIndexWithNonce(_, _, _, _)
-                | RepairProtocol::LegacyHighestWindowIndexWithNonce(_, _, _, _)
-                | RepairProtocol::LegacyOrphanWithNonce(_, _, _)
-                | RepairProtocol::LegacyAncestorHashes(_, _, _) => {
+                RepairProtocol::LegacyWindowIndex
+                | RepairProtocol::LegacyHighestWindowIndex
+                | RepairProtocol::LegacyOrphan
+                | RepairProtocol::LegacyWindowIndexWithNonce
+                | RepairProtocol::LegacyHighestWindowIndexWithNonce
+                | RepairProtocol::LegacyOrphanWithNonce
+                | RepairProtocol::LegacyAncestorHashes => {
                     error!("Unexpected legacy request: {request:?}");
                     debug_assert!(
                         false,
@@ -947,6 +972,7 @@ impl ServeRepair {
         blockstore: &Blockstore,
         requests: Vec<RepairRequestWithMeta>,
         packet_batch_sender: &PacketBatchSender,
+        repair_response_quic_sender: &AsyncSender<(SocketAddr, Bytes)>,
         stats: &mut ServeRepairStats,
         data_budget: &DataBudget,
     ) {
@@ -956,9 +982,9 @@ impl ServeRepair {
         for RepairRequestWithMeta {
             request,
             from_addr,
+            protocol,
             stake,
             whitelisted: _,
-            response_sender,
         } in requests.into_iter()
         {
             if !data_budget.check(request.max_response_bytes()) {
@@ -966,7 +992,7 @@ impl ServeRepair {
                 continue;
             }
             // Bypass ping/pong check for requests coming from QUIC endpoint.
-            if !matches!(&request, RepairProtocol::Pong(_)) && response_sender.is_none() {
+            if !matches!(&request, RepairProtocol::Pong(_)) && protocol == Protocol::UDP {
                 let (check, ping_pkt) =
                     Self::check_ping_cache(ping_cache, &request, &from_addr, &identity_keypair);
                 if let Some(ping_pkt) = ping_pkt {
@@ -986,7 +1012,12 @@ impl ServeRepair {
             let num_response_packets = rsp.len();
             let num_response_bytes = rsp.iter().map(|p| p.meta().size).sum();
             if data_budget.take(num_response_bytes)
-                && send_response(rsp, packet_batch_sender, response_sender)
+                && send_response(
+                    rsp,
+                    protocol,
+                    packet_batch_sender,
+                    repair_response_quic_sender,
+                )
             {
                 stats.total_response_packets += num_response_packets;
                 match stake > 0 {
@@ -1037,8 +1068,7 @@ impl ServeRepair {
         repair_validators: &Option<HashSet<Pubkey>>,
         outstanding_requests: &mut OutstandingShredRepairs,
         identity_keypair: &Keypair,
-        quic_endpoint_sender: &AsyncSender<LocalRequest>,
-        quic_endpoint_response_sender: &Sender<(SocketAddr, Vec<u8>)>,
+        repair_request_quic_sender: &AsyncSender<(SocketAddr, Bytes)>,
         repair_protocol: Protocol,
     ) -> Result<Option<(SocketAddr, Vec<u8>)>> {
         // find a peer that appears to be accepting replication and has the desired slot, as indicated
@@ -1072,18 +1102,10 @@ impl ServeRepair {
         match repair_protocol {
             Protocol::UDP => Ok(Some((peer.serve_repair, out))),
             Protocol::QUIC => {
-                let num_expected_responses =
-                    usize::try_from(repair_request.num_expected_responses()).unwrap();
-                let request = LocalRequest {
-                    remote_address: peer.serve_repair_quic,
-                    bytes: out,
-                    num_expected_responses,
-                    response_sender: quic_endpoint_response_sender.clone(),
-                };
-                quic_endpoint_sender
-                    .blocking_send(request)
-                    .map_err(|_| Error::SendError)
-                    .map(|()| None)
+                repair_request_quic_sender
+                    .blocking_send((peer.serve_repair_quic, Bytes::from(out)))
+                    .map_err(|_| Error::SendError)?;
+                Ok(None)
             }
         }
     }
@@ -1400,19 +1422,19 @@ where
 // Returns true on success.
 fn send_response(
     packets: PacketBatch,
+    protocol: Protocol,
     packet_batch_sender: &PacketBatchSender,
-    response_sender: Option<OneShotSender<Vec<Vec<u8>>>>,
+    repair_response_quic_sender: &AsyncSender<(SocketAddr, Bytes)>,
 ) -> bool {
-    match response_sender {
-        None => packet_batch_sender.send(packets).is_ok(),
-        Some(response_sender) => {
-            let response = packets
-                .iter()
-                .filter_map(|packet| packet.data(..))
-                .map(Vec::from)
-                .collect();
-            response_sender.send(response).is_ok()
-        }
+    match protocol {
+        Protocol::UDP => packet_batch_sender.send(packets).is_ok(),
+        Protocol::QUIC => packets
+            .iter()
+            .filter_map(|packet| {
+                let bytes = Bytes::from(Vec::from(packet.data(..)?));
+                Some((packet.meta().socket_addr(), bytes))
+            })
+            .all(|packet| repair_response_quic_sender.blocking_send(packet).is_ok()),
     }
 }
 
@@ -1421,6 +1443,7 @@ mod tests {
     use {
         super::*,
         crate::repair::repair_response,
+        solana_feature_set::FeatureSet,
         solana_gossip::{contact_info::ContactInfo, socketaddr, socketaddr_any},
         solana_ledger::{
             blockstore::make_many_slot_entries,
@@ -1431,10 +1454,7 @@ mod tests {
         },
         solana_perf::packet::{deserialize_from_with_limit, Packet},
         solana_runtime::bank::Bank,
-        solana_sdk::{
-            feature_set::FeatureSet, hash::Hash, pubkey::Pubkey, signature::Keypair,
-            timing::timestamp,
-        },
+        solana_sdk::{hash::Hash, pubkey::Pubkey, signature::Keypair, timing::timestamp},
         solana_streamer::socket::SocketAddrSpace,
         std::{io::Cursor, net::Ipv4Addr},
     };
@@ -1489,8 +1509,7 @@ mod tests {
         RemoteRequest {
             remote_pubkey: None,
             remote_address: packet.meta().socket_addr(),
-            bytes: packet.data(..).map(Vec::from).unwrap(),
-            response_sender: None,
+            bytes: Bytes::from(Vec::from(packet.data(..).unwrap())),
         }
     }
 
@@ -1546,7 +1565,10 @@ mod tests {
         assert_eq!(num_well_formed, 0);
         assert_eq!(stats.err_malformed, 1);
 
-        let request = RepairProtocol::LegacyOrphan(LegacyContactInfo::default(), 123);
+        let request = RepairProtocol::Orphan {
+            header: repair_request_header_for_tests(),
+            slot: 262_547_696,
+        };
         let mut pkt = Packet::from_data(None, request).unwrap();
         let mut batch = vec![make_remote_request(&pkt)];
         let mut stats = ServeRepairStats::default();
@@ -1981,10 +2003,7 @@ mod tests {
         );
         let identity_keypair = cluster_info.keypair().clone();
         let mut outstanding_requests = OutstandingShredRepairs::default();
-        let (quic_endpoint_sender, _quic_endpoint_receiver) =
-            tokio::sync::mpsc::channel(/*buffer:*/ 128);
-        let (quic_endpoint_response_sender, _quic_endpoint_response_receiver) =
-            crossbeam_channel::unbounded();
+        let (repair_request_quic_sender, _) = tokio::sync::mpsc::channel(/*buffer:*/ 128);
         let rv = serve_repair.repair_request(
             &cluster_slots,
             ShredRepairType::Shred(0, 0),
@@ -1993,8 +2012,7 @@ mod tests {
             &None,
             &mut outstanding_requests,
             &identity_keypair,
-            &quic_endpoint_sender,
-            &quic_endpoint_response_sender,
+            &repair_request_quic_sender,
             Protocol::UDP, // repair_protocol
         );
         assert_matches!(rv, Err(Error::ClusterInfo(ClusterInfoError::NoPeers)));
@@ -2026,8 +2044,7 @@ mod tests {
                 &None,
                 &mut outstanding_requests,
                 &identity_keypair,
-                &quic_endpoint_sender,
-                &quic_endpoint_response_sender,
+                &repair_request_quic_sender,
                 Protocol::UDP, // repair_protocol
             )
             .unwrap()
@@ -2066,8 +2083,7 @@ mod tests {
                     &None,
                     &mut outstanding_requests,
                     &identity_keypair,
-                    &quic_endpoint_sender,
-                    &quic_endpoint_response_sender,
+                    &repair_request_quic_sender,
                     Protocol::UDP, // repair_protocol
                 )
                 .unwrap()
@@ -2163,7 +2179,7 @@ mod tests {
         // TODO: The test previously relied on corrupting shred payload
         // size which we no longer want to expose. Current test no longer
         // covers packet size check in repair_response_packet_from_bytes.
-        shreds.remove(0);
+        shreds.retain(|shred| shred.slot() != 1);
         blockstore
             .insert_shreds(shreds, None, false)
             .expect("Expect successful ledger write");
@@ -2192,7 +2208,7 @@ mod tests {
         let expected = vec![repair_response::repair_response_packet(
             &blockstore,
             2,
-            0,
+            31, // shred_index
             &socketaddr_any!(),
             nonce,
         )
@@ -2306,10 +2322,7 @@ mod tests {
         let cluster_slots = ClusterSlots::default();
         let cluster_info = Arc::new(new_test_cluster_info());
         let me = cluster_info.my_contact_info();
-        let (quic_endpoint_sender, _quic_endpoint_receiver) =
-            tokio::sync::mpsc::channel(/*buffer:*/ 128);
-        let (quic_endpoint_response_sender, _quic_endpoint_response_receiver) =
-            crossbeam_channel::unbounded();
+        let (repair_request_quic_sender, _) = tokio::sync::mpsc::channel(/*buffer:*/ 128);
         // Insert two peers on the network
         let contact_info2 =
             ContactInfo::new_localhost(&solana_sdk::pubkey::new_rand(), timestamp());
@@ -2340,8 +2353,7 @@ mod tests {
                     &known_validators,
                     &mut OutstandingShredRepairs::default(),
                     &identity_keypair,
-                    &quic_endpoint_sender,
-                    &quic_endpoint_response_sender,
+                    &repair_request_quic_sender,
                     Protocol::UDP, // repair_protocol
                 ),
                 Err(Error::ClusterInfo(ClusterInfoError::NoPeers))
@@ -2362,8 +2374,7 @@ mod tests {
                 &known_validators,
                 &mut OutstandingShredRepairs::default(),
                 &identity_keypair,
-                &quic_endpoint_sender,
-                &quic_endpoint_response_sender,
+                &repair_request_quic_sender,
                 Protocol::UDP, // repair_protocol
             ),
             Ok(Some(_))
@@ -2388,8 +2399,7 @@ mod tests {
                 &None,
                 &mut OutstandingShredRepairs::default(),
                 &identity_keypair,
-                &quic_endpoint_sender,
-                &quic_endpoint_response_sender,
+                &repair_request_quic_sender,
                 Protocol::UDP, // repair_protocol
             ),
             Ok(Some(_))
@@ -2402,7 +2412,7 @@ mod tests {
             Shred::new_from_data(slot, index, 1, &[], ShredFlags::empty(), 0, 0, 0)
         }
         let repair = ShredRepairType::Orphan(9);
-        // Ensure new options are addded to this test
+        // Ensure new options are added to this test
         match repair {
             ShredRepairType::Orphan(_)
             | ShredRepairType::HighestShred(_, _)

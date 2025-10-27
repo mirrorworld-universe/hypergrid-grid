@@ -1,15 +1,16 @@
 use {
-    solana_accounts_db::inline_spl_token,
+    log::*,
+    solana_feature_set::{FeatureSet, FEATURE_NAMES},
     solana_sdk::{
         account::{Account, AccountSharedData},
         feature::{self, Feature},
-        feature_set::FeatureSet,
         fee_calculator::FeeRateGovernor,
         genesis_config::{ClusterType, GenesisConfig},
         native_token::sol_to_lamports,
         pubkey::Pubkey,
         rent::Rent,
         signature::{Keypair, Signer},
+        sonic_account_migrater, sonic_fee_settlement,
         stake::state::StakeStateV2,
         system_program,
     },
@@ -30,15 +31,13 @@ pub fn bootstrap_validator_stake_lamports() -> u64 {
 pub const fn genesis_sysvar_and_builtin_program_lamports() -> u64 {
     const NUM_BUILTIN_PROGRAMS: u64 = 9;
     const NUM_PRECOMPILES: u64 = 2;
-    const FEES_SYSVAR_MIN_BALANCE: u64 = 946_560;
     const STAKE_HISTORY_MIN_BALANCE: u64 = 114_979_200;
     const CLOCK_SYSVAR_MIN_BALANCE: u64 = 1_169_280;
     const RENT_SYSVAR_MIN_BALANCE: u64 = 1_009_200;
     const EPOCH_SCHEDULE_SYSVAR_MIN_BALANCE: u64 = 1_120_560;
     const RECENT_BLOCKHASHES_SYSVAR_MIN_BALANCE: u64 = 42_706_560;
 
-    FEES_SYSVAR_MIN_BALANCE
-        + STAKE_HISTORY_MIN_BALANCE
+    STAKE_HISTORY_MIN_BALANCE
         + CLOCK_SYSVAR_MIN_BALANCE
         + RENT_SYSVAR_MIN_BALANCE
         + EPOCH_SCHEDULE_SYSVAR_MIN_BALANCE
@@ -203,6 +202,23 @@ pub fn activate_all_features(genesis_config: &mut GenesisConfig) {
     }
 }
 
+pub fn deactivate_features(
+    genesis_config: &mut GenesisConfig,
+    features_to_deactivate: &Vec<Pubkey>,
+) {
+    // Remove all features in `features_to_skip` from genesis
+    for deactivate_feature_pk in features_to_deactivate {
+        if FEATURE_NAMES.contains_key(deactivate_feature_pk) {
+            genesis_config.accounts.remove(deactivate_feature_pk);
+        } else {
+            warn!(
+                "Feature {:?} set for deactivation is not a known Feature public key",
+                deactivate_feature_pk
+            );
+        }
+    }
+}
+
 pub fn activate_feature(genesis_config: &mut GenesisConfig, feature_id: Pubkey) {
     genesis_config.accounts.insert(
         feature_id,
@@ -256,13 +272,65 @@ pub fn create_genesis_config_with_leader_ex(
     initial_accounts.push((*validator_stake_account_pubkey, validator_stake_account));
 
     let native_mint_account = solana_sdk::account::AccountSharedData::from(Account {
-        owner: inline_spl_token::id(),
-        data: inline_spl_token::native_mint::ACCOUNT_DATA.to_vec(),
+        owner: solana_inline_spl::token::id(),
+        data: solana_inline_spl::token::native_mint::ACCOUNT_DATA.to_vec(),
         lamports: sol_to_lamports(1.),
         executable: false,
         rent_epoch: 1,
     });
-    initial_accounts.push((inline_spl_token::native_mint::id(), native_mint_account));
+    initial_accounts.push((
+        solana_inline_spl::token::native_mint::id(),
+        native_mint_account,
+    ));
+
+    // Sonic: Add the native mint 2022
+    let native_mint_account = solana_sdk::account::AccountSharedData::from(Account {
+        owner: solana_inline_spl::token_2022::id(),
+        data: solana_inline_spl::token::native_mint::ACCOUNT_DATA.to_vec(),
+        lamports: sol_to_lamports(1.),
+        executable: false,
+        rent_epoch: 1,
+    });
+    initial_accounts.push((
+        solana_inline_spl::token_2022::native_mint::id(),
+        native_mint_account,
+    ));
+
+    // Sonic: Add Sonic account migrater
+    let migrater_data_account = solana_sdk::account::AccountSharedData::from(Account {
+        owner: sonic_account_migrater::program::id(),
+        data: vec![
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ],
+        lamports: sol_to_lamports(100.),
+        executable: false,
+        rent_epoch: 1,
+    });
+    initial_accounts.push((
+        sonic_account_migrater::migrated_accounts::id(),
+        migrater_data_account,
+    ));
+
+    // Sonic: Add Sonic fee settlement data account
+    let migrater_data_account = solana_sdk::account::AccountSharedData::from(Account {
+        owner: sonic_fee_settlement::program::id(),
+        data: vec![
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ],
+        lamports: sol_to_lamports(100.),
+        executable: false,
+        rent_epoch: 1,
+    });
+    initial_accounts.push((
+        sonic_fee_settlement::data_account::id(),
+        migrater_data_account,
+    ));
 
     let mut genesis_config = GenesisConfig {
         accounts: initial_accounts

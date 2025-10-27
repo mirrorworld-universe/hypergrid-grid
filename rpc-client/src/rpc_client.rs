@@ -10,23 +10,16 @@
 //! in [`crate::nonblocking::rpc_client`].
 
 pub use crate::mock_sender::Mocks;
-#[allow(deprecated)]
-use solana_rpc_client_api::deprecated_config::{
-    RpcConfirmedBlockConfig, RpcConfirmedTransactionConfig,
-};
 use {
     crate::{
         http_sender::HttpSender,
-        mock_sender::MockSender,
+        mock_sender::{mock_encoded_account, MockSender},
         nonblocking::{self, rpc_client::get_rpc_request_str},
         rpc_sender::*,
     },
     serde::Serialize,
     serde_json::Value,
-    solana_account_decoder::{
-        parse_token::{UiTokenAccount, UiTokenAmount},
-        UiAccount, UiAccountEncoding,
-    },
+    solana_account_decoder_client_types::token::{UiTokenAccount, UiTokenAmount},
     solana_rpc_client_api::{
         client_error::{Error as ClientError, ErrorKind, Result as ClientResult},
         config::{RpcAccountInfoConfig, *},
@@ -40,14 +33,13 @@ use {
         epoch_info::EpochInfo,
         epoch_schedule::EpochSchedule,
         feature::Feature,
-        fee_calculator::{FeeCalculator, FeeRateGovernor},
         hash::Hash,
         message::{v0, Message as LegacyMessage},
         pubkey::Pubkey,
         signature::Signature,
         transaction::{self, uses_durable_nonce, Transaction, VersionedTransaction},
     },
-    solana_transaction_status::{
+    solana_transaction_status_client_types::{
         EncodedConfirmedBlock, EncodedConfirmedTransactionWithStatusMeta, TransactionStatus,
         UiConfirmedBlock, UiTransactionEncoding,
     },
@@ -1175,15 +1167,6 @@ impl RpcClient {
         self.invoke((self.rpc_client.as_ref()).get_highest_snapshot_slot())
     }
 
-    #[deprecated(
-        since = "1.8.0",
-        note = "Please use RpcClient::get_highest_snapshot_slot() instead"
-    )]
-    #[allow(deprecated)]
-    pub fn get_snapshot_slot(&self) -> ClientResult<Slot> {
-        self.invoke((self.rpc_client.as_ref()).get_snapshot_slot())
-    }
-
     /// Check if a transaction has been processed with the default [commitment level][cl].
     ///
     /// [cl]: https://solana.com/docs/rpc#configuring-state-commitment
@@ -1717,85 +1700,6 @@ impl RpcClient {
         self.invoke((self.rpc_client.as_ref()).get_block_production_with_config(config))
     }
 
-    /// Returns epoch activation information for a stake account.
-    ///
-    /// This method uses the configured [commitment level].
-    ///
-    /// [cl]: https://solana.com/docs/rpc#configuring-state-commitment
-    ///
-    /// # RPC Reference
-    ///
-    /// This method corresponds directly to the [`getStakeActivation`] RPC method.
-    ///
-    /// [`getStakeActivation`]: https://solana.com/docs/rpc/http/getstakeactivation
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # use solana_rpc_client_api::{
-    /// #     client_error::Error,
-    /// #     response::StakeActivationState,
-    /// # };
-    /// # use solana_rpc_client::rpc_client::RpcClient;
-    /// # use solana_sdk::{
-    /// #     signer::keypair::Keypair,
-    /// #     signature::Signer,
-    /// #     pubkey::Pubkey,
-    /// #     stake,
-    /// #     stake::state::{Authorized, Lockup},
-    /// #     transaction::Transaction
-    /// # };
-    /// # use std::str::FromStr;
-    /// # let alice = Keypair::new();
-    /// # let rpc_client = RpcClient::new_mock("succeeds".to_string());
-    /// // Find some vote account to delegate to
-    /// let vote_accounts = rpc_client.get_vote_accounts()?;
-    /// let vote_account = vote_accounts.current.get(0).unwrap_or_else(|| &vote_accounts.delinquent[0]);
-    /// let vote_account_pubkey = &vote_account.vote_pubkey;
-    /// let vote_account_pubkey = Pubkey::from_str(vote_account_pubkey).expect("pubkey");
-    ///
-    /// // Create a stake account
-    /// let stake_account = Keypair::new();
-    /// let stake_account_pubkey = stake_account.pubkey();
-    ///
-    /// // Build the instructions to create new stake account,
-    /// // funded by alice, and delegate to a validator's vote account.
-    /// let instrs = stake::instruction::create_account_and_delegate_stake(
-    ///     &alice.pubkey(),
-    ///     &stake_account_pubkey,
-    ///     &vote_account_pubkey,
-    ///     &Authorized::auto(&stake_account_pubkey),
-    ///     &Lockup::default(),
-    ///     1_000_000,
-    /// );
-    ///
-    /// let latest_blockhash = rpc_client.get_latest_blockhash()?;
-    /// let tx = Transaction::new_signed_with_payer(
-    ///     &instrs,
-    ///     Some(&alice.pubkey()),
-    ///     &[&alice, &stake_account],
-    ///     latest_blockhash,
-    /// );
-    ///
-    /// rpc_client.send_and_confirm_transaction(&tx)?;
-    ///
-    /// let epoch_info = rpc_client.get_epoch_info()?;
-    /// let activation = rpc_client.get_stake_activation(
-    ///     stake_account_pubkey,
-    ///     Some(epoch_info.epoch),
-    /// )?;
-    ///
-    /// assert_eq!(activation.state, StakeActivationState::Activating);
-    /// # Ok::<(), Error>(())
-    /// ```
-    pub fn get_stake_activation(
-        &self,
-        stake_account: Pubkey,
-        epoch: Option<Epoch>,
-    ) -> ClientResult<RpcStakeActivation> {
-        self.invoke((self.rpc_client.as_ref()).get_stake_activation(stake_account, epoch))
-    }
-
     /// Returns information about the current supply.
     ///
     /// This method uses the configured [commitment level][cl].
@@ -1872,6 +1776,7 @@ impl RpcClient {
     /// let config = RpcLargestAccountsConfig {
     ///     commitment: Some(commitment_config),
     ///     filter: Some(RpcLargestAccountsFilter::Circulating),
+    ///     sort_results: None,
     /// };
     /// let accounts = rpc_client.get_largest_accounts_with_config(
     ///     config,
@@ -1995,6 +1900,21 @@ impl RpcClient {
         self.invoke((self.rpc_client.as_ref()).wait_for_max_stake(commitment, max_stake_percent))
     }
 
+    pub fn wait_for_max_stake_below_threshold_with_timeout(
+        &self,
+        commitment: CommitmentConfig,
+        max_stake_percent: f32,
+        timeout: Duration,
+    ) -> ClientResult<()> {
+        self.invoke(
+            (self.rpc_client.as_ref()).wait_for_max_stake_below_threshold_with_timeout(
+                commitment,
+                max_stake_percent,
+                timeout,
+            ),
+        )
+    }
+
     /// Returns information about all the nodes participating in the cluster.
     ///
     /// # RPC Reference
@@ -2060,7 +1980,7 @@ impl RpcClient {
     /// ```
     /// # use solana_rpc_client_api::client_error::Error;
     /// # use solana_rpc_client::rpc_client::RpcClient;
-    /// # use solana_transaction_status::UiTransactionEncoding;
+    /// # use solana_transaction_status_client_types::UiTransactionEncoding;
     /// # let rpc_client = RpcClient::new_mock("succeeds".to_string());
     /// # let slot = rpc_client.get_slot()?;
     /// let encoding = UiTransactionEncoding::Base58;
@@ -2094,7 +2014,7 @@ impl RpcClient {
     /// #     client_error::Error,
     /// # };
     /// # use solana_rpc_client::rpc_client::RpcClient;
-    /// # use solana_transaction_status::{
+    /// # use solana_transaction_status_client_types::{
     /// #     TransactionDetails,
     /// #     UiTransactionEncoding,
     /// # };
@@ -2121,38 +2041,6 @@ impl RpcClient {
         self.invoke((self.rpc_client.as_ref()).get_block_with_config(slot, config))
     }
 
-    #[deprecated(since = "1.7.0", note = "Please use RpcClient::get_block() instead")]
-    #[allow(deprecated)]
-    pub fn get_confirmed_block(&self, slot: Slot) -> ClientResult<EncodedConfirmedBlock> {
-        self.invoke((self.rpc_client.as_ref()).get_confirmed_block(slot))
-    }
-
-    #[deprecated(
-        since = "1.7.0",
-        note = "Please use RpcClient::get_block_with_encoding() instead"
-    )]
-    #[allow(deprecated)]
-    pub fn get_confirmed_block_with_encoding(
-        &self,
-        slot: Slot,
-        encoding: UiTransactionEncoding,
-    ) -> ClientResult<EncodedConfirmedBlock> {
-        self.invoke((self.rpc_client.as_ref()).get_confirmed_block_with_encoding(slot, encoding))
-    }
-
-    #[deprecated(
-        since = "1.7.0",
-        note = "Please use RpcClient::get_block_with_config() instead"
-    )]
-    #[allow(deprecated)]
-    pub fn get_confirmed_block_with_config(
-        &self,
-        slot: Slot,
-        config: RpcConfirmedBlockConfig,
-    ) -> ClientResult<UiConfirmedBlock> {
-        self.invoke((self.rpc_client.as_ref()).get_confirmed_block_with_config(slot, config))
-    }
-
     /// Returns a list of finalized blocks between two slots.
     ///
     /// The range is inclusive, with results including the block for both
@@ -2177,12 +2065,9 @@ impl RpcClient {
     ///
     /// # RPC Reference
     ///
-    /// This method corresponds directly to the [`getBlocks`] RPC method, unless
-    /// the remote node version is less than 1.7, in which case it maps to the
-    /// [`getConfirmedBlocks`] RPC method.
+    /// This method corresponds directly to the [`getBlocks`] RPC method.
     ///
     /// [`getBlocks`]: https://solana.com/docs/rpc/http/getblocks
-    /// [`getConfirmedBlocks`]: https://solana.com/docs/rpc/deprecated/getconfirmedblocks
     ///
     /// # Examples
     ///
@@ -2228,12 +2113,9 @@ impl RpcClient {
     ///
     /// # RPC Reference
     ///
-    /// This method corresponds directly to the [`getBlocks`] RPC method, unless
-    /// the remote node version is less than 1.7, in which case it maps to the
-    /// [`getConfirmedBlocks`] RPC method.
+    /// This method corresponds directly to the [`getBlocks`] RPC method.
     ///
     /// [`getBlocks`]: https://solana.com/docs/rpc/http/getblocks
-    /// [`getConfirmedBlocks`]: https://solana.com/docs/rpc/deprecated/getconfirmedblocks
     ///
     /// # Examples
     ///
@@ -2281,11 +2163,9 @@ impl RpcClient {
     /// # RPC Reference
     ///
     /// This method corresponds directly to the [`getBlocksWithLimit`] RPC
-    /// method, unless the remote node version is less than 1.7, in which case
-    /// it maps to the [`getConfirmedBlocksWithLimit`] RPC method.
+    /// method.
     ///
     /// [`getBlocksWithLimit`]: https://solana.com/docs/rpc/http/getblockswithlimit
-    /// [`getConfirmedBlocksWithLimit`]: https://solana.com/docs/rpc/deprecated/getconfirmedblockswithlimit
     ///
     /// # Examples
     ///
@@ -2318,11 +2198,9 @@ impl RpcClient {
     /// # RPC Reference
     ///
     /// This method corresponds directly to the [`getBlocksWithLimit`] RPC
-    /// method, unless the remote node version is less than 1.7, in which case
-    /// it maps to the `getConfirmedBlocksWithLimit` RPC method.
+    /// method.
     ///
     /// [`getBlocksWithLimit`]: https://solana.com/docs/rpc/http/getblockswithlimit
-    /// [`getConfirmedBlocksWithLimit`]: https://solana.com/docs/rpc/deprecated/getconfirmedblockswithlimit
     ///
     /// # Examples
     ///
@@ -2350,69 +2228,6 @@ impl RpcClient {
     ) -> ClientResult<Vec<Slot>> {
         self.invoke(
             (self.rpc_client.as_ref()).get_blocks_with_limit_and_commitment(
-                start_slot,
-                limit,
-                commitment_config,
-            ),
-        )
-    }
-
-    #[deprecated(since = "1.7.0", note = "Please use RpcClient::get_blocks() instead")]
-    #[allow(deprecated)]
-    pub fn get_confirmed_blocks(
-        &self,
-        start_slot: Slot,
-        end_slot: Option<Slot>,
-    ) -> ClientResult<Vec<Slot>> {
-        self.invoke((self.rpc_client.as_ref()).get_confirmed_blocks(start_slot, end_slot))
-    }
-
-    #[deprecated(
-        since = "1.7.0",
-        note = "Please use RpcClient::get_blocks_with_commitment() instead"
-    )]
-    #[allow(deprecated)]
-    pub fn get_confirmed_blocks_with_commitment(
-        &self,
-        start_slot: Slot,
-        end_slot: Option<Slot>,
-        commitment_config: CommitmentConfig,
-    ) -> ClientResult<Vec<Slot>> {
-        self.invoke(
-            (self.rpc_client.as_ref()).get_confirmed_blocks_with_commitment(
-                start_slot,
-                end_slot,
-                commitment_config,
-            ),
-        )
-    }
-
-    #[deprecated(
-        since = "1.7.0",
-        note = "Please use RpcClient::get_blocks_with_limit() instead"
-    )]
-    #[allow(deprecated)]
-    pub fn get_confirmed_blocks_with_limit(
-        &self,
-        start_slot: Slot,
-        limit: usize,
-    ) -> ClientResult<Vec<Slot>> {
-        self.invoke((self.rpc_client.as_ref()).get_confirmed_blocks_with_limit(start_slot, limit))
-    }
-
-    #[deprecated(
-        since = "1.7.0",
-        note = "Please use RpcClient::get_blocks_with_limit_and_commitment() instead"
-    )]
-    #[allow(deprecated)]
-    pub fn get_confirmed_blocks_with_limit_and_commitment(
-        &self,
-        start_slot: Slot,
-        limit: usize,
-        commitment_config: CommitmentConfig,
-    ) -> ClientResult<Vec<Slot>> {
-        self.invoke(
-            (self.rpc_client.as_ref()).get_confirmed_blocks_with_limit_and_commitment(
                 start_slot,
                 limit,
                 commitment_config,
@@ -2517,34 +2332,6 @@ impl RpcClient {
         )
     }
 
-    #[deprecated(
-        since = "1.7.0",
-        note = "Please use RpcClient::get_signatures_for_address() instead"
-    )]
-    #[allow(deprecated)]
-    pub fn get_confirmed_signatures_for_address2(
-        &self,
-        address: &Pubkey,
-    ) -> ClientResult<Vec<RpcConfirmedTransactionStatusWithSignature>> {
-        self.invoke((self.rpc_client.as_ref()).get_confirmed_signatures_for_address2(address))
-    }
-
-    #[deprecated(
-        since = "1.7.0",
-        note = "Please use RpcClient::get_signatures_for_address_with_config() instead"
-    )]
-    #[allow(deprecated)]
-    pub fn get_confirmed_signatures_for_address2_with_config(
-        &self,
-        address: &Pubkey,
-        config: GetConfirmedSignaturesForAddress2Config,
-    ) -> ClientResult<Vec<RpcConfirmedTransactionStatusWithSignature>> {
-        self.invoke(
-            (self.rpc_client.as_ref())
-                .get_confirmed_signatures_for_address2_with_config(address, config),
-        )
-    }
-
     /// Returns transaction details for a confirmed transaction.
     ///
     /// This method uses the [`Finalized`] [commitment level][cl].
@@ -2554,12 +2341,9 @@ impl RpcClient {
     ///
     /// # RPC Reference
     ///
-    /// This method corresponds directly to the [`getTransaction`] RPC method,
-    /// unless the remote node version is less than 1.7, in which case it maps
-    /// to the [`getConfirmedTransaction`] RPC method.
+    /// This method corresponds directly to the [`getTransaction`] RPC method.
     ///
     /// [`getTransaction`]: https://solana.com/docs/rpc/http/gettransaction
-    /// [`getConfirmedTransaction`]: https://solana.com/docs/rpc/deprecated/getConfirmedTransaction
     ///
     /// # Examples
     ///
@@ -2572,7 +2356,7 @@ impl RpcClient {
     /// #     signer::keypair::Keypair,
     /// #     system_transaction,
     /// # };
-    /// # use solana_transaction_status::UiTransactionEncoding;
+    /// # use solana_transaction_status_client_types::UiTransactionEncoding;
     /// # let rpc_client = RpcClient::new_mock("succeeds".to_string());
     /// # let alice = Keypair::new();
     /// # let bob = Keypair::new();
@@ -2606,12 +2390,9 @@ impl RpcClient {
     ///
     /// # RPC Reference
     ///
-    /// This method corresponds directly to the [`getTransaction`] RPC method,
-    /// unless the remote node version is less than 1.7, in which case it maps
-    /// to the [`getConfirmedTransaction`] RPC method.
+    /// This method corresponds directly to the [`getTransaction`] RPC method.
     ///
     /// [`getTransaction`]: https://solana.com/docs/rpc/http/gettransaction
-    /// [`getConfirmedTransaction`]: https://solana.com/docs/rpc/deprecated/getConfirmedTransaction
     ///
     /// # Examples
     ///
@@ -2628,7 +2409,7 @@ impl RpcClient {
     /// #     system_transaction,
     /// #     commitment_config::CommitmentConfig,
     /// # };
-    /// # use solana_transaction_status::UiTransactionEncoding;
+    /// # use solana_transaction_status_client_types::UiTransactionEncoding;
     /// # let rpc_client = RpcClient::new_mock("succeeds".to_string());
     /// # let alice = Keypair::new();
     /// # let bob = Keypair::new();
@@ -2653,34 +2434,6 @@ impl RpcClient {
         config: RpcTransactionConfig,
     ) -> ClientResult<EncodedConfirmedTransactionWithStatusMeta> {
         self.invoke((self.rpc_client.as_ref()).get_transaction_with_config(signature, config))
-    }
-
-    #[deprecated(
-        since = "1.7.0",
-        note = "Please use RpcClient::get_transaction() instead"
-    )]
-    #[allow(deprecated)]
-    pub fn get_confirmed_transaction(
-        &self,
-        signature: &Signature,
-        encoding: UiTransactionEncoding,
-    ) -> ClientResult<EncodedConfirmedTransactionWithStatusMeta> {
-        self.invoke((self.rpc_client.as_ref()).get_confirmed_transaction(signature, encoding))
-    }
-
-    #[deprecated(
-        since = "1.7.0",
-        note = "Please use RpcClient::get_transaction_with_config() instead"
-    )]
-    #[allow(deprecated)]
-    pub fn get_confirmed_transaction_with_config(
-        &self,
-        signature: &Signature,
-        config: RpcConfirmedTransactionConfig,
-    ) -> ClientResult<EncodedConfirmedTransactionWithStatusMeta> {
-        self.invoke(
-            (self.rpc_client.as_ref()).get_confirmed_transaction_with_config(signature, config),
-        )
     }
 
     /// Returns the estimated production time of a block.
@@ -3226,7 +2979,7 @@ impl RpcClient {
     /// #     pubkey::Pubkey,
     /// #     commitment_config::CommitmentConfig,
     /// # };
-    /// # use solana_account_decoder::UiAccountEncoding;
+    /// # use solana_account_decoder_client_types::UiAccountEncoding;
     /// # use std::str::FromStr;
     /// # let mocks = rpc_client::create_rpc_client_mocks();
     /// # let rpc_client = RpcClient::new_mock_with_mocks("succeeds".to_string(), mocks);
@@ -3387,7 +3140,7 @@ impl RpcClient {
     /// #     signer::keypair::Keypair,
     /// #     commitment_config::CommitmentConfig,
     /// # };
-    /// # use solana_account_decoder::UiAccountEncoding;
+    /// # use solana_account_decoder_client_types::UiAccountEncoding;
     /// # let rpc_client = RpcClient::new_mock("succeeds".to_string());
     /// # let alice = Keypair::new();
     /// # let bob = Keypair::new();
@@ -3590,7 +3343,7 @@ impl RpcClient {
     /// #     signer::keypair::Keypair,
     /// #     commitment_config::CommitmentConfig,
     /// # };
-    /// # use solana_account_decoder::{UiDataSliceConfig, UiAccountEncoding};
+    /// # use solana_account_decoder_client_types::{UiDataSliceConfig, UiAccountEncoding};
     /// # let rpc_client = RpcClient::new_mock("succeeds".to_string());
     /// # let alice = Keypair::new();
     /// # let base64_bytes = "\
@@ -3616,6 +3369,7 @@ impl RpcClient {
     ///         min_context_slot: Some(1234),
     ///     },
     ///     with_context: Some(false),
+    ///     sort_results: Some(true),
     /// };
     /// let accounts = rpc_client.get_program_accounts_with_config(
     ///     &alice.pubkey(),
@@ -3693,87 +3447,6 @@ impl RpcClient {
         self.invoke(
             (self.rpc_client.as_ref()).get_transaction_count_with_commitment(commitment_config),
         )
-    }
-
-    #[deprecated(
-        since = "1.9.0",
-        note = "Please use `get_latest_blockhash` and `get_fee_for_message` instead"
-    )]
-    #[allow(deprecated)]
-    pub fn get_fees(&self) -> ClientResult<Fees> {
-        self.invoke((self.rpc_client.as_ref()).get_fees())
-    }
-
-    #[deprecated(
-        since = "1.9.0",
-        note = "Please use `get_latest_blockhash_with_commitment` and `get_fee_for_message` instead"
-    )]
-    #[allow(deprecated)]
-    pub fn get_fees_with_commitment(&self, commitment_config: CommitmentConfig) -> RpcResult<Fees> {
-        self.invoke((self.rpc_client.as_ref()).get_fees_with_commitment(commitment_config))
-    }
-
-    #[deprecated(since = "1.9.0", note = "Please use `get_latest_blockhash` instead")]
-    #[allow(deprecated)]
-    pub fn get_recent_blockhash(&self) -> ClientResult<(Hash, FeeCalculator)> {
-        self.invoke((self.rpc_client.as_ref()).get_recent_blockhash())
-    }
-
-    #[deprecated(
-        since = "1.9.0",
-        note = "Please use `get_latest_blockhash_with_commitment` instead"
-    )]
-    #[allow(deprecated)]
-    pub fn get_recent_blockhash_with_commitment(
-        &self,
-        commitment_config: CommitmentConfig,
-    ) -> RpcResult<(Hash, FeeCalculator, Slot)> {
-        self.invoke(
-            (self.rpc_client.as_ref()).get_recent_blockhash_with_commitment(commitment_config),
-        )
-    }
-
-    #[deprecated(since = "1.9.0", note = "Please `get_fee_for_message` instead")]
-    #[allow(deprecated)]
-    pub fn get_fee_calculator_for_blockhash(
-        &self,
-        blockhash: &Hash,
-    ) -> ClientResult<Option<FeeCalculator>> {
-        self.invoke((self.rpc_client.as_ref()).get_fee_calculator_for_blockhash(blockhash))
-    }
-
-    #[deprecated(
-        since = "1.9.0",
-        note = "Please `get_latest_blockhash_with_commitment` and `get_fee_for_message` instead"
-    )]
-    #[allow(deprecated)]
-    pub fn get_fee_calculator_for_blockhash_with_commitment(
-        &self,
-        blockhash: &Hash,
-        commitment_config: CommitmentConfig,
-    ) -> RpcResult<Option<FeeCalculator>> {
-        self.invoke(
-            (self.rpc_client.as_ref())
-                .get_fee_calculator_for_blockhash_with_commitment(blockhash, commitment_config),
-        )
-    }
-
-    #[deprecated(
-        since = "1.9.0",
-        note = "Please do not use, will no longer be available in the future"
-    )]
-    #[allow(deprecated)]
-    pub fn get_fee_rate_governor(&self) -> RpcResult<FeeRateGovernor> {
-        self.invoke((self.rpc_client.as_ref()).get_fee_rate_governor())
-    }
-
-    #[deprecated(
-        since = "1.9.0",
-        note = "Please do not use, will no longer be available in the future"
-    )]
-    #[allow(deprecated)]
-    pub fn get_new_blockhash(&self, blockhash: &Hash) -> ClientResult<(Hash, FeeCalculator)> {
-        self.invoke((self.rpc_client.as_ref()).get_new_blockhash(blockhash))
     }
 
     pub fn get_first_available_block(&self) -> ClientResult<Slot> {
@@ -3994,7 +3667,6 @@ impl RpcClient {
         self.invoke((self.rpc_client.as_ref()).get_latest_blockhash())
     }
 
-    #[allow(deprecated)]
     pub fn get_latest_blockhash_with_commitment(
         &self,
         commitment: CommitmentConfig,
@@ -4002,7 +3674,6 @@ impl RpcClient {
         self.invoke((self.rpc_client.as_ref()).get_latest_blockhash_with_commitment(commitment))
     }
 
-    #[allow(deprecated)]
     pub fn is_blockhash_valid(
         &self,
         blockhash: &Hash,
@@ -4011,7 +3682,6 @@ impl RpcClient {
         self.invoke((self.rpc_client.as_ref()).is_blockhash_valid(blockhash, commitment))
     }
 
-    #[allow(deprecated)]
     pub fn get_fee_for_message(&self, message: &impl SerializableMessage) -> ClientResult<u64> {
         self.invoke((self.rpc_client.as_ref()).get_fee_for_message(message))
     }
@@ -4072,14 +3742,7 @@ pub fn create_rpc_client_mocks() -> crate::mock_sender::Mocks {
         },
         value: {
             let pubkey = Pubkey::from_str("BgvYtJEfmZYdVKiptmMjxGzv8iQoo4MWjsP3QsTkhhxa").unwrap();
-            let account = Account {
-                lamports: 1_000_000,
-                data: vec![],
-                owner: pubkey,
-                executable: false,
-                rent_epoch: 0,
-            };
-            UiAccount::encode(&pubkey, &account, UiAccountEncoding::Base64, None, None)
+            mock_encoded_account(&pubkey)
         },
     })
     .unwrap();
@@ -4099,6 +3762,8 @@ mod tests {
         jsonrpc_core::{futures::prelude::*, Error, IoHandler, Params},
         jsonrpc_http_server::{AccessControlAllowOrigin, DomainsValidation, ServerBuilder},
         serde_json::{json, Number},
+        solana_account_decoder::encode_ui_account,
+        solana_account_decoder_client_types::UiAccountEncoding,
         solana_rpc_client_api::client_error::ErrorKind,
         solana_sdk::{
             instruction::InstructionError,
@@ -4135,7 +3800,7 @@ mod tests {
                 future::ok(Value::Number(Number::from(50)))
             });
             // Failed request
-            io.add_method("getRecentBlockhash", |params: Params| {
+            io.add_method("getLatestBlockhash", |params: Params| {
                 if params != Params::None {
                     future::err(Error::invalid_request())
                 } else {
@@ -4167,16 +3832,14 @@ mod tests {
             .unwrap();
         assert_eq!(balance, 50);
 
-        #[allow(deprecated)]
         let blockhash: String = rpc_client
-            .send(RpcRequest::GetRecentBlockhash, Value::Null)
+            .send(RpcRequest::GetLatestBlockhash, Value::Null)
             .unwrap();
         assert_eq!(blockhash, "deadbeefXjn8o3yroDHxUtKsZZgoy4GPkPPXfouKNHhx");
 
         // Send erroneous parameter
-        #[allow(deprecated)]
         let blockhash: ClientResult<String> =
-            rpc_client.send(RpcRequest::GetRecentBlockhash, json!(["parameter"]));
+            rpc_client.send(RpcRequest::GetLatestBlockhash, json!(["parameter"]));
         assert!(blockhash.is_err());
     }
 
@@ -4201,22 +3864,6 @@ mod tests {
         let rpc_client = RpcClient::new_mock("malicious".to_string());
         let signature = rpc_client.send_transaction(&tx);
         assert!(signature.is_err());
-    }
-
-    #[test]
-    fn test_get_recent_blockhash() {
-        let rpc_client = RpcClient::new_mock("succeeds".to_string());
-
-        let expected_blockhash: Hash = PUBKEY.parse().unwrap();
-
-        let blockhash = rpc_client.get_latest_blockhash().expect("blockhash ok");
-        assert_eq!(blockhash, expected_blockhash);
-
-        let rpc_client = RpcClient::new_mock("fails".to_string());
-
-        #[allow(deprecated)]
-        let result = rpc_client.get_recent_blockhash();
-        assert!(result.is_err());
     }
 
     #[test]
@@ -4318,7 +3965,6 @@ mod tests {
 
         let rpc_client = RpcClient::new_mock("fails".to_string());
 
-        #[allow(deprecated)]
         let is_err = rpc_client.get_latest_blockhash().is_err();
         assert!(is_err);
     }
@@ -4356,7 +4002,7 @@ mod tests {
         };
         let keyed_account = RpcKeyedAccount {
             pubkey: pubkey.to_string(),
-            account: UiAccount::encode(&pubkey, &account, UiAccountEncoding::Base64, None, None),
+            account: encode_ui_account(&pubkey, &account, UiAccountEncoding::Base64, None, None),
         };
         let expected_result = vec![(pubkey, account)];
         // Test: without context
@@ -4381,6 +4027,7 @@ mod tests {
                             min_context_slot: None,
                         },
                         with_context: None,
+                        sort_results: None,
                     },
                 )
                 .unwrap();
@@ -4415,6 +4062,7 @@ mod tests {
                             min_context_slot: None,
                         },
                         with_context: Some(true),
+                        sort_results: None,
                     },
                 )
                 .unwrap();

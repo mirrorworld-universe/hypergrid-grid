@@ -9,12 +9,13 @@ use {
         utils::create_accounts_run_and_snapshot_dirs,
     },
     solana_cli_output::CliAccount,
-    solana_client::rpc_request::MAX_MULTIPLE_ACCOUNTS,
+    solana_compute_budget::compute_budget::ComputeBudget,
     solana_core::{
         admin_rpc_post_init::AdminRpcRequestMetadataPostInit,
         consensus::tower_storage::TowerStorage,
         validator::{Validator, ValidatorConfig, ValidatorStartProgress},
     },
+    solana_feature_set::FEATURE_NAMES,
     solana_geyser_plugin_manager::{
         geyser_plugin_manager::GeyserPluginManager, GeyserPluginManagerRequest,
     },
@@ -29,23 +30,21 @@ use {
         create_new_tmp_ledger,
     },
     solana_net_utils::PortRange,
-    solana_program_runtime::compute_budget::ComputeBudget,
     solana_rpc::{rpc::JsonRpcConfig, rpc_pubsub_service::PubSubConfig},
     solana_rpc_client::{nonblocking, rpc_client::RpcClient},
+    solana_rpc_client_api::request::MAX_MULTIPLE_ACCOUNTS,
     solana_runtime::{
         bank_forks::BankForks, genesis_utils::create_genesis_config_with_leader_ex,
         runtime_config::RuntimeConfig, snapshot_config::SnapshotConfig,
     },
     solana_sdk::{
-        account::{Account, AccountSharedData},
+        account::{Account, AccountSharedData, ReadableAccount, WritableAccount},
         bpf_loader_upgradeable::UpgradeableLoaderState,
         clock::{Slot, DEFAULT_MS_PER_SLOT},
         commitment_config::CommitmentConfig,
         epoch_schedule::EpochSchedule,
         exit::Exit,
-        feature_set::FEATURE_NAMES,
-        fee_calculator::{FeeCalculator, FeeRateGovernor},
-        hash::Hash,
+        fee_calculator::FeeRateGovernor,
         instruction::{AccountMeta, Instruction},
         message::Message,
         native_token::sol_to_lamports,
@@ -76,14 +75,6 @@ use {
 pub struct AccountInfo<'a> {
     pub address: Option<Pubkey>,
     pub filename: &'a str,
-}
-
-#[deprecated(since = "1.16.0", note = "Please use `UpgradeableProgramInfo` instead")]
-#[derive(Clone)]
-pub struct ProgramInfo {
-    pub program_id: Pubkey,
-    pub loader: Pubkey,
-    pub program_path: PathBuf,
 }
 
 #[derive(Clone)]
@@ -127,8 +118,6 @@ pub struct TestValidatorGenesis {
     rpc_ports: Option<(u16, u16)>, // (JsonRpc, JsonRpcPubSub), None == random ports
     warp_slot: Option<Slot>,
     accounts: HashMap<Pubkey, AccountSharedData>,
-    #[allow(deprecated)]
-    programs: Vec<ProgramInfo>,
     upgradeable_programs: Vec<UpgradeableProgramInfo>,
     ticks_per_slot: Option<u64>,
     epoch_schedule: Option<EpochSchedule>,
@@ -161,8 +150,6 @@ impl Default for TestValidatorGenesis {
             rpc_ports: Option::<(u16, u16)>::default(),
             warp_slot: Option::<Slot>::default(),
             accounts: HashMap::<Pubkey, AccountSharedData>::default(),
-            #[allow(deprecated)]
-            programs: Vec::<ProgramInfo>::default(),
             upgradeable_programs: Vec::<UpgradeableProgramInfo>::default(),
             ticks_per_slot: Option::<u64>::default(),
             epoch_schedule: Option::<EpochSchedule>::default(),
@@ -183,6 +170,42 @@ impl Default for TestValidatorGenesis {
             admin_rpc_service_post_init:
                 Arc::<RwLock<Option<AdminRpcRequestMetadataPostInit>>>::default(),
         }
+    }
+}
+
+fn try_transform_program_data(
+    address: &Pubkey,
+    account: &mut AccountSharedData,
+) -> Result<(), String> {
+    if account.owner() == &solana_sdk::bpf_loader_upgradeable::id() {
+        let programdata_offset = UpgradeableLoaderState::size_of_programdata_metadata();
+        let programdata_meta = account.data().get(0..programdata_offset).ok_or(format!(
+            "Failed to get upgradeable programdata data from {address}"
+        ))?;
+        // Ensure the account is a proper programdata account before
+        // attempting to serialize into it.
+        if let Ok(UpgradeableLoaderState::ProgramData {
+            upgrade_authority_address,
+            ..
+        }) = bincode::deserialize::<UpgradeableLoaderState>(programdata_meta)
+        {
+            // Serialize new programdata metadata into the resulting account,
+            // to overwrite the deployment slot to `0`.
+            bincode::serialize_into(
+                account.data_as_mut_slice(),
+                &UpgradeableLoaderState::ProgramData {
+                    slot: 0,
+                    upgrade_authority_address,
+                },
+            )
+            .map_err(|_| format!("Failed to write to upgradeable programdata account {address}"))
+        } else {
+            Err(format!(
+                "Failed to read upgradeable programdata account {address}"
+            ))
+        }
+    } else {
+        Err(format!("Account {address} not owned by upgradeable loader"))
     }
 }
 
@@ -284,11 +307,6 @@ impl TestValidatorGenesis {
         self
     }
 
-    #[deprecated(note = "Please use `compute_unit_limit` instead")]
-    pub fn max_compute_units(&mut self, max_compute_units: u64) -> &mut Self {
-        self.compute_unit_limit(max_compute_units)
-    }
-
     /// Add an account to the test environment
     pub fn add_account(&mut self, address: Pubkey, account: AccountSharedData) -> &mut Self {
         self.accounts.insert(address, account);
@@ -305,14 +323,16 @@ impl TestValidatorGenesis {
         self
     }
 
-    pub fn clone_accounts<T>(
+    fn clone_accounts_and_transform<T, F>(
         &mut self,
         addresses: T,
         rpc_client: &RpcClient,
         skip_missing: bool,
+        transform: F,
     ) -> Result<&mut Self, String>
     where
         T: IntoIterator<Item = Pubkey>,
+        F: Fn(&Pubkey, Account) -> Result<AccountSharedData, String>,
     {
         let addresses: Vec<Pubkey> = addresses.into_iter().collect();
         for chunk in addresses.chunks(MAX_MULTIPLE_ACCOUNTS) {
@@ -322,7 +342,7 @@ impl TestValidatorGenesis {
                 .map_err(|err| format!("Failed to fetch: {err}"))?;
             for (address, res) in chunk.iter().zip(responses) {
                 if let Some(account) = res {
-                    self.add_account(*address, AccountSharedData::from(account));
+                    self.add_account(*address, transform(address, account)?);
                 } else if skip_missing {
                     warn!("Could not find {}, skipping.", address);
                 } else {
@@ -331,6 +351,49 @@ impl TestValidatorGenesis {
             }
         }
         Ok(self)
+    }
+
+    pub fn clone_accounts<T>(
+        &mut self,
+        addresses: T,
+        rpc_client: &RpcClient,
+        skip_missing: bool,
+    ) -> Result<&mut Self, String>
+    where
+        T: IntoIterator<Item = Pubkey>,
+    {
+        self.clone_accounts_and_transform(
+            addresses,
+            rpc_client,
+            skip_missing,
+            |address, account| {
+                let mut account_shared_data = AccountSharedData::from(account);
+                // ignore the error
+                try_transform_program_data(address, &mut account_shared_data).ok();
+                Ok(account_shared_data)
+            },
+        )
+    }
+
+    pub fn clone_programdata_accounts<T>(
+        &mut self,
+        addresses: T,
+        rpc_client: &RpcClient,
+        skip_missing: bool,
+    ) -> Result<&mut Self, String>
+    where
+        T: IntoIterator<Item = Pubkey>,
+    {
+        self.clone_accounts_and_transform(
+            addresses,
+            rpc_client,
+            skip_missing,
+            |address, account| {
+                let mut account_shared_data = AccountSharedData::from(account);
+                try_transform_program_data(address, &mut account_shared_data)?;
+                Ok(account_shared_data)
+            },
+        )
     }
 
     pub fn clone_upgradeable_programs<T>(
@@ -360,8 +423,34 @@ impl TestValidatorGenesis {
             }
         }
 
-        self.clone_accounts(programdata_addresses, rpc_client, false)?;
+        self.clone_programdata_accounts(programdata_addresses, rpc_client, false)?;
 
+        Ok(self)
+    }
+
+    pub fn clone_feature_set(&mut self, rpc_client: &RpcClient) -> Result<&mut Self, String> {
+        for feature_ids in FEATURE_NAMES
+            .keys()
+            .cloned()
+            .collect::<Vec<Pubkey>>()
+            .chunks(MAX_MULTIPLE_ACCOUNTS)
+        {
+            rpc_client
+                .get_multiple_accounts(feature_ids)
+                .map_err(|err| format!("Failed to fetch: {err}"))?
+                .into_iter()
+                .zip(feature_ids)
+                .for_each(|(maybe_account, feature_id)| {
+                    if maybe_account
+                        .as_ref()
+                        .and_then(solana_sdk::feature::from_account)
+                        .and_then(|feature| feature.activated_at)
+                        .is_none()
+                    {
+                        self.deactivate_feature_set.insert(*feature_id);
+                    }
+                });
+        }
         Ok(self)
     }
 
@@ -501,19 +590,6 @@ impl TestValidatorGenesis {
         self
     }
 
-    /// Add a list of programs to the test environment.
-    #[deprecated(
-        since = "1.16.0",
-        note = "Please use `add_upgradeable_programs_with_path()` instead"
-    )]
-    #[allow(deprecated)]
-    pub fn add_programs_with_path(&mut self, programs: &[ProgramInfo]) -> &mut Self {
-        for program in programs {
-            self.programs.push(program.clone());
-        }
-        self
-    }
-
     /// Add a list of upgradeable programs to the test environment.
     pub fn add_upgradeable_programs_with_path(
         &mut self,
@@ -552,14 +628,13 @@ impl TestValidatorGenesis {
             socket_addr_space,
             rpc_to_plugin_manager_receiver,
         )
-        .map(|test_validator| {
+        .inspect(|test_validator| {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_io()
                 .enable_time()
                 .build()
                 .unwrap();
             runtime.block_on(test_validator.wait_for_nonzero_fees());
-            test_validator
         })
     }
 
@@ -627,7 +702,7 @@ impl TestValidator {
     /// Faucet optional.
     ///
     /// This function panics on initialization failure.
-    pub fn with_no_fees(
+    pub fn with_no_base_fees(
         mint_address: Pubkey,
         faucet_addr: Option<SocketAddr>,
         socket_addr_space: SocketAddrSpace,
@@ -714,20 +789,6 @@ impl TestValidator {
         let mut accounts = config.accounts.clone();
         for (address, account) in solana_program_test::programs::spl_programs(&config.rent) {
             accounts.entry(address).or_insert(account);
-        }
-        #[allow(deprecated)]
-        for program in &config.programs {
-            let data = solana_program_test::read_file(&program.program_path);
-            accounts.insert(
-                program.program_id,
-                AccountSharedData::from(Account {
-                    lamports: Rent::default().minimum_balance(data.len()).max(1),
-                    data,
-                    owner: program.loader,
-                    executable: true,
-                    rent_epoch: 0,
-                }),
-            );
         }
         for upgradeable_program in &config.upgradeable_programs {
             let data = solana_program_test::read_file(&upgradeable_program.program_path);
@@ -914,6 +975,7 @@ impl TestValidator {
                 started_from_validator: true,
                 ..AccountsIndexConfig::default()
             }),
+            account_indexes: Some(config.rpc_config.account_indexes.clone()),
             ..AccountsDbConfig::default()
         });
 
@@ -965,7 +1027,6 @@ impl TestValidator {
             staked_nodes_overrides: config.staked_nodes_overrides.clone(),
             accounts_db_config,
             runtime_config,
-            account_indexes: config.rpc_config.account_indexes.clone(),
             ..ValidatorConfig::default_for_test()
         };
         if let Some(ref tower_storage) = config.tower_storage {
@@ -987,6 +1048,7 @@ impl TestValidator {
             DEFAULT_TPU_USE_QUIC,
             DEFAULT_TPU_CONNECTION_POOL_SIZE,
             config.tpu_enable_udp,
+            32, // max connections per IpAddr per minute for test
             config.admin_rpc_service_post_init.clone(),
         )?);
 
@@ -1079,20 +1141,6 @@ impl TestValidator {
     /// Return the validator's vote account address
     pub fn vote_account_address(&self) -> Pubkey {
         self.vote_account_address
-    }
-
-    /// Return an RpcClient for the validator.  As a convenience, also return a recent blockhash and
-    /// associated fee calculator
-    #[deprecated(since = "1.9.0", note = "Please use `get_rpc_client` instead")]
-    pub fn rpc_client(&self) -> (RpcClient, Hash, FeeCalculator) {
-        let rpc_client =
-            RpcClient::new_with_commitment(self.rpc_url.clone(), CommitmentConfig::processed());
-        #[allow(deprecated)]
-        let (recent_blockhash, fee_calculator) = rpc_client
-            .get_recent_blockhash()
-            .expect("get_recent_blockhash");
-
-        (rpc_client, recent_blockhash, fee_calculator)
     }
 
     /// Return an RpcClient for the validator.

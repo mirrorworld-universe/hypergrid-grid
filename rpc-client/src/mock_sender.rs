@@ -5,25 +5,23 @@ use {
     async_trait::async_trait,
     base64::{prelude::BASE64_STANDARD, Engine},
     serde_json::{json, Number, Value},
-    solana_account_decoder::{UiAccount, UiAccountEncoding},
+    solana_account_decoder_client_types::{UiAccount, UiAccountData, UiAccountEncoding},
     solana_rpc_client_api::{
         client_error::Result,
         config::RpcBlockProductionConfig,
         request::RpcRequest,
         response::{
             Response, RpcAccountBalance, RpcBlockProduction, RpcBlockProductionRange, RpcBlockhash,
-            RpcConfirmedTransactionStatusWithSignature, RpcContactInfo, RpcFees, RpcIdentity,
+            RpcConfirmedTransactionStatusWithSignature, RpcContactInfo, RpcIdentity,
             RpcInflationGovernor, RpcInflationRate, RpcInflationReward, RpcKeyedAccount,
             RpcPerfSample, RpcPrioritizationFee, RpcResponseContext, RpcSimulateTransactionResult,
-            RpcSnapshotSlotInfo, RpcStakeActivation, RpcSupply, RpcVersionInfo, RpcVoteAccountInfo,
-            RpcVoteAccountStatus, StakeActivationState,
+            RpcSnapshotSlotInfo, RpcSupply, RpcVersionInfo, RpcVoteAccountInfo,
+            RpcVoteAccountStatus,
         },
     },
     solana_sdk::{
-        account::Account,
         clock::{Slot, UnixTimestamp},
         epoch_info::EpochInfo,
-        fee_calculator::{FeeCalculator, FeeRateGovernor},
         instruction::InstructionError,
         message::MessageHeader,
         pubkey::Pubkey,
@@ -31,7 +29,7 @@ use {
         sysvar::epoch_schedule::EpochSchedule,
         transaction::{self, Transaction, TransactionError, TransactionVersion},
     },
-    solana_transaction_status::{
+    solana_transaction_status_client_types::{
         option_serializer::OptionSerializer, EncodedConfirmedBlock,
         EncodedConfirmedTransactionWithStatusMeta, EncodedTransaction,
         EncodedTransactionWithStatusMeta, Rewards, TransactionBinaryEncoding,
@@ -117,13 +115,6 @@ impl RpcSender for MockSender {
                 context: RpcResponseContext { slot: 1, api_version: None },
                 value: Value::Number(Number::from(50)),
             })?,
-            "getRecentBlockhash" => serde_json::to_value(Response {
-                context: RpcResponseContext { slot: 1, api_version: None },
-                value: (
-                    Value::String(PUBKEY.to_string()),
-                    serde_json::to_value(FeeCalculator::default()).unwrap(),
-                ),
-            })?,
             "getEpochInfo" => serde_json::to_value(EpochInfo {
                 epoch: 1,
                 slot_index: 2,
@@ -131,31 +122,6 @@ impl RpcSender for MockSender {
                 absolute_slot: 34,
                 block_height: 34,
                 transaction_count: Some(123),
-            })?,
-            "getFeeCalculatorForBlockhash" => {
-                let value = if self.url == "blockhash_expired" {
-                    Value::Null
-                } else {
-                    serde_json::to_value(Some(FeeCalculator::default())).unwrap()
-                };
-                serde_json::to_value(Response {
-                    context: RpcResponseContext { slot: 1, api_version: None },
-                    value,
-                })?
-            }
-            "getFeeRateGovernor" => serde_json::to_value(Response {
-                context: RpcResponseContext { slot: 1, api_version: None },
-                value: serde_json::to_value(FeeRateGovernor::default()).unwrap(),
-            })?,
-            "getFees" => serde_json::to_value(Response {
-                context: RpcResponseContext { slot: 1, api_version: None },
-                value: serde_json::to_value(RpcFees {
-                    blockhash: PUBKEY.to_string(),
-                    fee_calculator: FeeCalculator::default(),
-                    last_valid_slot: 42,
-                    last_valid_block_height: 42,
-                })
-                .unwrap(),
             })?,
             "getSignatureStatuses" => {
                 let status: transaction::Result<()> = if self.url == "account_in_use" {
@@ -242,7 +208,6 @@ impl RpcSender for MockSender {
             "getSlot" => json![0],
             "getMaxShredInsertSlot" => json![0],
             "requestAirdrop" => Value::String(Signature::from([8; 64]).to_string()),
-            "getSnapshotSlot" => Value::Number(Number::from(0)),
             "getHighestSnapshotSlot" => json!(RpcSnapshotSlotInfo {
                 full: 100,
                 incremental: Some(110),
@@ -276,22 +241,13 @@ impl RpcSender for MockSender {
                             range: RpcBlockProductionRange {
                                 first_slot: config_range.first_slot,
                                 last_slot: {
-                                    if let Some(last_slot) = config_range.last_slot {
-                                        last_slot
-                                    } else {
-                                        2
-                                    }
+                                    config_range.last_slot.unwrap_or(2)
                                 },
                             },
                         },
                     })
                 }
             }
-            "getStakeActivation" => json!(RpcStakeActivation {
-                state: StakeActivationState::Activating,
-                active: 123,
-                inactive: 12,
-            }),
             "getStakeMinimumDelegation" => json!(Response {
                 context: RpcResponseContext { slot: 1, api_version: None },
                 value: 123_456_789,
@@ -351,6 +307,7 @@ impl RpcSender for MockSender {
                     units_consumed: None,
                     return_data: None,
                     inner_instructions: None,
+                    replacement_blockhash: None
                 },
             })?,
             "getMinimumBalanceForRentExemption" => json![20],
@@ -375,8 +332,13 @@ impl RpcSender for MockSender {
             "getClusterNodes" => serde_json::to_value(vec![RpcContactInfo {
                 pubkey: PUBKEY.to_string(),
                 gossip: Some(SocketAddr::from(([10, 239, 6, 48], 8899))),
+                tvu: Some(SocketAddr::from(([10, 239, 6, 48], 8865))),
                 tpu: Some(SocketAddr::from(([10, 239, 6, 48], 8856))),
                 tpu_quic: Some(SocketAddr::from(([10, 239, 6, 48], 8862))),
+                tpu_forwards: Some(SocketAddr::from(([10, 239, 6, 48], 8857))),
+                tpu_forwards_quic: Some(SocketAddr::from(([10, 239, 6, 48], 8863))),
+                tpu_vote: Some(SocketAddr::from(([10, 239, 6, 48], 8870))),
+                serve_repair: Some(SocketAddr::from(([10, 239, 6, 48], 8880))),
                 rpc: Some(SocketAddr::from(([10, 239, 6, 48], 8899))),
                 pubsub: Some(SocketAddr::from(([10, 239, 6, 48], 8900))),
                 version: Some("1.0.0 c375ce1f".to_string()),
@@ -400,6 +362,7 @@ impl RpcSender for MockSender {
                     version: Some(TransactionVersion::LEGACY),
                 }],
                 rewards: Rewards::new(),
+                num_partitions: None,
                 block_time: None,
                 block_height: Some(428),
             })?,
@@ -462,23 +425,10 @@ impl RpcSender for MockSender {
             })?,
             "getProgramAccounts" => {
                 let pubkey = Pubkey::from_str(PUBKEY).unwrap();
-                let account = Account {
-                    lamports: 1_000_000,
-                    data: vec![],
-                    owner: pubkey,
-                    executable: false,
-                    rent_epoch: 0,
-                };
                 serde_json::to_value(vec![
                     RpcKeyedAccount {
                         pubkey: PUBKEY.to_string(),
-                        account: UiAccount::encode(
-                            &pubkey,
-                            &account,
-                            UiAccountEncoding::Base64,
-                            None,
-                            None,
-                        )
+                        account: mock_encoded_account(&pubkey)
                     }
                 ])?
             },
@@ -489,5 +439,36 @@ impl RpcSender for MockSender {
 
     fn url(&self) -> String {
         format!("MockSender: {}", self.url)
+    }
+}
+
+pub(crate) fn mock_encoded_account(pubkey: &Pubkey) -> UiAccount {
+    UiAccount {
+        lamports: 1_000_000,
+        data: UiAccountData::Binary("".to_string(), UiAccountEncoding::Base64),
+        owner: pubkey.to_string(),
+        executable: false,
+        rent_epoch: 0,
+        space: Some(0),
+        remote: false, // Sonic:
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use {super::*, solana_account_decoder::encode_ui_account, solana_sdk::account::Account};
+
+    #[test]
+    fn test_mock_encoded_account() {
+        let pubkey = Pubkey::from_str(PUBKEY).unwrap();
+        let account = Account {
+            lamports: 1_000_000,
+            data: vec![],
+            owner: pubkey,
+            executable: false,
+            rent_epoch: 0,
+        };
+        let expected = encode_ui_account(&pubkey, &account, UiAccountEncoding::Base64, None, None);
+        assert_eq!(expected, mock_encoded_account(&pubkey));
     }
 }

@@ -13,12 +13,12 @@ on:
       - "**.rs"
       - "Cargo.toml"
       - "Cargo.lock"
-      - "cargo-build-bpf"
-      - "cargo-test-bpf"
       - "cargo-build-sbf"
       - "cargo-test-sbf"
       - "ci/downstream-projects/run-spl.sh"
       - ".github/workflows/downstream-project-spl.yml"
+      - ".github/scripts/downstream-project-spl-common.sh"
+      - ".github/scripts/downstream-project-spl-install-deps.sh"
   workflow_call:
     inputs:
       branch:
@@ -37,28 +37,30 @@ env:
 
 jobs:
   check:
-    if: false
+    if: github.repository == 'anza-xyz/agave'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - shell: bash
         run: |
           .github/scripts/purge-ubuntu-runner.sh
 
-      - uses: mozilla-actions/sccache-action@v0.0.3
+      - uses: mozilla-actions/sccache-action@v0.0.5
         with:
-          version: "v0.5.4"
+          version: "v0.8.1"
 
       - shell: bash
         run: |
-          source .github/scripts/downstream-project-spl-common.sh
           source .github/scripts/downstream-project-spl-install-deps.sh
+          source .github/scripts/downstream-project-spl-common.sh
+          if [ -n "$SKIP_SPL_DOWNSTREAM_PROJECT_TEST" ]; then
+            exit 0
+          fi
 
           cargo check
 
   test:
-    if: false
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -71,6 +73,7 @@ jobs:
                   "token/program",
                   "token/program-2022",
                   "associated-token-account/program",
+                  "instruction-padding/program",
                 ],
             },
             {
@@ -89,20 +92,23 @@ jobs:
             },
           ]
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - shell: bash
         run: |
           .github/scripts/purge-ubuntu-runner.sh
 
-      - uses: mozilla-actions/sccache-action@v0.0.3
+      - uses: mozilla-actions/sccache-action@v0.0.5
         with:
-          version: "v0.5.4"
+          version: "v0.8.1"
 
       - shell: bash
         run: |
-          source .github/scripts/downstream-project-spl-common.sh
           source .github/scripts/downstream-project-spl-install-deps.sh
+          source .github/scripts/downstream-project-spl-common.sh
+          if [ -n "$SKIP_SPL_DOWNSTREAM_PROJECT_TEST" ]; then
+            exit 0
+          fi
 
           programStr="${{ tojson(matrix.arrays.required_programs) }}"
           IFS=', ' read -ra programs <<<"${programStr//[\[\]$'\n'$'\r' ]/}"
@@ -140,19 +146,23 @@ jobs:
           - [single-pool/program]
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - shell: bash
         run: |
           .github/scripts/purge-ubuntu-runner.sh
 
-      - uses: mozilla-actions/sccache-action@v0.0.3
+      - uses: mozilla-actions/sccache-action@v0.0.5
         with:
-          version: "v0.5.4"
+          version: "v0.8.1"
 
       - shell: bash
         run: |
+          source .github/scripts/downstream-project-spl-install-deps.sh
           source .github/scripts/downstream-project-spl-common.sh
+          if [ -n "$SKIP_SPL_DOWNSTREAM_PROJECT_TEST" ]; then
+            exit 0
+          fi
 
           programStr="${{ tojson(matrix.programs) }}"
           IFS=', ' read -ra programs <<<"${programStr//[\[\]$'\n'$'\r' ]/}"

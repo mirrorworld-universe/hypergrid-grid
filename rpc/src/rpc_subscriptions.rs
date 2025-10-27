@@ -2,6 +2,7 @@
 
 use {
     crate::{
+        filter::filter_allows,
         optimistically_confirmed_bank_tracker::OptimisticallyConfirmedBank,
         parsed_token_accounts::{get_parsed_token_account, get_parsed_token_accounts},
         rpc_pubsub_service::PubSubConfig,
@@ -16,10 +17,11 @@ use {
     itertools::Either,
     rayon::prelude::*,
     serde::Serialize,
-    solana_account_decoder::{parse_token::is_known_spl_token_id, UiAccount, UiAccountEncoding},
+    solana_account_decoder::{
+        encode_ui_account, parse_token::is_known_spl_token_id, UiAccount, UiAccountEncoding,
+    },
     solana_ledger::{blockstore::Blockstore, get_tmp_ledger_path},
     solana_measure::measure::Measure,
-    solana_rayon_threadlimit::get_thread_count,
     solana_rpc_client_api::response::{
         ProcessedSignatureResult, ReceivedSignatureResult, Response as RpcResponse, RpcBlockUpdate,
         RpcBlockUpdateError, RpcKeyedAccount, RpcLogsResponse, RpcResponseContext,
@@ -267,7 +269,7 @@ struct RpcNotifier {
 }
 
 thread_local! {
-    static RPC_NOTIFIER_BUF: RefCell<Vec<u8>> = RefCell::new(Vec::new());
+    static RPC_NOTIFIER_BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }
 
 #[derive(Debug, Serialize)]
@@ -385,7 +387,7 @@ fn filter_account_result(
         {
             get_parsed_token_account(&bank, &params.pubkey, account, None)
         } else {
-            UiAccount::encode(&params.pubkey, &account, params.encoding, None, None)
+            encode_ui_account(&params.pubkey, &account, params.encoding, None, None)
         }
     });
     (account, last_modified_slot)
@@ -417,7 +419,7 @@ fn filter_program_results(
     let keyed_accounts = accounts.into_iter().filter(move |(_, account)| {
         filters
             .iter()
-            .all(|filter_type| filter_type.allows(account))
+            .all(|filter_type| filter_allows(filter_type, account))
     });
     let accounts = if is_known_spl_token_id(&params.pubkey)
         && params.encoding == UiAccountEncoding::JsonParsed
@@ -428,7 +430,7 @@ fn filter_program_results(
     } else {
         let accounts = keyed_accounts.map(move |(pubkey, account)| RpcKeyedAccount {
             pubkey: pubkey.to_string(),
-            account: UiAccount::encode(&pubkey, &account, encoding, None, None),
+            account: encode_ui_account(&pubkey, &account, encoding, None, None),
         });
         Either::Right(accounts)
     };
@@ -631,41 +633,37 @@ impl RpcSubscriptions {
                 config.queue_capacity_bytes,
             )),
         };
-        let notification_threads = config.notification_threads.unwrap_or_else(get_thread_count);
-        let t_cleanup = if notification_threads == 0 {
-            None
-        } else {
+
+        let t_cleanup = config.notification_threads.map(|notification_threads| {
             let exit = exit.clone();
-            Some(
-                Builder::new()
-                    .name("solRpcNotifier".to_string())
-                    .spawn(move || {
-                        let pool = rayon::ThreadPoolBuilder::new()
-                            .num_threads(notification_threads)
-                            .thread_name(|i| format!("solRpcNotify{i:02}"))
-                            .build()
-                            .unwrap();
-                        pool.install(|| {
-                            if let Some(rpc_notifier_ready) = rpc_notifier_ready {
-                                rpc_notifier_ready.fetch_or(true, Ordering::Relaxed);
-                            }
-                            Self::process_notifications(
-                                exit,
-                                max_complete_transaction_status_slot,
-                                max_complete_rewards_slot,
-                                blockstore,
-                                notifier,
-                                notification_receiver,
-                                subscriptions,
-                                bank_forks,
-                                block_commitment_cache,
-                                optimistically_confirmed_bank,
-                            )
-                        });
-                    })
-                    .unwrap(),
-            )
-        };
+            Builder::new()
+                .name("solRpcNotifier".to_string())
+                .spawn(move || {
+                    let pool = rayon::ThreadPoolBuilder::new()
+                        .num_threads(notification_threads.get())
+                        .thread_name(|i| format!("solRpcNotify{i:02}"))
+                        .build()
+                        .unwrap();
+                    pool.install(|| {
+                        if let Some(rpc_notifier_ready) = rpc_notifier_ready {
+                            rpc_notifier_ready.fetch_or(true, Ordering::Relaxed);
+                        }
+                        Self::process_notifications(
+                            exit,
+                            max_complete_transaction_status_slot,
+                            max_complete_rewards_slot,
+                            blockstore,
+                            notifier,
+                            notification_receiver,
+                            subscriptions,
+                            bank_forks,
+                            block_commitment_cache,
+                            optimistically_confirmed_bank,
+                        )
+                    });
+                })
+                .unwrap()
+        });
 
         let control = SubscriptionControl::new(
             config.max_active_subscriptions,
@@ -674,11 +672,7 @@ impl RpcSubscriptions {
         );
 
         Self {
-            notification_sender: if notification_threads == 0 {
-                None
-            } else {
-                Some(notification_sender)
-            },
+            notification_sender: config.notification_threads.map(|_| notification_sender),
             t_cleanup,
             exit,
             control,
@@ -1162,7 +1156,6 @@ impl RpcSubscriptions {
                 num_signatures_found.load(Ordering::Relaxed),
                 num_signatures_notified.load(Ordering::Relaxed),
             );
-            inc_new_counter_info!("rpc-subscription-notify-bank-or-gossip", total_notified);
             datapoint_info!(
                 "rpc_subscriptions",
                 ("source", source, String),
@@ -1207,22 +1200,6 @@ impl RpcSubscriptions {
                     i64
                 ),
                 ("notifications_time", total_time.as_us() as i64, i64),
-            );
-            inc_new_counter_info!(
-                "rpc-subscription-counter-num_accounts_notified",
-                num_accounts_notified.load(Ordering::Relaxed)
-            );
-            inc_new_counter_info!(
-                "rpc-subscription-counter-num_logs_notified",
-                num_logs_notified.load(Ordering::Relaxed)
-            );
-            inc_new_counter_info!(
-                "rpc-subscription-counter-num_programs_notified",
-                num_programs_notified.load(Ordering::Relaxed)
-            );
-            inc_new_counter_info!(
-                "rpc-subscription-counter-num_signatures_notified",
-                num_signatures_notified.load(Ordering::Relaxed)
             );
         }
     }
@@ -3025,7 +3002,7 @@ pub(crate) mod tests {
             .get(0)
             .unwrap()
             .process_transaction_with_metadata(tx.clone())
-            .was_executed());
+            .is_ok());
 
         subscriptions.notify_subscribers(CommitmentSlots::new_from_slot(0));
 

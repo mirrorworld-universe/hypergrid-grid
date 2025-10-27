@@ -13,14 +13,13 @@ use {
         },
     },
     solana_rpc_client::rpc_client::RpcClient,
-    solana_rpc_client_api::{config::RpcProgramAccountsConfig, response::Response},
+    solana_rpc_client_api::config::RpcProgramAccountsConfig,
     solana_sdk::{
         account::Account,
         client::{AsyncClient, Client, SyncClient},
-        clock::{Slot, MAX_PROCESSING_AGE},
+        clock::MAX_PROCESSING_AGE,
         commitment_config::CommitmentConfig,
         epoch_info::EpochInfo,
-        fee_calculator::{FeeCalculator, FeeRateGovernor},
         hash::Hash,
         instruction::Instruction,
         message::Message,
@@ -28,7 +27,6 @@ use {
         signature::{Keypair, Signature, Signer},
         signers::Signers,
         system_instruction,
-        timing::duration_as_ms,
         transaction::{self, Transaction, VersionedTransaction},
         transport::Result as TransportResult,
     },
@@ -57,7 +55,7 @@ impl ClientOptimizer {
             cur_index: AtomicUsize::new(0),
             experiment_index: AtomicUsize::new(0),
             experiment_done: AtomicBool::new(false),
-            times: RwLock::new(vec![std::u64::MAX; num_clients]),
+            times: RwLock::new(vec![u64::MAX; num_clients]),
             num_clients,
         }
     }
@@ -77,7 +75,7 @@ impl ClientOptimizer {
 
     fn report(&self, index: usize, time_ms: u64) {
         if self.num_clients > 1
-            && (!self.experiment_done.load(Ordering::Relaxed) || time_ms == std::u64::MAX)
+            && (!self.experiment_done.load(Ordering::Relaxed) || time_ms == u64::MAX)
         {
             trace!(
                 "report {} with {} exp: {}",
@@ -88,7 +86,7 @@ impl ClientOptimizer {
 
             self.times.write().unwrap()[index] = time_ms;
 
-            if index == (self.num_clients - 1) || time_ms == std::u64::MAX {
+            if index == (self.num_clients - 1) || time_ms == u64::MAX {
                 let times = self.times.read().unwrap();
                 let (min_time, min_index) = min_index(&times);
                 trace!(
@@ -111,6 +109,7 @@ impl ClientOptimizer {
 }
 
 /// An object for querying and sending transactions to the network.
+#[deprecated(since = "2.0.0", note = "Use [RpcClient] or [TpuClient] instead.")]
 pub struct ThinClient<
     P, // ConnectionPool
     M, // ConnectionManager
@@ -122,6 +121,7 @@ pub struct ThinClient<
     connection_cache: Arc<ConnectionCache<P, M, C>>,
 }
 
+#[allow(deprecated)]
 impl<P, M, C> ThinClient<P, M, C>
 where
     P: ConnectionPool<NewConnectionConfig = C>,
@@ -323,6 +323,7 @@ where
     }
 }
 
+#[allow(deprecated)]
 impl<P, M, C> Client for ThinClient<P, M, C>
 where
     P: ConnectionPool<NewConnectionConfig = C>,
@@ -334,6 +335,7 @@ where
     }
 }
 
+#[allow(deprecated)]
 impl<P, M, C> SyncClient for ThinClient<P, M, C>
 where
     P: ConnectionPool<NewConnectionConfig = C>,
@@ -415,52 +417,6 @@ where
             .map_err(|e| e.into())
     }
 
-    fn get_recent_blockhash(&self) -> TransportResult<(Hash, FeeCalculator)> {
-        #[allow(deprecated)]
-        let (blockhash, fee_calculator, _last_valid_slot) =
-            self.get_recent_blockhash_with_commitment(CommitmentConfig::default())?;
-        Ok((blockhash, fee_calculator))
-    }
-
-    fn get_recent_blockhash_with_commitment(
-        &self,
-        commitment_config: CommitmentConfig,
-    ) -> TransportResult<(Hash, FeeCalculator, Slot)> {
-        let index = self.optimizer.experiment();
-        let now = Instant::now();
-        #[allow(deprecated)]
-        let recent_blockhash =
-            self.rpc_clients[index].get_recent_blockhash_with_commitment(commitment_config);
-        match recent_blockhash {
-            Ok(Response { value, .. }) => {
-                self.optimizer.report(index, duration_as_ms(&now.elapsed()));
-                Ok((value.0, value.1, value.2))
-            }
-            Err(e) => {
-                self.optimizer.report(index, std::u64::MAX);
-                Err(e.into())
-            }
-        }
-    }
-
-    fn get_fee_calculator_for_blockhash(
-        &self,
-        blockhash: &Hash,
-    ) -> TransportResult<Option<FeeCalculator>> {
-        #[allow(deprecated)]
-        self.rpc_client()
-            .get_fee_calculator_for_blockhash(blockhash)
-            .map_err(|e| e.into())
-    }
-
-    fn get_fee_rate_governor(&self) -> TransportResult<FeeRateGovernor> {
-        #[allow(deprecated)]
-        self.rpc_client()
-            .get_fee_rate_governor()
-            .map_err(|e| e.into())
-            .map(|r| r.value)
-    }
-
     fn get_signature_status(
         &self,
         signature: &Signature,
@@ -523,11 +479,12 @@ where
         let now = Instant::now();
         match self.rpc_client().get_transaction_count() {
             Ok(transaction_count) => {
-                self.optimizer.report(index, duration_as_ms(&now.elapsed()));
+                self.optimizer
+                    .report(index, now.elapsed().as_millis() as u64);
                 Ok(transaction_count)
             }
             Err(e) => {
-                self.optimizer.report(index, std::u64::MAX);
+                self.optimizer.report(index, u64::MAX);
                 Err(e.into())
             }
         }
@@ -544,11 +501,12 @@ where
             .get_transaction_count_with_commitment(commitment_config)
         {
             Ok(transaction_count) => {
-                self.optimizer.report(index, duration_as_ms(&now.elapsed()));
+                self.optimizer
+                    .report(index, now.elapsed().as_millis() as u64);
                 Ok(transaction_count)
             }
             Err(e) => {
-                self.optimizer.report(index, std::u64::MAX);
+                self.optimizer.report(index, u64::MAX);
                 Err(e.into())
             }
         }
@@ -571,13 +529,6 @@ where
             .map_err(|e| e.into())
     }
 
-    fn get_new_blockhash(&self, blockhash: &Hash) -> TransportResult<(Hash, FeeCalculator)> {
-        #[allow(deprecated)]
-        self.rpc_client()
-            .get_new_blockhash(blockhash)
-            .map_err(|e| e.into())
-    }
-
     fn get_latest_blockhash(&self) -> TransportResult<Hash> {
         let (blockhash, _) =
             self.get_latest_blockhash_with_commitment(CommitmentConfig::default())?;
@@ -592,11 +543,12 @@ where
         let now = Instant::now();
         match self.rpc_clients[index].get_latest_blockhash_with_commitment(commitment_config) {
             Ok((blockhash, last_valid_block_height)) => {
-                self.optimizer.report(index, duration_as_ms(&now.elapsed()));
+                self.optimizer
+                    .report(index, now.elapsed().as_millis() as u64);
                 Ok((blockhash, last_valid_block_height))
             }
             Err(e) => {
-                self.optimizer.report(index, std::u64::MAX);
+                self.optimizer.report(index, u64::MAX);
                 Err(e.into())
             }
         }
@@ -619,6 +571,7 @@ where
     }
 }
 
+#[allow(deprecated)]
 impl<P, M, C> AsyncClient for ThinClient<P, M, C>
 where
     P: ConnectionPool<NewConnectionConfig = C>,
@@ -651,7 +604,7 @@ where
 }
 
 fn min_index(array: &[u64]) -> (u64, usize) {
-    let mut min_time = std::u64::MAX;
+    let mut min_time = u64::MAX;
     let mut min_index = 0;
     for (i, time) in array.iter().enumerate() {
         if *time < min_time {
@@ -681,7 +634,7 @@ mod tests {
         optimizer.report(index, 50);
         assert_eq!(optimizer.best(), NUM_CLIENTS - 1);
 
-        optimizer.report(optimizer.best(), std::u64::MAX);
+        optimizer.report(optimizer.best(), u64::MAX);
         assert_eq!(optimizer.best(), NUM_CLIENTS - 2);
     }
 }

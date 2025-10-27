@@ -255,9 +255,9 @@ before the PR can be merged.  Here are the steps:
 name = "solana-<PACKAGE_NAME>"
 version = "0.0.1"
 description = "<DESCRIPTION>"
-authors = ["Solana Labs Maintainers <maintainers@solanalabs.com>"]
-repository = "https://github.com/solana-labs/solana"
-homepage = "https://solana.com/"
+authors = ["Anza Maintainers <maintainers@anza.xyz>"]
+repository = "https://github.com/anza-xyz/agave"
+homepage = "https://anza.xyz"
 documentation = "https://docs.rs/solana-<PACKAGE_NAME>"
 license = "Apache-2.0"
 edition = "2021"
@@ -268,7 +268,7 @@ edition = "2021"
 
 * Once all review feedback has been addressed, publish v0.0.1 of the crate
   under your personal crates.io account, and then transfer the crate ownership
-  to solana-grimes.
+  to "anza-team".
   https://crates.io/policies#package-ownership
 
 * After successful publication, update the PR by replacing the v0.0.1 version

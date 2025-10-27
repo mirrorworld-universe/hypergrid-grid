@@ -243,11 +243,15 @@ fn run_transactions_dos(
             program_pubkey: None,
             buffer_signer_index: None,
             buffer_pubkey: None,
-            allow_excessive_balance: true,
             upgrade_authority_signer_index: 0,
             is_final: true,
             max_len: None,
+            compute_unit_price: None,
+            max_sign_attempts: 5,
+            use_rpc: false,
             skip_fee_check: true, // skip_fee_check
+            auto_extend: true,
+            skip_feature_verification: true,
         });
 
         process_command(&config).expect("deploy didn't pass");
@@ -426,7 +430,7 @@ fn run_transactions_dos(
 }
 
 fn main() {
-    solana_logger::setup_with_default("solana=info");
+    solana_logger::setup_with_default_filter();
     let matches = App::new(crate_name!())
         .about(crate_description!())
         .version(solana_version::version!())

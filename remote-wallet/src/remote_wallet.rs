@@ -8,8 +8,8 @@ use {
     },
     log::*,
     parking_lot::RwLock,
+    solana_derivation_path::{DerivationPath, DerivationPathError},
     solana_sdk::{
-        derivation_path::{DerivationPath, DerivationPathError},
         pubkey::Pubkey,
         signature::{Signature, SignerError},
     },
@@ -252,7 +252,6 @@ pub trait RemoteWallet<T> {
 /// `RemoteWallet` device
 #[derive(Debug)]
 pub struct Device {
-    #[allow(dead_code)]
     pub(crate) path: String,
     pub(crate) info: RemoteWalletInfo,
     pub wallet_type: RemoteWalletType,

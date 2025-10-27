@@ -10,12 +10,14 @@ on:
     paths:
       - "**/Cargo.toml"
       - ".github/workflows/crate-check.yml"
+      - "./ci/check-crates.sh"
 
 jobs:
   check:
+    if: github.repository == 'anza-xyz/agave'
     runs-on: ubuntu-20.04
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 

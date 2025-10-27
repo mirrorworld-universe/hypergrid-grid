@@ -4,15 +4,16 @@ use {
     crossbeam_channel::unbounded,
     log::*,
     solana_accounts_db::{
-        hardened_unpack::open_genesis_config, utils::create_all_accounts_run_and_snapshot_dirs,
+        hardened_unpack::open_genesis_config,
+        utils::{create_all_accounts_run_and_snapshot_dirs, move_and_async_delete_path_contents},
     },
     solana_core::{
-        accounts_hash_verifier::AccountsHashVerifier, validator::BlockVerificationMethod,
+        accounts_hash_verifier::AccountsHashVerifier,
+        snapshot_packager_service::PendingSnapshotPackages, validator::BlockVerificationMethod,
     },
     solana_geyser_plugin_manager::geyser_plugin_service::{
         GeyserPluginService, GeyserPluginServiceError,
     },
-    solana_gossip::{cluster_info::ClusterInfo, contact_info::ContactInfo},
     solana_ledger::{
         bank_forks_utils::{self, BankForksUtilsError},
         blockstore::{Blockstore, BlockstoreError},
@@ -25,7 +26,7 @@ use {
         },
         use_snapshot_archives_at_startup::UseSnapshotArchivesAtStartup,
     },
-    solana_measure::measure,
+    solana_measure::measure_time,
     solana_rpc::transaction_status_service::TransactionStatusService,
     solana_runtime::{
         accounts_background_service::{
@@ -36,26 +37,36 @@ use {
         prioritization_fee_cache::PrioritizationFeeCache,
         snapshot_config::SnapshotConfig,
         snapshot_hash::StartingSnapshotHashes,
-        snapshot_utils::{
-            self, clean_orphaned_account_snapshot_dirs, move_and_async_delete_path_contents,
-        },
+        snapshot_utils::{self, clean_orphaned_account_snapshot_dirs},
     },
     solana_sdk::{
-        clock::Slot, genesis_config::GenesisConfig, pubkey::Pubkey, signature::Signer,
-        signer::keypair::Keypair, timing::timestamp, transaction::VersionedTransaction,
+        clock::Slot, genesis_config::GenesisConfig, pubkey::Pubkey,
+        transaction::VersionedTransaction,
     },
-    solana_streamer::socket::SocketAddrSpace,
     solana_unified_scheduler_pool::DefaultSchedulerPool,
     std::{
         path::{Path, PathBuf},
         process::exit,
         sync::{
             atomic::{AtomicBool, Ordering},
-            Arc, RwLock,
+            Arc, Mutex, RwLock,
         },
     },
     thiserror::Error,
 };
+
+pub struct LoadAndProcessLedgerOutput {
+    pub bank_forks: Arc<RwLock<BankForks>>,
+    pub starting_snapshot_hashes: Option<StartingSnapshotHashes>,
+    // Typically, we would want to join all threads before returning. However,
+    // AccountsBackgroundService (ABS) performs several long running operations
+    // that don't respond to the exit flag. Blocking on these operations could
+    // significantly delay getting results that do not need ABS to finish. So,
+    // skip joining ABS and instead let the caller decide whether to block or
+    // not. It is safe to let ABS continue in the background, and ABS will stop
+    // if/when it finally checks the exit flag
+    pub accounts_background_service: AccountsBackgroundService,
+}
 
 const PROCESS_SLOTS_HELP_STRING: &str =
     "The starting slot is either the latest found snapshot slot, or genesis (slot 0) if the \
@@ -101,16 +112,14 @@ pub fn load_and_process_ledger_or_exit(
     genesis_config: &GenesisConfig,
     blockstore: Arc<Blockstore>,
     process_options: ProcessOptions,
-    snapshot_archive_path: Option<PathBuf>,
-    incremental_snapshot_archive_path: Option<PathBuf>,
-) -> (Arc<RwLock<BankForks>>, Option<StartingSnapshotHashes>) {
+    transaction_status_sender: Option<TransactionStatusSender>,
+) -> LoadAndProcessLedgerOutput {
     load_and_process_ledger(
         arg_matches,
         genesis_config,
         blockstore,
         process_options,
-        snapshot_archive_path,
-        incremental_snapshot_archive_path,
+        transaction_status_sender,
     )
     .unwrap_or_else(|err| {
         eprintln!("Exiting. Failed to load and process ledger: {err}");
@@ -123,9 +132,8 @@ pub fn load_and_process_ledger(
     genesis_config: &GenesisConfig,
     blockstore: Arc<Blockstore>,
     process_options: ProcessOptions,
-    snapshot_archive_path: Option<PathBuf>,
-    incremental_snapshot_archive_path: Option<PathBuf>,
-) -> Result<(Arc<RwLock<BankForks>>, Option<StartingSnapshotHashes>), LoadAndProcessLedgerError> {
+    transaction_status_sender: Option<TransactionStatusSender>,
+) -> Result<LoadAndProcessLedgerOutput, LoadAndProcessLedgerError> {
     let bank_snapshots_dir = if blockstore.is_primary_access() {
         blockstore.ledger_path().join("snapshot")
     } else {
@@ -139,10 +147,15 @@ pub fn load_and_process_ledger(
     let snapshot_config = if arg_matches.is_present("no_snapshot") {
         None
     } else {
-        let full_snapshot_archives_dir =
-            snapshot_archive_path.unwrap_or_else(|| blockstore.ledger_path().to_path_buf());
+        let full_snapshot_archives_dir = value_t!(arg_matches, "snapshots", String)
+            .ok()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| blockstore.ledger_path().to_path_buf());
         let incremental_snapshot_archives_dir =
-            incremental_snapshot_archive_path.unwrap_or_else(|| full_snapshot_archives_dir.clone());
+            value_t!(arg_matches, "incremental_snapshot_archive_path", String)
+                .ok()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| full_snapshot_archives_dir.clone());
         if let Some(full_snapshot_slot) =
             snapshot_utils::get_highest_full_snapshot_archive_slot(&full_snapshot_archives_dir)
         {
@@ -190,14 +203,14 @@ pub fn load_and_process_ledger(
     }
 
     let account_paths = if let Some(account_paths) = arg_matches.value_of("account_paths") {
-        // If this blockstore access is Primary, no other process (solana-validator) can hold
+        // If this blockstore access is Primary, no other process (agave-validator) can hold
         // Primary access. So, allow a custom accounts path without worry of wiping the accounts
-        // of solana-validator.
+        // of agave-validator.
         if !blockstore.is_primary_access() {
             // Attempt to open the Blockstore in Primary access; if successful, no other process
             // was holding Primary so allow things to proceed with custom accounts path. Release
-            // the Primary access instead of holding it to give priority to solana-validator over
-            // solana-ledger-tool should solana-validator start before we've finished.
+            // the Primary access instead of holding it to give priority to agave-validator over
+            // agave-ledger-tool should agave-validator start before we've finished.
             info!(
                 "Checking if another process currently holding Primary access to {:?}",
                 blockstore.ledger_path()
@@ -233,7 +246,7 @@ pub fn load_and_process_ledger(
     // From now on, use run/ paths in the same way as the previous account_paths.
     let account_paths = account_run_paths;
 
-    let (_, measure_clean_account_paths) = measure!(
+    let (_, measure_clean_account_paths) = measure_time!(
         account_paths.iter().for_each(|path| {
             if path.exists() {
                 info!("Cleaning contents of account path: {}", path.display());
@@ -276,7 +289,6 @@ pub fn load_and_process_ledger(
             genesis_config,
             blockstore.as_ref(),
             account_paths,
-            None,
             snapshot_config.as_ref(),
             &process_options,
             None,
@@ -295,9 +307,17 @@ pub fn load_and_process_ledger(
         "Using: block-verification-method: {}",
         block_verification_method,
     );
+    let unified_scheduler_handler_threads =
+        value_t!(arg_matches, "unified_scheduler_handler_threads", usize).ok();
     match block_verification_method {
         BlockVerificationMethod::BlockstoreProcessor => {
             info!("no scheduler pool is installed for block verification...");
+            if let Some(count) = unified_scheduler_handler_threads {
+                warn!(
+                    "--unified-scheduler-handler-threads={count} is ignored because unified \
+                     scheduler isn't enabled"
+                );
+            }
         }
         BlockVerificationMethod::UnifiedScheduler => {
             let no_transaction_status_sender = None;
@@ -307,6 +327,7 @@ pub fn load_and_process_ledger(
                 .write()
                 .unwrap()
                 .install_scheduler_pool(DefaultSchedulerPool::new_dyn(
+                    unified_scheduler_handler_threads,
                     process_options.runtime_config.log_messages_bytes_limit,
                     no_transaction_status_sender,
                     no_replay_vote_sender,
@@ -315,20 +336,13 @@ pub fn load_and_process_ledger(
         }
     }
 
-    let node_id = Arc::new(Keypair::new());
-    let cluster_info = Arc::new(ClusterInfo::new(
-        ContactInfo::new_localhost(&node_id.pubkey(), timestamp()),
-        Arc::clone(&node_id),
-        SocketAddrSpace::Unspecified,
-    ));
+    let pending_snapshot_packages = Arc::new(Mutex::new(PendingSnapshotPackages::default()));
     let (accounts_package_sender, accounts_package_receiver) = crossbeam_channel::unbounded();
     let accounts_hash_verifier = AccountsHashVerifier::new(
         accounts_package_sender.clone(),
         accounts_package_receiver,
-        None,
+        pending_snapshot_packages,
         exit.clone(),
-        cluster_info,
-        None,
         SnapshotConfig::new_load_only(),
     );
     let (snapshot_request_sender, snapshot_request_receiver) = crossbeam_channel::unbounded();
@@ -353,7 +367,6 @@ pub fn load_and_process_ledger(
         exit.clone(),
         abs_request_handler,
         process_options.accounts_db_test_hash_calculation,
-        None,
     );
 
     let enable_rpc_transaction_history = arg_matches.is_present("enable_rpc_transaction_history");
@@ -380,7 +393,7 @@ pub fn load_and_process_ledger(
             enable_rpc_transaction_history,
             transaction_notifier,
             tss_blockstore,
-            false,
+            arg_matches.is_present("enable_extended_tx_metadata_storage"),
             exit.clone(),
         );
         (
@@ -390,7 +403,7 @@ pub fn load_and_process_ledger(
             Some(transaction_status_service),
         )
     } else {
-        (None, None)
+        (transaction_status_sender, None)
     };
 
     let result = blockstore_processor::process_blockstore_from_root(
@@ -403,11 +416,14 @@ pub fn load_and_process_ledger(
         None, // Maybe support this later, though
         &accounts_background_request_sender,
     )
-    .map(|_| (bank_forks, starting_snapshot_hashes))
+    .map(|_| LoadAndProcessLedgerOutput {
+        bank_forks,
+        starting_snapshot_hashes,
+        accounts_background_service,
+    })
     .map_err(LoadAndProcessLedgerError::ProcessBlockstoreFromRoot);
 
     exit.store(true, Ordering::Relaxed);
-    accounts_background_service.join().unwrap();
     accounts_hash_verifier.join().unwrap();
     if let Some(service) = transaction_status_service {
         service.join().unwrap();

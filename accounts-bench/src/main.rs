@@ -9,16 +9,13 @@ use {
         accounts::Accounts,
         accounts_db::{
             test_utils::{create_test_accounts, update_accounts_bench},
-            AccountShrinkThreshold, AccountsDb, CalcAccountsHashDataSource,
-            ACCOUNTS_DB_CONFIG_FOR_BENCHMARKS,
+            AccountsDb, CalcAccountsHashDataSource, ACCOUNTS_DB_CONFIG_FOR_BENCHMARKS,
         },
-        accounts_index::AccountSecondaryIndexes,
         ancestors::Ancestors,
-        rent_collector::RentCollector,
     },
     solana_measure::measure::Measure,
     solana_sdk::{
-        genesis_config::ClusterType, pubkey::Pubkey, sysvar::epoch_schedule::EpochSchedule,
+        pubkey::Pubkey, rent_collector::RentCollector, sysvar::epoch_schedule::EpochSchedule,
     },
     std::{env, fs, path::PathBuf, sync::Arc},
 };
@@ -72,9 +69,6 @@ fn main() {
     }
     let accounts_db = AccountsDb::new_with_config(
         vec![path],
-        &ClusterType::Testnet,
-        AccountSecondaryIndexes::default(),
-        AccountShrinkThreshold::default(),
         Some(ACCOUNTS_DB_CONFIG_FOR_BENCHMARKS),
         None,
         Arc::default(),
@@ -130,7 +124,7 @@ fn main() {
                 .update_accounts_hash_for_tests(0, &ancestors, false, false);
             time.stop();
             let mut time_store = Measure::start("hash using store");
-            let results_store = accounts.accounts_db.update_accounts_hash_with_verify(
+            let results_store = accounts.accounts_db.update_accounts_hash_with_verify_from(
                 CalcAccountsHashDataSource::Storages,
                 false,
                 solana_sdk::clock::Slot::default(),

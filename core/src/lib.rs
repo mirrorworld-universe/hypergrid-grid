@@ -1,4 +1,4 @@
-#![cfg_attr(RUSTC_WITH_SPECIALIZATION, feature(min_specialization))]
+#![cfg_attr(feature = "frozen-abi", feature(min_specialization))]
 #![allow(clippy::arithmetic_side_effects)]
 #![recursion_limit = "2048"]
 //! The `solana` library implements the Solana high-performance blockchain architecture.
@@ -10,6 +10,7 @@
 
 pub mod accounts_hash_verifier;
 pub mod admin_rpc_post_init;
+pub mod banking_simulation;
 pub mod banking_stage;
 pub mod banking_trace;
 pub mod cache_block_meta_service;
@@ -44,14 +45,10 @@ pub mod tracer_packet_stats;
 pub mod tvu;
 pub mod unfrozen_gossip_verified_vote_hashes;
 pub mod validator;
-pub mod verified_vote_packets;
 pub mod vote_simulator;
 pub mod voting_service;
 pub mod warm_quic_cache_service;
 pub mod window_service;
-
-#[macro_use]
-extern crate eager;
 
 #[macro_use]
 extern crate log;
@@ -62,7 +59,8 @@ extern crate serde_derive;
 #[macro_use]
 extern crate solana_metrics;
 
-#[macro_use]
+#[cfg_attr(feature = "frozen-abi", macro_use)]
+#[cfg(feature = "frozen-abi")]
 extern crate solana_frozen_abi_macro;
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 use {
     crate::{
-        accounts_index::{DiskIndexValue, IndexValue},
+        accounts_index::{in_mem_accounts_index::InMemAccountsIndex, DiskIndexValue, IndexValue},
         bucket_map_holder::{Age, AtomicAge, BucketMapHolder},
     },
     solana_sdk::timing::AtomicInterval,
@@ -61,7 +61,6 @@ pub struct BucketMapHolderStats {
     last_was_startup: AtomicBool,
     last_time: AtomicInterval,
     bins: u64,
-    pub estimate_mem: AtomicU64,
     pub flush_should_evict_us: AtomicU64,
 }
 
@@ -263,7 +262,8 @@ impl BucketMapHolderStats {
                 },
                 (
                     "estimate_mem_bytes",
-                    self.estimate_mem.load(Ordering::Relaxed),
+                    self.count_in_mem.load(Ordering::Relaxed)
+                        * InMemAccountsIndex::<T, U>::approx_size_of_one_entry(),
                     i64
                 ),
                 (
@@ -465,6 +465,16 @@ impl BucketMapHolderStats {
                 (
                     "disk_index_index_file_size",
                     disk.map(|disk| disk.stats.index.total_file_size.load(Ordering::Relaxed))
+                        .unwrap_or_default(),
+                    i64
+                ),
+                (
+                    "index_exceptional_entry",
+                    disk.map(|disk| disk
+                        .stats
+                        .index
+                        .index_uses_uncommon_slot_list_len_or_refcount
+                        .load(Ordering::Relaxed))
                         .unwrap_or_default(),
                     i64
                 ),

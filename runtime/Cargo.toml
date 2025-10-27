@@ -10,6 +10,7 @@ license = { workspace = true }
 edition = { workspace = true }
 
 [dependencies]
+ahash = { workspace = true }
 aquamarine = { workspace = true }
 arrayref = { workspace = true }
 base64 = { workspace = true }
@@ -24,13 +25,12 @@ dashmap = { workspace = true, features = ["rayon", "raw-api"] }
 dir-diff = { workspace = true }
 flate2 = { workspace = true }
 fnv = { workspace = true }
-fs-err = { workspace = true }
 im = { workspace = true, features = ["rayon", "serde"] }
 index_list = { workspace = true }
 itertools = { workspace = true }
 lazy_static = { workspace = true }
+libc = { workspace = true }
 log = { workspace = true }
-lru = { workspace = true }
 lz4 = { workspace = true }
 memmap2 = { workspace = true }
 mockall = { workspace = true }
@@ -39,7 +39,6 @@ num-derive = { workspace = true }
 num-traits = { workspace = true }
 num_cpus = { workspace = true }
 num_enum = { workspace = true }
-ouroboros = { workspace = true }
 percentage = { workspace = true }
 qualifier_attr = { workspace = true }
 rand = { workspace = true }
@@ -48,30 +47,50 @@ regex = { workspace = true }
 serde = { workspace = true, features = ["rc"] }
 serde_derive = { workspace = true }
 serde_json = { workspace = true }
-siphasher = { workspace = true }
+serde_with = { workspace = true }
 solana-accounts-db = { workspace = true }
 solana-address-lookup-table-program = { workspace = true }
 solana-bpf-loader-program = { workspace = true }
 solana-bucket-map = { workspace = true }
+solana-compute-budget = { workspace = true }
 solana-compute-budget-program = { workspace = true }
 solana-config-program = { workspace = true }
 solana-cost-model = { workspace = true }
-solana-frozen-abi = { workspace = true }
-solana-frozen-abi-macro = { workspace = true }
+solana-feature-set = { workspace = true }
+solana-fee = { workspace = true }
+solana-frozen-abi = { workspace = true, optional = true, features = [
+    "frozen-abi",
+] }
+solana-frozen-abi-macro = { workspace = true, optional = true, features = [
+    "frozen-abi",
+] }
+solana-inline-spl = { workspace = true }
+solana-lattice-hash = { workspace = true }
 solana-loader-v4-program = { workspace = true }
 solana-measure = { workspace = true }
 solana-metrics = { workspace = true }
 solana-perf = { workspace = true }
+solana-program = { workspace = true }
 solana-program-runtime = { workspace = true }
 solana-rayon-threadlimit = { workspace = true }
+solana-runtime-transaction = { workspace = true }
 solana-sdk = { workspace = true }
 solana-stake-program = { workspace = true }
+solana-svm = { workspace = true }
+solana-svm-rent-collector = { workspace = true }
+solana-svm-transaction = { workspace = true }
 solana-system-program = { workspace = true }
+solana-timings = { workspace = true }
+solana-transaction-status = { workspace = true }
 solana-version = { workspace = true }
 solana-vote = { workspace = true }
 solana-vote-program = { workspace = true }
+solana-zk-elgamal-proof-program = { workspace = true }
+solana-zk-sdk = { workspace = true }
 solana-zk-token-proof-program = { workspace = true }
 solana-zk-token-sdk = { workspace = true }
+sonic-account-migrater-program = { workspace = true }
+sonic-fee-settlement-program = { workspace = true }
 static_assertions = { workspace = true }
 strum = { workspace = true, features = ["derive"] }
 strum_macros = { workspace = true }
@@ -86,27 +105,44 @@ crate-type = ["lib"]
 name = "solana_runtime"
 
 [dev-dependencies]
+agave-transaction-view = { workspace = true }
 assert_matches = { workspace = true }
 ed25519-dalek = { workspace = true }
 libsecp256k1 = { workspace = true }
 memoffset = { workspace = true }
+rand0-7 = { package = "rand", version = "0.7" }
 rand_chacha = { workspace = true }
 solana-accounts-db = { workspace = true, features = ["dev-context-only-utils"] }
 solana-logger = { workspace = true }
 # See order-crates-for-publishing.py for using this unusual `path = "."`
 solana-runtime = { path = ".", features = ["dev-context-only-utils"] }
 solana-sdk = { workspace = true, features = ["dev-context-only-utils"] }
+solana-svm = { workspace = true, features = ["dev-context-only-utils"] }
 static_assertions = { workspace = true }
 test-case = { workspace = true }
 
 [package.metadata.docs.rs]
 targets = ["x86_64-unknown-linux-gnu"]
 
-[build-dependencies]
-rustc_version = { workspace = true }
-
 [features]
-dev-context-only-utils = []
+dev-context-only-utils = ["solana-svm/dev-context-only-utils"]
+frozen-abi = [
+    "dep:solana-frozen-abi",
+    "dep:solana-frozen-abi-macro",
+    "solana-accounts-db/frozen-abi",
+    "solana-compute-budget/frozen-abi",
+    "solana-cost-model/frozen-abi",
+    "solana-perf/frozen-abi",
+    "solana-program-runtime/frozen-abi",
+    "solana-sdk/frozen-abi",
+    "solana-svm/frozen-abi",
+    "solana-version/frozen-abi",
+    "solana-vote/frozen-abi",
+    "solana-vote-program/frozen-abi",
+]
 
 [[bench]]
 name = "prioritization_fee_cache"
+
+[lints]
+workspace = true

@@ -1,5 +1,4 @@
 use {
-    crate::bench_tps_client::*,
     log::*,
     rayon::prelude::*,
     solana_core::gen_keys::GenKeys,
@@ -16,6 +15,7 @@ use {
         system_instruction,
         transaction::Transaction,
     },
+    solana_tps_client::*,
     std::{
         collections::HashSet,
         marker::Send,
@@ -28,10 +28,10 @@ use {
     },
 };
 
-pub fn get_latest_blockhash<T: BenchTpsClient + ?Sized>(client: &T) -> Hash {
+pub fn get_latest_blockhash<T: TpsClient + ?Sized>(client: &T) -> Hash {
     loop {
-        match client.get_latest_blockhash_with_commitment(CommitmentConfig::processed()) {
-            Ok((blockhash, _)) => return blockhash,
+        match client.get_latest_blockhash() {
+            Ok(blockhash) => return blockhash,
             Err(err) => {
                 info!("Couldn't get last blockhash: {:?}", err);
                 sleep(Duration::from_secs(1));
@@ -59,14 +59,14 @@ pub fn generate_keypairs(seed_keypair: &Keypair, count: u64) -> (Vec<Keypair>, u
 /// fund the dests keys by spending all of the source keys into MAX_SPENDS_PER_TX
 /// on every iteration.  This allows us to replay the transfers because the source is either empty,
 /// or full
-pub fn fund_keys<T: 'static + BenchTpsClient + Send + Sync + ?Sized>(
+pub fn fund_keys<T: 'static + TpsClient + Send + Sync + ?Sized>(
     client: Arc<T>,
     source: &Keypair,
     dests: &[Keypair],
     total: u64,
     max_fee: u64,
     lamports_per_account: u64,
-    data_size_limit: u32,
+    data_size_limit: Option<u32>,
 ) {
     let mut funded: Vec<&Keypair> = vec![source];
     let mut funded_funds = total;
@@ -99,7 +99,7 @@ pub fn fund_keys<T: 'static + BenchTpsClient + Send + Sync + ?Sized>(
     }
 }
 
-pub fn generate_durable_nonce_accounts<T: 'static + BenchTpsClient + Send + Sync + ?Sized>(
+pub fn generate_durable_nonce_accounts<T: 'static + TpsClient + Send + Sync + ?Sized>(
     client: Arc<T>,
     authority_keypairs: &[Keypair],
 ) -> Vec<Keypair> {
@@ -126,7 +126,7 @@ pub fn generate_durable_nonce_accounts<T: 'static + BenchTpsClient + Send + Sync
     nonce_keypairs
 }
 
-pub fn withdraw_durable_nonce_accounts<T: 'static + BenchTpsClient + Send + Sync + ?Sized>(
+pub fn withdraw_durable_nonce_accounts<T: 'static + TpsClient + Send + Sync + ?Sized>(
     client: Arc<T>,
     authority_keypairs: &[Keypair],
     nonce_keypairs: &[Keypair],
@@ -149,7 +149,7 @@ const MAX_SPENDS_PER_TX: u64 = 4;
 // assume 4MB network buffers, and 512 byte packets
 const FUND_CHUNK_LEN: usize = 4 * 1024 * 1024 / 512;
 
-fn verify_funding_transfer<T: BenchTpsClient + ?Sized>(
+fn verify_funding_transfer<T: TpsClient + ?Sized>(
     client: &Arc<T>,
     tx: &Transaction,
     amount: u64,
@@ -173,11 +173,11 @@ trait SendBatchTransactions<'a, T: Sliceable + Send + Sync> {
     );
     fn send_transactions<C, F>(&mut self, client: &Arc<C>, to_lamports: u64, log_progress: F)
     where
-        C: 'static + BenchTpsClient + Send + Sync + ?Sized,
+        C: 'static + TpsClient + Send + Sync + ?Sized,
         F: Fn(usize, usize);
     fn sign(&mut self, blockhash: Hash);
-    fn send<C: BenchTpsClient + ?Sized>(&self, client: &Arc<C>);
-    fn verify<C: 'static + BenchTpsClient + Send + Sync + ?Sized>(
+    fn send<C: TpsClient + ?Sized>(&self, client: &Arc<C>);
+    fn verify<C: 'static + TpsClient + Send + Sync + ?Sized>(
         &mut self,
         client: &Arc<C>,
         to_lamports: u64,
@@ -211,7 +211,7 @@ where
 
     fn send_transactions<C, F>(&mut self, client: &Arc<C>, to_lamports: u64, log_progress: F)
     where
-        C: 'static + BenchTpsClient + Send + Sync + ?Sized,
+        C: 'static + TpsClient + Send + Sync + ?Sized,
         F: Fn(usize, usize),
     {
         let mut tries: usize = 0;
@@ -245,7 +245,7 @@ where
         debug!("sign {} txs: {}us", self.len(), sign_txs.as_us());
     }
 
-    fn send<C: BenchTpsClient + ?Sized>(&self, client: &Arc<C>) {
+    fn send<C: TpsClient + ?Sized>(&self, client: &Arc<C>) {
         let mut send_txs = Measure::start("send_and_clone_txs");
         let batch: Vec<_> = self.iter().map(|(_keypair, tx)| tx.clone()).collect();
         let result = client.send_batch(batch);
@@ -257,7 +257,7 @@ where
         }
     }
 
-    fn verify<C: 'static + BenchTpsClient + Send + Sync + ?Sized>(
+    fn verify<C: 'static + TpsClient + Send + Sync + ?Sized>(
         &mut self,
         client: &Arc<C>,
         to_lamports: u64,
@@ -349,28 +349,30 @@ impl<'a> Sliceable for FundingSigners<'a> {
 }
 
 trait FundingTransactions<'a>: SendBatchTransactions<'a, FundingSigners<'a>> {
-    fn fund<T: 'static + BenchTpsClient + Send + Sync + ?Sized>(
+    fn fund<T: 'static + TpsClient + Send + Sync + ?Sized>(
         &mut self,
         client: &Arc<T>,
         to_fund: &FundingChunk<'a>,
         to_lamports: u64,
-        data_size_limit: u32,
+        data_size_limit: Option<u32>,
     );
 }
 
 impl<'a> FundingTransactions<'a> for FundingContainer<'a> {
-    fn fund<T: 'static + BenchTpsClient + Send + Sync + ?Sized>(
+    fn fund<T: 'static + TpsClient + Send + Sync + ?Sized>(
         &mut self,
         client: &Arc<T>,
         to_fund: &FundingChunk<'a>,
         to_lamports: u64,
-        data_size_limit: u32,
+        data_size_limit: Option<u32>,
     ) {
         self.make(to_fund, |(k, t)| -> (FundingSigners<'a>, Transaction) {
             let mut instructions = system_instruction::transfer_many(&k.pubkey(), t);
-            instructions.push(
-                ComputeBudgetInstruction::set_loaded_accounts_data_size_limit(data_size_limit),
-            );
+            if let Some(data_size_limit) = data_size_limit {
+                instructions.push(
+                    ComputeBudgetInstruction::set_loaded_accounts_data_size_limit(data_size_limit),
+                );
+            }
             let message = Message::new(&instructions, Some(&k.pubkey()));
             (*k, Transaction::new_unsigned(message))
         });
@@ -409,7 +411,7 @@ impl<'a> Sliceable for NonceCreateSigners<'a> {
 }
 
 trait NonceTransactions<'a>: SendBatchTransactions<'a, NonceCreateSigners<'a>> {
-    fn create_accounts<T: 'static + BenchTpsClient + Send + Sync + ?Sized>(
+    fn create_accounts<T: 'static + TpsClient + Send + Sync + ?Sized>(
         &mut self,
         client: &Arc<T>,
         to_fund: &'a NonceCreateChunk<'a>,
@@ -418,7 +420,7 @@ trait NonceTransactions<'a>: SendBatchTransactions<'a, NonceCreateSigners<'a>> {
 }
 
 impl<'a> NonceTransactions<'a> for NonceCreateContainer<'a> {
-    fn create_accounts<T: 'static + BenchTpsClient + Send + Sync + ?Sized>(
+    fn create_accounts<T: 'static + TpsClient + Send + Sync + ?Sized>(
         &mut self,
         client: &Arc<T>,
         to_fund: &'a NonceCreateChunk<'a>,
@@ -466,14 +468,14 @@ impl<'a> Sliceable for NonceWithdrawSigners<'a> {
 }
 
 trait NonceWithdrawTransactions<'a>: SendBatchTransactions<'a, NonceWithdrawSigners<'a>> {
-    fn withdraw_accounts<T: 'static + BenchTpsClient + Send + Sync + ?Sized>(
+    fn withdraw_accounts<T: 'static + TpsClient + Send + Sync + ?Sized>(
         &mut self,
         client: &Arc<T>,
         to_withdraw: &'a NonceWithdrawChunk<'a>,
     );
 }
 impl<'a> NonceWithdrawTransactions<'a> for NonceWithdrawContainer<'a> {
-    fn withdraw_accounts<T: 'static + BenchTpsClient + Send + Sync + ?Sized>(
+    fn withdraw_accounts<T: 'static + TpsClient + Send + Sync + ?Sized>(
         &mut self,
         client: &Arc<T>,
         to_withdraw: &'a NonceWithdrawChunk<'a>,

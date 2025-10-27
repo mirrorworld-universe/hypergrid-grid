@@ -1,22 +1,26 @@
 #![allow(clippy::arithmetic_side_effects)]
-#![allow(deprecated)]
 use {
     bip39::{Mnemonic, MnemonicType, Seed},
-    clap::{crate_description, crate_name, value_parser, Arg, ArgMatches, Command},
+    clap::{
+        builder::ValueParser, crate_description, crate_name, value_parser, Arg, ArgAction,
+        ArgMatches, Command,
+    },
     solana_clap_v3_utils::{
-        input_parsers::STDOUT_OUTFILE_TOKEN,
-        input_validators::is_prompt_signer_source,
+        input_parsers::{
+            signer::{SignerSource, SignerSourceParserBuilder},
+            STDOUT_OUTFILE_TOKEN,
+        },
         keygen::{
             check_for_overwrite,
             derivation_path::{acquire_derivation_path, derivation_path_arg},
             mnemonic::{
-                acquire_language, acquire_passphrase_and_message, no_passphrase_and_message,
-                WORD_COUNT_ARG,
+                acquire_passphrase_and_message, no_passphrase_and_message, try_get_language,
+                try_get_word_count,
             },
             no_outfile_arg, KeyGenerationCommonArgs, NO_OUTFILE_ARG,
         },
         keypair::{
-            keypair_from_path, keypair_from_seed_phrase, signer_from_path,
+            keypair_from_seed_phrase, keypair_from_source, signer_from_source,
             SKIP_SEED_PHRASE_VALIDATION_ARG,
         },
         DisplayError,
@@ -26,7 +30,7 @@ use {
     solana_sdk::{
         instruction::{AccountMeta, Instruction},
         message::Message,
-        pubkey::{write_pubkey_file, Pubkey},
+        pubkey::Pubkey,
         signature::{
             keypair_from_seed, keypair_from_seed_and_derivation_path, write_keypair,
             write_keypair_file, Keypair, Signer,
@@ -46,9 +50,10 @@ use {
 };
 
 mod smallest_length_44_public_key {
-    use solana_sdk::{pubkey, pubkey::Pubkey};
+    use solana_sdk::pubkey::Pubkey;
 
-    pub(super) static PUBKEY: Pubkey = pubkey!("21111111111111111111111111111111111111111111");
+    pub(super) static PUBKEY: Pubkey =
+        Pubkey::from_str_const("21111111111111111111111111111111111111111111");
 
     #[test]
     fn assert_length() {
@@ -63,21 +68,57 @@ struct GrindMatch {
     count: AtomicU64,
 }
 
+#[derive(Debug, Clone)]
+enum GrindType {
+    Starts,
+    Ends,
+    StartsAndEnds,
+}
+
+fn grind_parser(grind_type: GrindType) -> ValueParser {
+    ValueParser::from(move |v: &str| -> Result<String, String> {
+        let (required_div_count, prefix_suffix) = match grind_type {
+            GrindType::Starts => (1, "PREFIX"),
+            GrindType::Ends => (1, "SUFFIX"),
+            GrindType::StartsAndEnds => (2, "PREFIX and SUFFIX"),
+        };
+        if v.matches(':').count() != required_div_count || (v.starts_with(':') || v.ends_with(':'))
+        {
+            return Err(format!("Expected : between {} and COUNT", prefix_suffix));
+        }
+        // `args` is guaranteed to have length at least 1 by the previous if statement
+        let mut args: Vec<&str> = v.split(':').collect();
+        let count = args.pop().unwrap().parse::<u64>();
+        for arg in args.iter() {
+            bs58::decode(arg)
+                .into_vec()
+                .map_err(|err| format!("{}: {:?}", args[0], err))?;
+        }
+        if count.is_err() || count.unwrap() == 0 {
+            return Err(String::from("Expected COUNT to be of type u64"));
+        }
+        Ok(v.to_string())
+    })
+}
+
 fn get_keypair_from_matches(
     matches: &ArgMatches,
     config: Config,
     wallet_manager: &mut Option<Rc<RemoteWalletManager>>,
 ) -> Result<Box<dyn Signer>, Box<dyn error::Error>> {
-    let mut path = dirs_next::home_dir().expect("home directory");
-    let path = if matches.is_present("keypair") {
-        matches.value_of("keypair").unwrap()
+    let config_source;
+    let keypair_source = if matches.try_contains_id("keypair")? {
+        matches.get_one::<SignerSource>("keypair").unwrap()
     } else if !config.keypair_path.is_empty() {
-        &config.keypair_path
+        config_source = SignerSource::parse(&config.keypair_path)?;
+        &config_source
     } else {
+        let mut path = dirs_next::home_dir().expect("home directory");
         path.extend([".config", "solana", "id.json"]);
-        path.to_str().unwrap()
+        config_source = SignerSource::parse(path.to_str().unwrap())?;
+        &config_source
     };
-    signer_from_path(matches, path, "pubkey recovery", wallet_manager)
+    signer_from_source(matches, keypair_source, "pubkey recovery", wallet_manager)
 }
 
 fn output_keypair(
@@ -91,56 +132,6 @@ fn output_keypair(
     } else {
         write_keypair_file(keypair, outfile)?;
         println!("Wrote {source} keypair to {outfile}");
-    }
-    Ok(())
-}
-
-fn grind_validator_starts_with(v: &str) -> Result<(), String> {
-    if v.matches(':').count() != 1 || (v.starts_with(':') || v.ends_with(':')) {
-        return Err(String::from("Expected : between PREFIX and COUNT"));
-    }
-    let args: Vec<&str> = v.split(':').collect();
-    bs58::decode(&args[0])
-        .into_vec()
-        .map_err(|err| format!("{}: {:?}", args[0], err))?;
-    let count = args[1].parse::<u64>();
-    if count.is_err() || count.unwrap() == 0 {
-        return Err(String::from("Expected COUNT to be of type u64"));
-    }
-    Ok(())
-}
-
-fn grind_validator_ends_with(v: &str) -> Result<(), String> {
-    if v.matches(':').count() != 1 || (v.starts_with(':') || v.ends_with(':')) {
-        return Err(String::from("Expected : between SUFFIX and COUNT"));
-    }
-    let args: Vec<&str> = v.split(':').collect();
-    bs58::decode(&args[0])
-        .into_vec()
-        .map_err(|err| format!("{}: {:?}", args[0], err))?;
-    let count = args[1].parse::<u64>();
-    if count.is_err() || count.unwrap() == 0 {
-        return Err(String::from("Expected COUNT to be of type u64"));
-    }
-    Ok(())
-}
-
-fn grind_validator_starts_and_ends_with(v: &str) -> Result<(), String> {
-    if v.matches(':').count() != 2 || (v.starts_with(':') || v.ends_with(':')) {
-        return Err(String::from(
-            "Expected : between PREFIX and SUFFIX and COUNT",
-        ));
-    }
-    let args: Vec<&str> = v.split(':').collect();
-    bs58::decode(&args[0])
-        .into_vec()
-        .map_err(|err| format!("{}: {:?}", args[0], err))?;
-    bs58::decode(&args[1])
-        .into_vec()
-        .map_err(|err| format!("{}: {:?}", args[1], err))?;
-    let count = args[2].parse::<u64>();
-    if count.is_err() || count.unwrap() == 0 {
-        return Err(String::from("Expected COUNT to be a u64"));
     }
     Ok(())
 }
@@ -258,6 +249,9 @@ fn app<'a>(num_threads: &'a str, crate_version: &'a str) -> Command<'a> {
                         .index(2)
                         .value_name("KEYPAIR")
                         .takes_value(true)
+                        .value_parser(
+                            SignerSourceParserBuilder::default().allow_all().build()
+                        )
                         .help("Filepath or URL to a keypair"),
                 )
         )
@@ -308,9 +302,9 @@ fn app<'a>(num_threads: &'a str, crate_version: &'a str) -> Command<'a> {
                         .value_name("PREFIX:COUNT")
                         .number_of_values(1)
                         .takes_value(true)
-                        .multiple_occurrences(true)
+                        .action(ArgAction::Append)
                         .multiple_values(true)
-                        .validator(grind_validator_starts_with)
+                        .value_parser(grind_parser(GrindType::Starts))
                         .help("Saves specified number of keypairs whos public key starts with the indicated prefix\nExample: --starts-with sol:4\nPREFIX type is Base58\nCOUNT type is u64"),
                 )
                 .arg(
@@ -319,9 +313,9 @@ fn app<'a>(num_threads: &'a str, crate_version: &'a str) -> Command<'a> {
                         .value_name("SUFFIX:COUNT")
                         .number_of_values(1)
                         .takes_value(true)
-                        .multiple_occurrences(true)
+                        .action(ArgAction::Append)
                         .multiple_values(true)
-                        .validator(grind_validator_ends_with)
+                        .value_parser(grind_parser(GrindType::Ends))
                         .help("Saves specified number of keypairs whos public key ends with the indicated suffix\nExample: --ends-with ana:4\nSUFFIX type is Base58\nCOUNT type is u64"),
                 )
                 .arg(
@@ -330,10 +324,10 @@ fn app<'a>(num_threads: &'a str, crate_version: &'a str) -> Command<'a> {
                         .value_name("PREFIX:SUFFIX:COUNT")
                         .number_of_values(1)
                         .takes_value(true)
-                        .multiple_occurrences(true)
+                        .action(ArgAction::Append)
                         .multiple_values(true)
-                        .validator(grind_validator_starts_and_ends_with)
-                        .help("Saves specified number of keypairs whos public key starts and ends with the indicated perfix and suffix\nExample: --starts-and-ends-with sol:ana:4\nPREFIX and SUFFIX type is Base58\nCOUNT type is u64"),
+                        .value_parser(grind_parser(GrindType::StartsAndEnds))
+                        .help("Saves specified number of keypairs whos public key starts and ends with the indicated prefix and suffix\nExample: --starts-and-ends-with sol:ana:4\nPREFIX and SUFFIX type is Base58\nCOUNT type is u64"),
                 )
                 .arg(
                     Arg::new("num_threads")
@@ -370,6 +364,9 @@ fn app<'a>(num_threads: &'a str, crate_version: &'a str) -> Command<'a> {
                         .index(1)
                         .value_name("KEYPAIR")
                         .takes_value(true)
+                        .value_parser(
+                            SignerSourceParserBuilder::default().allow_all().build()
+                        )
                         .help("Filepath or URL to a keypair"),
                 )
                 .arg(
@@ -401,7 +398,7 @@ fn app<'a>(num_threads: &'a str, crate_version: &'a str) -> Command<'a> {
                         .index(1)
                         .value_name("KEYPAIR")
                         .takes_value(true)
-                        .validator(is_prompt_signer_source)
+                        .value_parser(SignerSourceParserBuilder::default().allow_prompt().allow_legacy().build())
                         .help("`prompt:` URI scheme or `ASK` keyword"),
                 )
                 .arg(
@@ -427,6 +424,21 @@ fn app<'a>(num_threads: &'a str, crate_version: &'a str) -> Command<'a> {
         )
 }
 
+fn write_pubkey_file(outfile: &str, pubkey: Pubkey) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write;
+
+    let printable = format!("{pubkey}");
+    let serialized = serde_json::to_string(&printable)?;
+
+    if let Some(outdir) = std::path::Path::new(&outfile).parent() {
+        std::fs::create_dir_all(outdir)?;
+    }
+    let mut f = std::fs::File::create(outfile)?;
+    f.write_all(&serialized.into_bytes())?;
+
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn error::Error>> {
     let default_num_threads = num_cpus::get().to_string();
     let matches = app(&default_num_threads, solana_version::version!())
@@ -436,7 +448,7 @@ fn main() -> Result<(), Box<dyn error::Error>> {
 }
 
 fn do_main(matches: &ArgMatches) -> Result<(), Box<dyn error::Error>> {
-    let config = if let Some(config_file) = matches.value_of("config_file") {
+    let config = if let Some(config_file) = matches.try_get_one::<String>("config_file")? {
         Config::load(config_file).unwrap_or_default()
     } else {
         Config::default()
@@ -451,8 +463,8 @@ fn do_main(matches: &ArgMatches) -> Result<(), Box<dyn error::Error>> {
             let pubkey =
                 get_keypair_from_matches(matches, config, &mut wallet_manager)?.try_pubkey()?;
 
-            if matches.is_present("outfile") {
-                let outfile = matches.value_of("outfile").unwrap();
+            if matches.try_contains_id("outfile")? {
+                let outfile = matches.get_one::<String>("outfile").unwrap();
                 check_for_overwrite(outfile, matches)?;
                 write_pubkey_file(outfile, pubkey)?;
             } else {
@@ -461,9 +473,9 @@ fn do_main(matches: &ArgMatches) -> Result<(), Box<dyn error::Error>> {
         }
         ("new", matches) => {
             let mut path = dirs_next::home_dir().expect("home directory");
-            let outfile = if matches.is_present("outfile") {
-                matches.value_of("outfile")
-            } else if matches.is_present(NO_OUTFILE_ARG.name) {
+            let outfile = if matches.try_contains_id("outfile")? {
+                matches.get_one::<String>("outfile").map(|s| s.as_str())
+            } else if matches.try_contains_id(NO_OUTFILE_ARG.name)? {
                 None
             } else {
                 path.extend([".config", "solana", "id.json"]);
@@ -476,11 +488,11 @@ fn do_main(matches: &ArgMatches) -> Result<(), Box<dyn error::Error>> {
                 None => (),
             }
 
-            let word_count: usize = matches.value_of_t(WORD_COUNT_ARG.name).unwrap();
+            let word_count = try_get_word_count(matches)?.unwrap();
             let mnemonic_type = MnemonicType::for_word_count(word_count)?;
-            let language = acquire_language(matches);
+            let language = try_get_language(matches)?.unwrap();
 
-            let silent = matches.is_present("silent");
+            let silent = matches.try_contains_id("silent")?;
             if !silent {
                 println!("Generating a new keypair");
             }
@@ -488,7 +500,8 @@ fn do_main(matches: &ArgMatches) -> Result<(), Box<dyn error::Error>> {
             let derivation_path = acquire_derivation_path(matches)?;
 
             let mnemonic = Mnemonic::new(mnemonic_type, language);
-            let (passphrase, passphrase_message) = acquire_passphrase_and_message(matches).unwrap();
+            let (passphrase, passphrase_message) = acquire_passphrase_and_message(matches)
+                .map_err(|err| format!("Unable to acquire passphrase: {err}"))?;
 
             let seed = Seed::new(&mnemonic, &passphrase);
             let keypair = match derivation_path {
@@ -512,8 +525,8 @@ fn do_main(matches: &ArgMatches) -> Result<(), Box<dyn error::Error>> {
         }
         ("recover", matches) => {
             let mut path = dirs_next::home_dir().expect("home directory");
-            let outfile = if matches.is_present("outfile") {
-                matches.value_of("outfile").unwrap()
+            let outfile = if matches.try_contains_id("outfile")? {
+                matches.get_one::<String>("outfile").unwrap()
             } else {
                 path.extend([".config", "solana", "id.json"]);
                 path.to_str().unwrap()
@@ -524,40 +537,60 @@ fn do_main(matches: &ArgMatches) -> Result<(), Box<dyn error::Error>> {
             }
 
             let keypair_name = "recover";
-            let keypair = if let Some(path) = matches.value_of("prompt_signer") {
-                keypair_from_path(matches, path, keypair_name, true)?
-            } else {
-                let skip_validation = matches.is_present(SKIP_SEED_PHRASE_VALIDATION_ARG.name);
-                keypair_from_seed_phrase(keypair_name, skip_validation, true, None, true)?
-            };
+            let keypair =
+                if let Some(source) = matches.try_get_one::<SignerSource>("prompt_signer")? {
+                    keypair_from_source(matches, source, keypair_name, true)?
+                } else {
+                    let skip_validation =
+                        matches.try_contains_id(SKIP_SEED_PHRASE_VALIDATION_ARG.name)?;
+                    keypair_from_seed_phrase(keypair_name, skip_validation, true, None, true)?
+                };
             output_keypair(&keypair, outfile, "recovered")?;
         }
         ("grind", matches) => {
-            let ignore_case = matches.is_present("ignore_case");
+            let ignore_case = matches.try_contains_id("ignore_case")?;
 
-            let starts_with_args = if matches.is_present("starts_with") {
+            let starts_with_args = if matches.try_contains_id("starts_with")? {
                 matches
-                    .values_of_t_or_exit::<String>("starts_with")
-                    .into_iter()
-                    .map(|s| if ignore_case { s.to_lowercase() } else { s })
+                    .get_many::<String>("starts_with")
+                    .unwrap()
+                    .map(|s| {
+                        if ignore_case {
+                            s.to_lowercase()
+                        } else {
+                            s.to_owned()
+                        }
+                    })
                     .collect()
             } else {
                 HashSet::new()
             };
-            let ends_with_args = if matches.is_present("ends_with") {
+            let ends_with_args = if matches.try_contains_id("ends_with")? {
                 matches
-                    .values_of_t_or_exit::<String>("ends_with")
-                    .into_iter()
-                    .map(|s| if ignore_case { s.to_lowercase() } else { s })
+                    .get_many::<String>("ends_with")
+                    .unwrap()
+                    .map(|s| {
+                        if ignore_case {
+                            s.to_lowercase()
+                        } else {
+                            s.to_owned()
+                        }
+                    })
                     .collect()
             } else {
                 HashSet::new()
             };
-            let starts_and_ends_with_args = if matches.is_present("starts_and_ends_with") {
+            let starts_and_ends_with_args = if matches.try_contains_id("starts_and_ends_with")? {
                 matches
-                    .values_of_t_or_exit::<String>("starts_and_ends_with")
-                    .into_iter()
-                    .map(|s| if ignore_case { s.to_lowercase() } else { s })
+                    .get_many::<String>("starts_and_ends_with")
+                    .unwrap()
+                    .map(|s| {
+                        if ignore_case {
+                            s.to_lowercase()
+                        } else {
+                            s.to_owned()
+                        }
+                    })
                     .collect()
             } else {
                 HashSet::new()
@@ -582,20 +615,20 @@ fn do_main(matches: &ArgMatches) -> Result<(), Box<dyn error::Error>> {
                 num_threads,
             );
 
-            let use_mnemonic = matches.is_present("use_mnemonic");
+            let use_mnemonic = matches.try_contains_id("use_mnemonic")?;
 
             let derivation_path = acquire_derivation_path(matches)?;
 
-            let word_count: usize = matches.value_of_t(WORD_COUNT_ARG.name).unwrap();
+            let word_count = try_get_word_count(matches)?.unwrap();
             let mnemonic_type = MnemonicType::for_word_count(word_count)?;
-            let language = acquire_language(matches);
+            let language = try_get_language(matches)?.unwrap();
 
             let (passphrase, passphrase_message) = if use_mnemonic {
                 acquire_passphrase_and_message(matches).unwrap()
             } else {
                 no_passphrase_and_message()
             };
-            let no_outfile = matches.is_present(NO_OUTFILE_ARG.name);
+            let no_outfile = matches.try_contains_id(NO_OUTFILE_ARG.name)?;
 
             // The vast majority of base58 encoded public keys have length 44, but
             // these only encapsulate prefixes 1-9 and A-H.  If the user is searching
@@ -686,7 +719,7 @@ fn do_main(matches: &ArgMatches) -> Result<(), Box<dyn error::Error>> {
                                     .count
                                     .fetch_sub(1, Ordering::Relaxed);
                                 if !no_outfile {
-                                    write_keypair_file(&keypair, &format!("{}.json", keypair.pubkey()))
+                                    write_keypair_file(&keypair, format!("{}.json", keypair.pubkey()))
                                     .unwrap();
                                     println!(
                                         "Wrote keypair to {}",
@@ -728,7 +761,7 @@ fn do_main(matches: &ArgMatches) -> Result<(), Box<dyn error::Error>> {
             )
             .serialize();
             let signature = keypair.try_sign_message(&simple_message)?;
-            let pubkey_bs58 = matches.value_of("pubkey").unwrap();
+            let pubkey_bs58 = matches.try_get_one::<String>("pubkey")?.unwrap();
             let pubkey = bs58::decode(pubkey_bs58).into_vec().unwrap();
             if signature.verify(&pubkey, &simple_message) {
                 println!("Verification for public key: {pubkey_bs58}: Success");
@@ -749,6 +782,14 @@ mod tests {
         super::*,
         tempfile::{tempdir, TempDir},
     };
+
+    fn read_pubkey_file(infile: &str) -> Result<Pubkey, Box<dyn std::error::Error>> {
+        let f = std::fs::File::open(infile)?;
+        let printable: String = serde_json::from_reader(f)?;
+
+        use std::str::FromStr;
+        Ok(Pubkey::from_str(&printable)?)
+    }
 
     fn process_test_command(args: &[&str]) -> Result<(), Box<dyn error::Error>> {
         let default_num_threads = num_cpus::get().to_string();
@@ -901,7 +942,7 @@ mod tests {
             ])
             .unwrap();
 
-            let result_pubkey = solana_sdk::pubkey::read_pubkey_file(&outfile_path).unwrap();
+            let result_pubkey = read_pubkey_file(&outfile_path).unwrap();
             assert_eq!(result_pubkey, expected_pubkey);
         }
 
@@ -920,7 +961,7 @@ mod tests {
             ])
             .unwrap();
 
-            let result_pubkey = solana_sdk::pubkey::read_pubkey_file(&outfile_path).unwrap();
+            let result_pubkey = read_pubkey_file(&outfile_path).unwrap();
             assert_eq!(result_pubkey, expected_pubkey);
         }
 
@@ -944,7 +985,7 @@ mod tests {
             ])
             .unwrap();
 
-            let result_pubkey = solana_sdk::pubkey::read_pubkey_file(&outfile_path).unwrap();
+            let result_pubkey = read_pubkey_file(&outfile_path).unwrap();
             assert_eq!(result_pubkey, expected_pubkey);
         }
 
@@ -1110,5 +1151,16 @@ mod tests {
             "b:1",
         ])
         .unwrap();
+    }
+
+    #[test]
+    fn test_read_write_pubkey() -> Result<(), std::boxed::Box<dyn std::error::Error>> {
+        let filename = "test_pubkey.json";
+        let pubkey = solana_sdk::pubkey::new_rand();
+        write_pubkey_file(filename, pubkey)?;
+        let read = read_pubkey_file(filename)?;
+        assert_eq!(read, pubkey);
+        std::fs::remove_file(filename)?;
+        Ok(())
     }
 }

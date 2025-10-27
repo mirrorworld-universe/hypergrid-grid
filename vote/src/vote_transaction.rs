@@ -1,15 +1,14 @@
-use {
-    solana_sdk::{
-        clock::{Slot, UnixTimestamp},
-        hash::Hash,
-    },
-    solana_vote_program::vote_state::{Vote, VoteStateUpdate},
+use solana_sdk::{
+    clock::{Slot, UnixTimestamp},
+    hash::Hash,
+    vote::state::{TowerSync, Vote, VoteStateUpdate},
 };
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum VoteTransaction {
     Vote(Vote),
     VoteStateUpdate(VoteStateUpdate),
+    TowerSync(TowerSync),
 }
 
 impl VoteTransaction {
@@ -21,6 +20,7 @@ impl VoteTransaction {
                 .iter()
                 .map(|lockout| lockout.slot())
                 .collect(),
+            VoteTransaction::TowerSync(tower_sync) => tower_sync.slots(),
         }
     }
 
@@ -30,6 +30,7 @@ impl VoteTransaction {
             VoteTransaction::VoteStateUpdate(vote_state_update) => {
                 vote_state_update.lockouts.is_empty()
             }
+            VoteTransaction::TowerSync(tower_sync) => tower_sync.lockouts.is_empty(),
         }
     }
 
@@ -37,6 +38,7 @@ impl VoteTransaction {
         match self {
             VoteTransaction::Vote(vote) => vote.hash,
             VoteTransaction::VoteStateUpdate(vote_state_update) => vote_state_update.hash,
+            VoteTransaction::TowerSync(tower_sync) => tower_sync.hash,
         }
     }
 
@@ -44,6 +46,7 @@ impl VoteTransaction {
         match self {
             VoteTransaction::Vote(vote) => vote.timestamp,
             VoteTransaction::VoteStateUpdate(vote_state_update) => vote_state_update.timestamp,
+            VoteTransaction::TowerSync(tower_sync) => tower_sync.timestamp,
         }
     }
 
@@ -53,11 +56,19 @@ impl VoteTransaction {
             VoteTransaction::VoteStateUpdate(vote_state_update) => {
                 Some(vote_state_update.lockouts.back()?.slot())
             }
+            VoteTransaction::TowerSync(tower_sync) => tower_sync.last_voted_slot(),
         }
     }
 
     pub fn last_voted_slot_hash(&self) -> Option<(Slot, Hash)> {
         Some((self.last_voted_slot()?, self.hash()))
+    }
+
+    pub fn is_full_tower_vote(&self) -> bool {
+        matches!(
+            self,
+            VoteTransaction::VoteStateUpdate(_) | VoteTransaction::TowerSync(_)
+        )
     }
 }
 
@@ -70,5 +81,11 @@ impl From<Vote> for VoteTransaction {
 impl From<VoteStateUpdate> for VoteTransaction {
     fn from(vote_state_update: VoteStateUpdate) -> Self {
         VoteTransaction::VoteStateUpdate(vote_state_update)
+    }
+}
+
+impl From<TowerSync> for VoteTransaction {
+    fn from(tower_sync: TowerSync) -> Self {
+        VoteTransaction::TowerSync(tower_sync)
     }
 }

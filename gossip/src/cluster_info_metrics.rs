@@ -129,6 +129,7 @@ pub struct GossipStats {
     pub(crate) new_push_requests2: Counter,
     pub(crate) new_push_requests: Counter,
     pub(crate) new_push_requests_num: Counter,
+    pub(crate) num_unverifed_gossip_addrs: Counter,
     pub(crate) packets_received_count: Counter,
     pub(crate) packets_received_ping_messages_count: Counter,
     pub(crate) packets_received_pong_messages_count: Counter,
@@ -145,14 +146,12 @@ pub struct GossipStats {
     pub(crate) packets_sent_push_messages_count: Counter,
     pub(crate) process_gossip_packets_time: Counter,
     pub(crate) process_prune: Counter,
-    pub(crate) process_pull_requests: Counter,
     pub(crate) process_pull_response: Counter,
     pub(crate) process_pull_response_count: Counter,
     pub(crate) process_pull_response_fail_insert: Counter,
     pub(crate) process_pull_response_fail_timeout: Counter,
     pub(crate) process_pull_response_len: Counter,
     pub(crate) process_pull_response_success: Counter,
-    pub(crate) process_pull_response_timeout: Counter,
     pub(crate) process_push_message: Counter,
     pub(crate) prune_message_count: Counter,
     pub(crate) prune_message_len: Counter,
@@ -311,8 +310,8 @@ pub(crate) fn submit_gossip_stats(
             i64
         ),
         (
-            "process_pull_resp_timeout",
-            stats.process_pull_response_timeout.clear(),
+            "num_redundant_pull_responses",
+            crds_stats.num_redundant_pull_responses,
             i64
         ),
         (
@@ -326,11 +325,6 @@ pub(crate) fn submit_gossip_stats(
         (
             "process_pull_resp_len",
             stats.process_pull_response_len.clear(),
-            i64
-        ),
-        (
-            "process_pull_requests",
-            stats.process_pull_requests.clear(),
             i64
         ),
         (
@@ -430,6 +424,11 @@ pub(crate) fn submit_gossip_stats(
         ),
         ("push_message_count", stats.push_message_count.clear(), i64),
         (
+            "num_duplicate_push_messages",
+            crds_stats.num_duplicate_push_messages,
+            i64
+        ),
+        (
             "push_fanout_num_entries",
             stats.push_fanout_num_entries.clear(),
             i64
@@ -482,6 +481,11 @@ pub(crate) fn submit_gossip_stats(
         (
             "pull_requests_count",
             stats.pull_requests_count.clear(),
+            i64
+        ),
+        (
+            "num_unverifed_gossip_addrs",
+            stats.num_unverifed_gossip_addrs.clear(),
             i64
         ),
         (

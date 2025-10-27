@@ -2,7 +2,7 @@
 //! a server-side TPU.  Client code should use this object instead of writing
 //! messages to the network directly. The binary encoding of its messages are
 //! unstable and may change in future releases.
-
+#[allow(deprecated)]
 use {
     crate::connection_cache::{dispatch, ConnectionCache},
     solana_quic_client::{QuicConfig, QuicConnectionManager, QuicPool},
@@ -11,10 +11,8 @@ use {
     solana_sdk::{
         account::Account,
         client::{AsyncClient, Client, SyncClient},
-        clock::Slot,
         commitment_config::CommitmentConfig,
         epoch_info::EpochInfo,
-        fee_calculator::{FeeCalculator, FeeRateGovernor},
         hash::Hash,
         instruction::Instruction,
         message::Message,
@@ -32,11 +30,13 @@ use {
 /// A thin wrapper over thin-client/ThinClient to ease
 /// construction of the ThinClient for code dealing both with udp and quic.
 /// For the scenario only using udp or quic, use thin-client/ThinClient directly.
+#[allow(deprecated)]
 pub enum ThinClient {
     Quic(BackendThinClient<QuicPool, QuicConnectionManager, QuicConfig>),
     Udp(BackendThinClient<UdpPool, UdpConnectionManager, UdpConfig>),
 }
 
+#[allow(deprecated)]
 impl ThinClient {
     /// Create a new ThinClient that will interface with the Rpc at `rpc_addr` using TCP
     /// and the Tpu at `tpu_addr` over `transactions_socket` using Quic or UDP
@@ -211,20 +211,6 @@ impl SyncClient for ThinClient {
 
     dispatch!(fn get_minimum_balance_for_rent_exemption(&self, data_len: usize) -> TransportResult<u64>);
 
-    dispatch!(#[allow(deprecated)] fn get_recent_blockhash(&self) -> TransportResult<(Hash, FeeCalculator)>);
-
-    dispatch!(#[allow(deprecated)] fn get_recent_blockhash_with_commitment(
-        &self,
-        commitment_config: CommitmentConfig
-    ) -> TransportResult<(Hash, FeeCalculator, Slot)>);
-
-    dispatch!(#[allow(deprecated)] fn get_fee_calculator_for_blockhash(
-        &self,
-        blockhash: &Hash
-    ) -> TransportResult<Option<FeeCalculator>>);
-
-    dispatch!(#[allow(deprecated)] fn get_fee_rate_governor(&self) -> TransportResult<FeeRateGovernor>);
-
     dispatch!(fn get_signature_status(
         &self,
         signature: &Signature
@@ -259,8 +245,6 @@ impl SyncClient for ThinClient {
     ) -> TransportResult<usize>);
 
     dispatch!(fn poll_for_signature(&self, signature: &Signature) -> TransportResult<()>);
-
-    dispatch!(#[allow(deprecated)] fn get_new_blockhash(&self, blockhash: &Hash) -> TransportResult<(Hash, FeeCalculator)>);
 
     dispatch!(fn get_latest_blockhash(&self) -> TransportResult<Hash>);
 

@@ -1,8 +1,8 @@
 //! Vote program errors
 
 use {
-    crate::decode_error::DecodeError,
     num_derive::{FromPrimitive, ToPrimitive},
+    solana_decode_error::DecodeError,
     thiserror::Error,
 };
 
@@ -69,6 +69,9 @@ pub enum VoteError {
 
     #[error("Cannot update commission at this point in the epoch")]
     CommissionUpdateTooLate,
+
+    #[error("Assertion failed")]
+    AssertionFailed,
 }
 
 impl<E> DecodeError<E> for VoteError {

@@ -1,3 +1,5 @@
+#[cfg(feature = "dev-context-only-utils")]
+use qualifier_attr::qualifiers;
 use {
     crate::{
         consensus::{
@@ -12,10 +14,13 @@ use {
     std::collections::{BTreeMap, BTreeSet, HashMap},
 };
 
+#[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
 pub(crate) type DuplicateSlotsTracker = BTreeSet<Slot>;
 pub(crate) type DuplicateSlotsToRepair = HashMap<Slot, Hash>;
 pub(crate) type PurgeRepairSlotCounter = BTreeMap<Slot, usize>;
+#[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
 pub(crate) type EpochSlotsFrozenSlots = BTreeMap<Slot, Hash>;
+#[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
 pub(crate) type DuplicateConfirmedSlots = BTreeMap<Slot, Hash>;
 
 #[derive(PartialEq, Eq, Clone, Debug)]
@@ -451,8 +456,8 @@ fn check_epoch_slots_hash_against_bank_status(
             assert!(is_popular_pruned);
             // The cluster sample found the troublesome slot which caused this fork to be pruned
             warn!(
-                "EpochSlots sample returned slot {slot} with hash {epoch_slots_frozen_hash}, but we
-                have pruned it due to incorrect ancestry"
+                "EpochSlots sample returned slot {slot} with hash {epoch_slots_frozen_hash}, but \
+                 we have pruned it due to incorrect ancestry"
             );
         }
     }
@@ -639,8 +644,8 @@ fn on_epoch_slots_frozen(
         if let Some(duplicate_confirmed_hash) = duplicate_confirmed_hash {
             if epoch_slots_frozen_hash != duplicate_confirmed_hash {
                 warn!(
-                    "EpochSlots sample returned slot {} with hash {}, but we already saw
-                duplicate confirmation on hash: {:?}",
+                    "EpochSlots sample returned slot {} with hash {}, but we already saw \
+                     duplicate confirmation on hash: {:?}",
                     slot, epoch_slots_frozen_hash, duplicate_confirmed_hash
                 );
             }
@@ -671,9 +676,11 @@ fn on_epoch_slots_frozen(
 }
 
 fn on_popular_pruned_fork(slot: Slot) -> Vec<ResultingStateChange> {
-    warn!("{slot} is part of a pruned fork which has reached the DUPLICATE_THRESHOLD aggregating across descendants
-            and slot versions. It is suspected to be duplicate or have an ancestor that is duplicate.
-            Notifying ancestor_hashes_service");
+    warn!(
+        "{slot} is part of a pruned fork which has reached the DUPLICATE_THRESHOLD aggregating \
+         across descendants and slot versions. It is suspected to be duplicate or have an \
+         ancestor that is duplicate. Notifying ancestor_hashes_service"
+    );
     vec![ResultingStateChange::SendAncestorHashesReplayUpdate(
         AncestorHashesReplayUpdate::PopularPrunedFork(slot),
     )]

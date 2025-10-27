@@ -1,10 +1,17 @@
 use super::*;
+#[cfg(test)]
+use arbitrary::Arbitrary;
 
 // Offset used for VoteState version 1_14_11
 const DEFAULT_PRIOR_VOTERS_OFFSET: usize = 82;
 
-#[frozen_abi(digest = "CZTgLymuevXjAx6tM8X8T5J3MCx9AkEsFSmu4FJrEpkG")]
-#[derive(Debug, Default, Serialize, Deserialize, PartialEq, Eq, Clone, AbiExample)]
+#[cfg_attr(
+    feature = "frozen-abi",
+    frozen_abi(digest = "64duaG8iUgwmgMM9y1Pdi8S9jBGoPcjS5HrE8RRfsxJJ"),
+    derive(AbiExample)
+)]
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq, Eq, Clone)]
+#[cfg_attr(test, derive(Arbitrary))]
 pub struct VoteState1_14_11 {
     /// the node that votes in this account
     pub node_pubkey: Pubkey,
@@ -72,6 +79,49 @@ impl From<VoteState> for VoteState1_14_11 {
             prior_voters: vote_state.prior_voters,
             epoch_credits: vote_state.epoch_credits,
             last_timestamp: vote_state.last_timestamp,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_vote_deserialize_1_14_11() {
+        // base case
+        let target_vote_state = VoteState1_14_11::default();
+        let target_vote_state_versions = VoteStateVersions::V1_14_11(Box::new(target_vote_state));
+        let vote_state_buf = bincode::serialize(&target_vote_state_versions).unwrap();
+
+        let mut test_vote_state = MaybeUninit::uninit();
+        VoteState::deserialize_into_uninit(&vote_state_buf, &mut test_vote_state).unwrap();
+        let test_vote_state = unsafe { test_vote_state.assume_init() };
+
+        assert_eq!(
+            target_vote_state_versions.convert_to_current(),
+            test_vote_state
+        );
+
+        // variant
+        // provide 4x the minimum struct size in bytes to ensure we typically touch every field
+        let struct_bytes_x4 = std::mem::size_of::<VoteState1_14_11>() * 4;
+        for _ in 0..1000 {
+            let raw_data: Vec<u8> = (0..struct_bytes_x4).map(|_| rand::random::<u8>()).collect();
+            let mut unstructured = Unstructured::new(&raw_data);
+
+            let arbitrary_vote_state = VoteState1_14_11::arbitrary(&mut unstructured).unwrap();
+            let target_vote_state_versions =
+                VoteStateVersions::V1_14_11(Box::new(arbitrary_vote_state));
+
+            let vote_state_buf = bincode::serialize(&target_vote_state_versions).unwrap();
+            let target_vote_state = target_vote_state_versions.convert_to_current();
+
+            let mut test_vote_state = MaybeUninit::uninit();
+            VoteState::deserialize_into_uninit(&vote_state_buf, &mut test_vote_state).unwrap();
+            let test_vote_state = unsafe { test_vote_state.assume_init() };
+
+            assert_eq!(target_vote_state, test_vote_state);
         }
     }
 }
