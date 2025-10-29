@@ -33,6 +33,7 @@ solana-vote-program = { workspace = true }
 tempfile = { workspace = true }
 
 # Sonic:
+solana-program.workspace = true
 solana-inline-spl.workspace = true
 
 [dev-dependencies]

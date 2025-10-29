@@ -26,7 +26,7 @@ pub mod tests;
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
 // Sonic:
-use solana_sdk::sonic_account_migrater::{self, state::MigratedAccountsState};
+use solana_program::sonic_account_migrater::{self, state::MigratedAccountsState};
 use {
     crate::{
         account_info::{AccountInfo, Offset, StorageLocation},
@@ -2417,7 +2417,7 @@ impl AccountsDb {
                     }
                     info!("Sonic restore_remote_accounts: {item:?}");
 
-                    let solana_sdk::sonic_account_migrater::state::MigratedAccount {
+                    let solana_program::sonic_account_migrater::state::MigratedAccount {
                         address,
                         source,
                         slot,

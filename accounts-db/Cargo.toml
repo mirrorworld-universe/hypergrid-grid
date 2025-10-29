@@ -64,6 +64,7 @@ thiserror = { workspace = true }
 # Sonic:
 sonic-hypergrid = { workspace = true }
 solana-svm.workspace = true
+solana-program.workspace = true
 
 [lib]
 crate-type = ["lib"]

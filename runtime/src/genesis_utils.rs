@@ -1,3 +1,5 @@
+// Sonic:
+use solana_program::{sonic_account_migrater, sonic_fee_settlement};
 use {
     log::*,
     solana_feature_set::{FeatureSet, FEATURE_NAMES},
@@ -11,7 +13,6 @@ use {
         rent::Rent,
         signature::{Keypair, Signer},
         signer::SeedDerivable,
-        sonic_account_migrater, sonic_fee_settlement,
         stake::state::StakeStateV2,
         system_program,
     },

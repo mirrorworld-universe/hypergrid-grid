@@ -1,15 +1,13 @@
 use {
     solana_log_collector::ic_msg,
+    solana_program::sonic_account_migrater::{
+        instruction::ProgramInstruction,
+        migrated_accounts,
+        state::{MigratedAccount, MigratedAccountsState},
+    },
     solana_program_runtime::{declare_process_instruction, invoke_context::InvokeContext},
     solana_sdk::{
-        instruction::InstructionError,
-        program_utils::limited_deserialize,
-        pubkey::Pubkey,
-        sonic_account_migrater::{
-            instruction::ProgramInstruction,
-            migrated_accounts,
-            state::{MigratedAccount, MigratedAccountsState},
-        },
+        instruction::InstructionError, program_utils::limited_deserialize, pubkey::Pubkey,
     },
     std::collections::HashMap,
 };

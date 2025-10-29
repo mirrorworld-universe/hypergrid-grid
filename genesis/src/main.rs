@@ -1,6 +1,8 @@
 //! A command-line executable for generating the chain's genesis config.
 #![allow(clippy::arithmetic_side_effects)]
 
+// Sonic:
+use solana_program::{sonic_account_migrater, sonic_fee_settlement};
 use {
     base64::{prelude::BASE64_STANDARD, Engine},
     clap::{crate_description, crate_name, value_t, value_t_or_exit, App, Arg, ArgMatches},
@@ -40,7 +42,6 @@ use {
         rent::Rent,
         signature::{Keypair, Signer},
         signer::keypair::read_keypair_file,
-        sonic_account_migrater, sonic_fee_settlement,
         stake::state::StakeStateV2,
         system_program,
     },
