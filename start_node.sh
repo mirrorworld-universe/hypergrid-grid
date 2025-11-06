@@ -5,7 +5,7 @@ export SOLANA_RUN_SH_CLUSTER_TYPE=mainnet-beta
 export SONIC_FEE_MULTIPLIER=5000
 dataDir=$PWD
 
-./bin/solana-validator \
+./bin/agave-validator \
 	--identity $dataDir/config/validator-identity.json \
 	--vote-account $dataDir/config/validator-vote-account.json \
 	--ledger $dataDir/ledger \
