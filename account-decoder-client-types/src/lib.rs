@@ -22,6 +22,7 @@ pub struct UiAccount {
     pub executable: bool,
     pub rent_epoch: u64,
     pub space: Option<u64>,
+    #[serde(skip, default)]
     pub remote: bool, //Sonic: remote account
 }
 

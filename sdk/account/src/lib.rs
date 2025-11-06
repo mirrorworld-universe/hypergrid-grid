@@ -148,6 +148,7 @@ pub struct AccountSharedData {
     /// the epoch at which this account will next owe rent
     rent_epoch: Epoch,
     /// Sonic: whether this account is a native loader account
+    #[serde(skip, default)]
     pub remote: bool,
 }
 
