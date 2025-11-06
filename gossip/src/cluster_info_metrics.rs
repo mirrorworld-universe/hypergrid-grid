@@ -1,8 +1,10 @@
 use {
     crate::{crds_gossip::CrdsGossip, protocol::Protocol},
     itertools::Itertools,
+    solana_clock::Slot,
     solana_measure::measure::Measure,
-    solana_sdk::{clock::Slot, pubkey::Pubkey},
+    solana_pubkey::Pubkey,
+    solana_signature::Signature,
     std::{
         cmp::Reverse,
         collections::HashMap,
@@ -40,9 +42,6 @@ pub(crate) struct ScopedTimer<'a> {
 }
 
 impl<'a> From<&'a Counter> for ScopedTimer<'a> {
-    // Output should be assigned to a *named* variable, otherwise it is
-    // immediately dropped.
-    #[must_use]
     fn from(counter: &'a Counter) -> Self {
         Self {
             clock: Instant::now(),
@@ -108,9 +107,9 @@ pub struct GossipStats {
     pub(crate) gossip_pull_request_dropped_requests: Counter,
     pub(crate) gossip_pull_request_no_budget: Counter,
     pub(crate) gossip_pull_request_sent_bytes: Counter,
-    pub(crate) gossip_pull_request_sent_requests: Counter,
     pub(crate) gossip_transmit_loop_iterations_since_last_report: Counter,
     pub(crate) gossip_transmit_loop_time: Counter,
+    pub(crate) gossip_transmit_packets_dropped_count: Counter,
     pub(crate) handle_batch_ping_messages_time: Counter,
     pub(crate) handle_batch_pong_messages_time: Counter,
     pub(crate) handle_batch_prune_messages_time: Counter,
@@ -118,11 +117,8 @@ pub struct GossipStats {
     pub(crate) handle_batch_pull_responses_time: Counter,
     pub(crate) handle_batch_push_messages_time: Counter,
     pub(crate) new_pull_requests: Counter,
-    pub(crate) new_pull_requests_count: Counter,
-    pub(crate) new_pull_requests_pings_count: Counter,
     pub(crate) new_push_requests2: Counter,
     pub(crate) new_push_requests: Counter,
-    pub(crate) new_push_requests_num: Counter,
     pub(crate) num_unverifed_gossip_addrs: Counter,
     pub(crate) packets_received_count: Counter,
     packets_received_ping_messages_count: Counter,
@@ -133,11 +129,12 @@ pub struct GossipStats {
     packets_received_push_messages_count: Counter,
     packets_received_unknown_count: Counter,
     pub(crate) packets_received_verified_count: Counter,
-    pub(crate) packets_sent_gossip_requests_count: Counter,
-    pub(crate) packets_sent_prune_messages_count: Counter,
-    pub(crate) packets_sent_pull_requests_count: Counter,
-    pub(crate) packets_sent_pull_responses_count: Counter,
-    pub(crate) packets_sent_push_messages_count: Counter,
+    packets_sent_ping_messages_count: Counter,
+    packets_sent_pong_messages_count: Counter,
+    packets_sent_prune_messages_count: Counter,
+    packets_sent_pull_requests_count: Counter,
+    packets_sent_pull_responses_count: Counter,
+    packets_sent_push_messages_count: Counter,
     pub(crate) process_gossip_packets_time: Counter,
     pub(crate) process_prune: Counter,
     pub(crate) process_pull_response: Counter,
@@ -147,21 +144,16 @@ pub struct GossipStats {
     pub(crate) process_pull_response_len: Counter,
     pub(crate) process_pull_response_success: Counter,
     pub(crate) process_push_message: Counter,
-    pub(crate) prune_message_count: Counter,
     pub(crate) prune_message_len: Counter,
     pub(crate) prune_message_timeout: Counter,
     pub(crate) prune_received_cache: Counter,
     pub(crate) pull_from_entrypoint_count: Counter,
     pub(crate) pull_request_ping_pong_check_failed_count: Counter,
-    pub(crate) pull_requests_count: Counter,
     pub(crate) purge: Counter,
     pub(crate) purge_count: Counter,
     pub(crate) push_fanout_num_entries: Counter,
     pub(crate) push_fanout_num_nodes: Counter,
-    pub(crate) push_message_count: Counter,
-    pub(crate) push_message_pushes: Counter,
     pub(crate) push_message_value_count: Counter,
-    pub(crate) push_response_count: Counter,
     pub(crate) push_vote_read: Counter,
     pub(crate) repair_peers: Counter,
     pub(crate) save_contact_info_time: Counter,
@@ -177,6 +169,19 @@ pub struct GossipStats {
 }
 
 impl GossipStats {
+    #[inline]
+    pub(crate) fn record_gossip_packet(&self, protocol: &Protocol) {
+        match protocol {
+            Protocol::PushMessage(..) => &self.packets_sent_push_messages_count,
+            Protocol::PullRequest(..) => &self.packets_sent_pull_requests_count,
+            Protocol::PullResponse(..) => &self.packets_sent_pull_responses_count,
+            Protocol::PruneMessage(..) => &self.packets_sent_prune_messages_count,
+            Protocol::PingMessage(_) => &self.packets_sent_ping_messages_count,
+            Protocol::PongMessage(_) => &self.packets_sent_pong_messages_count,
+        }
+        .add_relaxed(1);
+    }
+
     #[inline]
     pub(crate) fn record_received_packet<E>(
         &self,
@@ -197,29 +202,6 @@ impl GossipStats {
         .add_relaxed(1);
         Some(protocol)
     }
-
-    // Updates metrics from count of dropped packets.
-    pub(crate) fn record_dropped_packets(&self, counts: &[u64; 7]) -> u64 {
-        let num_packets_dropped = counts.iter().sum::<u64>();
-        if num_packets_dropped > 0u64 {
-            self.gossip_packets_dropped_count
-                .add_relaxed(num_packets_dropped);
-            self.packets_received_pull_requests_count
-                .add_relaxed(counts[0]);
-            self.packets_received_pull_responses_count
-                .add_relaxed(counts[1]);
-            self.packets_received_push_messages_count
-                .add_relaxed(counts[2]);
-            self.packets_received_prune_messages_count
-                .add_relaxed(counts[3]);
-            self.packets_received_ping_messages_count
-                .add_relaxed(counts[4]);
-            self.packets_received_pong_messages_count
-                .add_relaxed(counts[5]);
-            self.packets_received_unknown_count.add_relaxed(counts[6]);
-        }
-        num_packets_dropped
-    }
 }
 
 pub(crate) fn submit_gossip_stats(
@@ -239,6 +221,17 @@ pub(crate) fn submit_gossip_stats(
         )
     };
     let num_nodes_staked = stakes.values().filter(|stake| **stake > 0).count();
+    let packets_sent_gossip_requests_count: u64 = [
+        &stats.packets_sent_ping_messages_count,
+        &stats.packets_sent_pong_messages_count,
+        &stats.packets_sent_prune_messages_count,
+        &stats.packets_sent_pull_requests_count,
+        &stats.packets_sent_pull_responses_count,
+        &stats.packets_sent_push_messages_count,
+    ]
+    .iter()
+    .map(|counter| counter.0.load(Ordering::Relaxed))
+    .sum();
     datapoint_info!(
         "cluster_info_stats",
         ("entrypoint", stats.entrypoint.clear(), i64),
@@ -248,11 +241,6 @@ pub(crate) fn submit_gossip_stats(
         ("get_votes_count", stats.get_votes_count.clear(), i64),
         ("all_tvu_peers", stats.all_tvu_peers.clear(), i64),
         ("tvu_peers", stats.tvu_peers.clear(), i64),
-        (
-            "new_push_requests_num",
-            stats.new_push_requests_num.clear(),
-            i64
-        ),
         ("table_size", table_size as i64, i64),
         ("purged_values_size", purged_values_size as i64, i64),
         ("failed_inserts_size", failed_inserts_size as i64, i64),
@@ -354,11 +342,6 @@ pub(crate) fn submit_gossip_stats(
             i64
         ),
         (
-            "push_response_count",
-            stats.push_response_count.clear(),
-            i64
-        ),
-        (
             "save_contact_info_time",
             stats.save_contact_info_time.clear(),
             i64
@@ -374,11 +357,6 @@ pub(crate) fn submit_gossip_stats(
         (
             "pull_request_ping_pong_check_failed_count",
             stats.pull_request_ping_pong_check_failed_count.clear(),
-            i64
-        ),
-        (
-            "new_pull_requests_pings_count",
-            stats.new_pull_requests_pings_count.clear(),
             i64
         ),
         (
@@ -415,11 +393,6 @@ pub(crate) fn submit_gossip_stats(
             i64
         ),
         (
-            "gossip_pull_request_sent_requests",
-            stats.gossip_pull_request_sent_requests.clear(),
-            i64
-        ),
-        (
             "gossip_pull_request_dropped_requests",
             stats.gossip_pull_request_dropped_requests.clear(),
             i64
@@ -432,6 +405,11 @@ pub(crate) fn submit_gossip_stats(
         (
             "gossip_transmit_loop_time",
             stats.gossip_transmit_loop_time.clear(),
+            i64
+        ),
+        (
+            "gossip_transmit_packets_dropped_count",
+            stats.gossip_transmit_packets_dropped_count.clear(),
             i64
         ),
         (
@@ -471,7 +449,6 @@ pub(crate) fn submit_gossip_stats(
             stats.skip_pull_shred_version.clear(),
             i64
         ),
-        ("push_message_count", stats.push_message_count.clear(), i64),
         (
             "num_duplicate_push_messages",
             crds_stats.num_duplicate_push_messages,
@@ -488,28 +465,13 @@ pub(crate) fn submit_gossip_stats(
             i64
         ),
         (
-            "push_message_pushes",
-            stats.push_message_pushes.clear(),
-            i64
-        ),
-        (
             "push_message_value_count",
             stats.push_message_value_count.clear(),
             i64
         ),
         (
-            "new_pull_requests_count",
-            stats.new_pull_requests_count.clear(),
-            i64
-        ),
-        (
             "pull_from_entrypoint_count",
             stats.pull_from_entrypoint_count.clear(),
-            i64
-        ),
-        (
-            "prune_message_count",
-            stats.prune_message_count.clear(),
             i64
         ),
         ("prune_message_len", stats.prune_message_len.clear(), i64),
@@ -527,11 +489,6 @@ pub(crate) fn submit_gossip_stats(
     );
     datapoint_info!(
         "cluster_info_stats5",
-        (
-            "pull_requests_count",
-            stats.pull_requests_count.clear(),
-            i64
-        ),
         (
             "num_unverifed_gossip_addrs",
             stats.num_unverifed_gossip_addrs.clear(),
@@ -584,7 +541,17 @@ pub(crate) fn submit_gossip_stats(
         ),
         (
             "packets_sent_gossip_requests_count",
-            stats.packets_sent_gossip_requests_count.clear(),
+            packets_sent_gossip_requests_count,
+            i64
+        ),
+        (
+            "packets_sent_ping_messages_count",
+            stats.packets_sent_ping_messages_count.clear(),
+            i64
+        ),
+        (
+            "packets_sent_pong_messages_count",
+            stats.packets_sent_pong_messages_count.clear(),
             i64
         ),
         (
@@ -737,4 +704,13 @@ where
     for (slot, num_votes) in votes.into_iter().take(NUM_SLOTS) {
         datapoint_trace!(name, ("slot", slot, i64), ("num_votes", num_votes, i64));
     }
+}
+
+/// check if first leading_zeros bits of signature are 0
+#[inline]
+pub(crate) fn should_report_message_signature(signature: &Signature, leading_zeros: u32) -> bool {
+    let Some(Ok(bytes)) = signature.as_ref().get(..8).map(<[u8; 8]>::try_from) else {
+        return false;
+    };
+    u64::from_le_bytes(bytes).trailing_zeros() >= leading_zeros
 }

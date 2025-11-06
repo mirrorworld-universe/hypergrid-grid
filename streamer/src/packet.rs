@@ -5,7 +5,7 @@ use {
         socket::SocketAddrSpace,
     },
     std::{
-        io::Result,
+        io::{ErrorKind, Result},
         net::UdpSocket,
         time::{Duration, Instant},
     },
@@ -13,11 +13,19 @@ use {
 pub use {
     solana_packet::{Meta, Packet, PACKET_DATA_SIZE},
     solana_perf::packet::{
-        to_packet_batches, PacketBatch, PacketBatchRecycler, NUM_PACKETS, PACKETS_PER_BATCH,
+        PacketBatch, PacketBatchRecycler, PacketRef, PacketRefMut, PinnedPacketBatch, NUM_PACKETS,
+        PACKETS_PER_BATCH,
     },
 };
 
-pub fn recv_from(batch: &mut PacketBatch, socket: &UdpSocket, max_wait: Duration) -> Result<usize> {
+pub(crate) fn recv_from(
+    batch: &mut PinnedPacketBatch,
+    socket: &UdpSocket,
+    // If max_wait is None, reads from the socket until either:
+    //   * 64 packets are read (NUM_RCVMMSGS == PACKETS_PER_BATCH == 64), or
+    //   * There are no more data available to read from the socket.
+    max_wait: Option<Duration>,
+) -> Result<usize> {
     let mut i = 0;
     //DOCUMENTED SIDE-EFFECT
     //Performance out of the IO without poll
@@ -27,15 +35,16 @@ pub fn recv_from(batch: &mut PacketBatch, socket: &UdpSocket, max_wait: Duration
     //  * set it back to blocking before returning
     socket.set_nonblocking(false)?;
     trace!("receiving on {}", socket.local_addr().unwrap());
-    let start = Instant::now();
+    let should_wait = max_wait.is_some();
+    let start = should_wait.then(Instant::now);
     loop {
         batch.resize(
             std::cmp::min(i + NUM_RCVMMSGS, PACKETS_PER_BATCH),
             Packet::default(),
         );
         match recv_mmsg(socket, &mut batch[i..]) {
-            Err(_) if i > 0 => {
-                if start.elapsed() > max_wait {
+            Err(err) if i > 0 => {
+                if !should_wait && err.kind() == ErrorKind::WouldBlock {
                     break;
                 }
             }
@@ -51,10 +60,13 @@ pub fn recv_from(batch: &mut PacketBatch, socket: &UdpSocket, max_wait: Duration
                 i += npkts;
                 // Try to batch into big enough buffers
                 // will cause less re-shuffling later on.
-                if start.elapsed() > max_wait || i >= PACKETS_PER_BATCH {
+                if i >= PACKETS_PER_BATCH {
                     break;
                 }
             }
+        }
+        if start.as_ref().map(Instant::elapsed) > max_wait {
+            break;
         }
     }
     batch.truncate(i);
@@ -62,7 +74,7 @@ pub fn recv_from(batch: &mut PacketBatch, socket: &UdpSocket, max_wait: Duration
 }
 
 pub fn send_to(
-    batch: &PacketBatch,
+    batch: &PinnedPacketBatch,
     socket: &UdpSocket,
     socket_addr_space: &SocketAddrSpace,
 ) -> Result<()> {
@@ -90,7 +102,7 @@ mod tests {
         // test that the address is actually being updated
         let send_addr: SocketAddr = "127.0.0.1:123".parse().unwrap();
         let packets = vec![Packet::default()];
-        let mut packet_batch = PacketBatch::new(packets);
+        let mut packet_batch = PinnedPacketBatch::new(packets);
         packet_batch.set_addr(&send_addr);
         assert_eq!(packet_batch[0].meta().socket_addr(), send_addr);
     }
@@ -104,7 +116,7 @@ mod tests {
         let saddr = send_socket.local_addr().unwrap();
 
         let packet_batch_size = 10;
-        let mut batch = PacketBatch::with_capacity(packet_batch_size);
+        let mut batch = PinnedPacketBatch::with_capacity(packet_batch_size);
         batch.resize(packet_batch_size, Packet::default());
 
         for m in batch.iter_mut() {
@@ -119,7 +131,7 @@ mod tests {
         let recvd = recv_from(
             &mut batch,
             &recv_socket,
-            Duration::from_millis(1), // max_wait
+            Some(Duration::from_millis(1)), // max_wait
         )
         .unwrap();
         assert_eq!(recvd, batch.len());
@@ -133,7 +145,7 @@ mod tests {
     #[test]
     pub fn debug_trait() {
         write!(io::sink(), "{:?}", Packet::default()).unwrap();
-        write!(io::sink(), "{:?}", PacketBatch::default()).unwrap();
+        write!(io::sink(), "{:?}", PinnedPacketBatch::default()).unwrap();
     }
 
     #[test]
@@ -159,14 +171,14 @@ mod tests {
         let recv_socket = bind_to_localhost().expect("bind");
         let addr = recv_socket.local_addr().unwrap();
         let send_socket = bind_to_localhost().expect("bind");
-        let mut batch = PacketBatch::with_capacity(PACKETS_PER_BATCH);
+        let mut batch = PinnedPacketBatch::with_capacity(PACKETS_PER_BATCH);
         batch.resize(PACKETS_PER_BATCH, Packet::default());
 
         // Should only get PACKETS_PER_BATCH packets per iteration even
         // if a lot more were sent, and regardless of packet size
         for _ in 0..2 * PACKETS_PER_BATCH {
             let batch_size = 1;
-            let mut batch = PacketBatch::with_capacity(batch_size);
+            let mut batch = PinnedPacketBatch::with_capacity(batch_size);
             batch.resize(batch_size, Packet::default());
             for p in batch.iter_mut() {
                 p.meta_mut().set_socket_addr(&addr);
@@ -177,7 +189,7 @@ mod tests {
         let recvd = recv_from(
             &mut batch,
             &recv_socket,
-            Duration::from_millis(100), // max_wait
+            Some(Duration::from_millis(100)), // max_wait
         )
         .unwrap();
         // Check we only got PACKETS_PER_BATCH packets

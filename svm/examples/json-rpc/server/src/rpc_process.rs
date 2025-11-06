@@ -5,47 +5,40 @@ use {
         create_executable_environment, LoadAndExecuteTransactionsOutput, MockBankCallback,
         MockForkGraph, TransactionBatch,
     },
+    agave_reserved_account_keys::ReservedAccountKeys,
     base64::{prelude::BASE64_STANDARD, Engine},
     bincode::config::Options,
     jsonrpc_core::{types::error, Error, Metadata, Result},
     jsonrpc_derive::rpc,
     log::*,
     serde_json,
+    solana_account::{from_account, Account, AccountSharedData, ReadableAccount},
     solana_account_decoder::{
         encode_ui_account,
         parse_account_data::{AccountAdditionalDataV3, SplTokenAdditionalDataV2},
         parse_token::{get_token_account_mint, is_known_spl_token_id},
         UiAccount, UiAccountEncoding, UiDataSliceConfig, MAX_BASE58_BYTES,
     },
-    solana_compute_budget::compute_budget::ComputeBudget,
+    solana_clock::{Slot, MAX_PROCESSING_AGE, MAX_TRANSACTION_FORWARDING_DELAY},
+    solana_commitment_config::CommitmentConfig,
+    solana_hash::Hash,
+    solana_message::{
+        inner_instruction::InnerInstructions,
+        v0::{LoadedAddresses, MessageAddressTableLookup},
+        AddressLoader, AddressLoaderError,
+    },
+    solana_nonce::state::DurableNonce,
     solana_perf::packet::PACKET_DATA_SIZE,
-    solana_program_runtime::loaded_programs::ProgramCacheEntry,
+    solana_program_runtime::{
+        execution_budget::SVMTransactionExecutionAndFeeBudgetLimits,
+        loaded_programs::ProgramCacheEntry,
+    },
+    solana_pubkey::Pubkey,
     solana_rpc_client_api::{
         config::*,
         response::{Response as RpcResponse, *},
     },
-    solana_sdk::{
-        account::{from_account, Account, AccountSharedData, ReadableAccount},
-        clock::{Slot, MAX_PROCESSING_AGE, MAX_TRANSACTION_FORWARDING_DELAY},
-        commitment_config::CommitmentConfig,
-        exit::Exit,
-        hash::Hash,
-        inner_instruction::InnerInstructions,
-        message::{
-            v0::{LoadedAddresses, MessageAddressTableLookup},
-            AddressLoaderError,
-        },
-        nonce::state::DurableNonce,
-        pubkey::Pubkey,
-        reserved_account_keys::ReservedAccountKeys,
-        signature::Signature,
-        system_instruction, sysvar,
-        transaction::{
-            AddressLoader, MessageHash, SanitizedTransaction, TransactionError,
-            VersionedTransaction,
-        },
-        transaction_context::{TransactionAccount, TransactionReturnData},
-    },
+    solana_signature::Signature,
     solana_svm::{
         account_loader::{CheckedTransactionDetails, TransactionCheckResult},
         account_overrides::AccountOverrides,
@@ -59,10 +52,18 @@ use {
         },
     },
     solana_system_program::system_processor,
+    solana_sysvar as sysvar,
+    solana_transaction::{
+        sanitized::{MessageHash, SanitizedTransaction},
+        versioned::VersionedTransaction,
+    },
+    solana_transaction_context::{TransactionAccount, TransactionReturnData},
+    solana_transaction_error::TransactionError,
     solana_transaction_status::{
         map_inner_instructions, parse_ui_inner_instructions, TransactionBinaryEncoding,
         UiTransactionEncoding,
     },
+    solana_validator_exit::Exit,
     spl_token_2022::{
         extension::{
             interest_bearing_mint::InterestBearingConfig, scaled_ui_amount::ScaledUiAmountConfig,
@@ -83,6 +84,13 @@ use {
         },
     },
 };
+
+mod transaction {
+    pub use {
+        solana_transaction::sanitized::MAX_TX_ACCOUNT_LOCKS,
+        solana_transaction_error::TransactionResult as Result,
+    };
+}
 
 pub const MAX_REQUEST_BODY_SIZE: usize = 50 * (1 << 10); // 50kB
 
@@ -116,10 +124,11 @@ pub struct JsonRpcRequestProcessor {
 }
 
 struct TransactionSimulationResult {
-    pub result: solana_sdk::transaction::Result<()>,
+    pub result: transaction::Result<()>,
     pub logs: TransactionLogMessages,
     pub post_simulation_accounts: Vec<TransactionAccount>,
     pub units_consumed: u64,
+    pub loaded_accounts_data_size: u32,
     pub return_data: Option<TransactionReturnData>,
     pub inner_instructions: Option<Vec<InnerInstructions>>,
 }
@@ -155,7 +164,7 @@ pub struct TransactionLogCollectorConfig {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TransactionLogInfo {
     pub signature: Signature,
-    pub result: solana_sdk::transaction::Result<()>,
+    pub result: transaction::Result<()>,
     pub is_vote: bool,
     pub log_messages: TransactionLogMessages,
 }
@@ -306,7 +315,7 @@ impl JsonRpcRequestProcessor {
         // Add the BPF Loader v2 builtin, for the SPL Token program.
         transaction_processor.add_builtin(
             &mock_bank,
-            solana_sdk::bpf_loader_upgradeable::id(),
+            solana_sdk_ids::bpf_loader_upgradeable::id(),
             "solana_bpf_loader_upgradeable_program",
             ProgramCacheEntry::new_builtin(
                 0,
@@ -329,15 +338,14 @@ impl JsonRpcRequestProcessor {
             TransactionProcessingConfig {
                 account_overrides: Some(&account_overrides),
                 check_program_modification_slot: false,
-                compute_budget: Some(ComputeBudget::default()),
                 log_messages_bytes_limit: None,
                 limit_to_load_programs: true,
                 recording_config: ExecutionRecordingConfig {
                     enable_cpi_recording,
                     enable_log_recording: true,
                     enable_return_data_recording: true,
+                    enable_transaction_balance_recording: true,
                 },
-                transaction_account_lock_limit: Some(64),
             },
         );
 
@@ -369,12 +377,14 @@ impl JsonRpcRequestProcessor {
             };
         let logs = logs.unwrap_or_default();
         let units_consumed: u64 = 0;
+        let loaded_accounts_data_size: u32 = 0;
 
         TransactionSimulationResult {
             result: flattened_result,
             logs,
             post_simulation_accounts,
             units_consumed,
+            loaded_accounts_data_size,
             return_data,
             inner_instructions,
         }
@@ -384,7 +394,7 @@ impl JsonRpcRequestProcessor {
         &'a self,
         transaction: &'a SanitizedTransaction,
     ) -> TransactionBatch<'a> {
-        let tx_account_lock_limit = solana_sdk::transaction::MAX_TX_ACCOUNT_LOCKS;
+        let tx_account_lock_limit = transaction::MAX_TX_ACCOUNT_LOCKS;
         let lock_result = transaction
             .get_account_locks(tx_account_lock_limit)
             .map(|_| ());
@@ -398,7 +408,7 @@ impl JsonRpcRequestProcessor {
     fn check_age(
         &self,
         sanitized_txs: &[impl core::borrow::Borrow<SanitizedTransaction>],
-        lock_results: &[solana_sdk::transaction::Result<()>],
+        lock_results: &[transaction::Result<()>],
         max_age: usize,
         error_counters: &mut TransactionErrorMetrics,
     ) -> Vec<TransactionCheckResult> {
@@ -428,7 +438,10 @@ impl JsonRpcRequestProcessor {
         _error_counters: &mut TransactionErrorMetrics,
     ) -> TransactionCheckResult {
         /* for now just return defaults */
-        Ok(CheckedTransactionDetails::new(None, u64::default()))
+        Ok(CheckedTransactionDetails::new(
+            None,
+            Ok(SVMTransactionExecutionAndFeeBudgetLimits::default()),
+        ))
     }
 
     fn clock(&self) -> sysvar::clock::Clock {
@@ -546,8 +559,7 @@ impl JsonRpcRequestProcessor {
             blockhash,
             blockhash_lamports_per_signature: lamports_per_signature,
             epoch_total_stake: 0,
-            feature_set: Arc::clone(&bank.feature_set),
-            fee_lamports_per_signature: lamports_per_signature,
+            feature_set: bank.feature_set.runtime_features(),
             rent_collector: None,
         };
 
@@ -688,6 +700,7 @@ pub mod rpc {
                 logs,
                 post_simulation_accounts,
                 units_consumed,
+                loaded_accounts_data_size,
                 return_data,
                 inner_instructions,
             } = meta.simulate_transaction_unchecked(&transaction, enable_cpi_recording);
@@ -753,6 +766,7 @@ pub mod rpc {
                     logs: Some(logs),
                     accounts,
                     units_consumed: Some(units_consumed),
+                    loaded_accounts_data_size: Some(loaded_accounts_data_size),
                     return_data: return_data.map(|return_data| return_data.into()),
                     inner_instructions,
                     replacement_blockhash: None,
@@ -791,7 +805,7 @@ pub mod rpc {
                 "get_minimum_balance_for_rent_exemption rpc request received: {:?}",
                 data_len
             );
-            if data_len as u64 > system_instruction::MAX_PERMITTED_DATA_LENGTH {
+            if data_len as u64 > solana_system_interface::MAX_PERMITTED_DATA_LENGTH {
                 return Err(Error::invalid_request());
             }
             Ok(meta.get_minimum_balance_for_rent_exemption(data_len, commitment))

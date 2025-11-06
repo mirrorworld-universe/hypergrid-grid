@@ -4,16 +4,17 @@ use {
     },
     itertools::Itertools,
     lazy_lru::LruCache,
-    lazy_static::lazy_static,
     rayon::{prelude::*, ThreadPool},
     reed_solomon_erasure::{
         galois_8::ReedSolomon,
         Error::{InvalidIndex, TooFewDataShards, TooFewShardsPresent},
     },
+    solana_clock::Slot,
     solana_entry::entry::Entry,
+    solana_hash::Hash,
+    solana_keypair::Keypair,
     solana_measure::measure::Measure,
     solana_rayon_threadlimit::get_thread_count,
-    solana_sdk::{clock::Slot, hash::Hash, signature::Keypair},
     std::{
         borrow::Borrow,
         fmt::Debug,
@@ -21,13 +22,13 @@ use {
     },
 };
 
-lazy_static! {
-    static ref PAR_THREAD_POOL: ThreadPool = rayon::ThreadPoolBuilder::new()
+static PAR_THREAD_POOL: std::sync::LazyLock<ThreadPool> = std::sync::LazyLock::new(|| {
+    rayon::ThreadPoolBuilder::new()
         .num_threads(get_thread_count())
         .thread_name(|i| format!("solShredder{i:02}"))
         .build()
-        .unwrap();
-}
+        .unwrap()
+});
 
 // Maps number of data shreds to the optimal erasure batch size which has the
 // same recovery probabilities as a 32:32 erasure batch.
@@ -77,6 +78,37 @@ impl Shredder {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub fn make_merkle_shreds_from_entries(
+        &self,
+        keypair: &Keypair,
+        entries: &[Entry],
+        is_last_in_slot: bool,
+        chained_merkle_root: Option<Hash>,
+        next_shred_index: u32,
+        next_code_index: u32,
+        reed_solomon_cache: &ReedSolomonCache,
+        stats: &mut ProcessShredsStats,
+    ) -> impl Iterator<Item = Shred> {
+        shred::make_merkle_shreds_from_entries(
+            &PAR_THREAD_POOL,
+            keypair,
+            entries,
+            self.slot,
+            self.parent_slot,
+            self.version,
+            self.reference_tick,
+            is_last_in_slot,
+            chained_merkle_root,
+            next_shred_index,
+            next_code_index,
+            reed_solomon_cache,
+            stats,
+        )
+        .unwrap()
+    }
+
+    // For legacy tests and benchmarks.
+    #[allow(clippy::too_many_arguments)]
     pub fn entries_to_shreds(
         &self,
         keypair: &Keypair,
@@ -93,24 +125,18 @@ impl Shredder {
         Vec<Shred>, // coding shreds
     ) {
         if merkle_variant {
-            return shred::make_merkle_shreds_from_entries(
-                &PAR_THREAD_POOL,
-                keypair,
-                entries,
-                self.slot,
-                self.parent_slot,
-                self.version,
-                self.reference_tick,
-                is_last_in_slot,
-                chained_merkle_root,
-                next_shred_index,
-                next_code_index,
-                reed_solomon_cache,
-                stats,
-            )
-            .unwrap()
-            .into_iter()
-            .partition(Shred::is_data);
+            return self
+                .make_merkle_shreds_from_entries(
+                    keypair,
+                    entries,
+                    is_last_in_slot,
+                    chained_merkle_root,
+                    next_shred_index,
+                    next_code_index,
+                    reed_solomon_cache,
+                    stats,
+                )
+                .partition(Shred::is_data);
         }
         let data_shreds =
             self.entries_to_data_shreds(keypair, entries, is_last_in_slot, next_shred_index, stats);
@@ -140,8 +166,6 @@ impl Shredder {
 
         let mut gen_data_time = Measure::start("shred_gen_data_time");
         let data_buffer_size = ShredData::capacity(/*merkle_proof_size:*/ None).unwrap();
-        process_stats.data_buffer_residual +=
-            (data_buffer_size - serialized_shreds.len() % data_buffer_size) % data_buffer_size;
         // Integer division to ensure we have enough shreds to fit all the data
         let num_shreds = serialized_shreds.len().div_ceil(data_buffer_size);
         let last_shred_index = next_shred_index + num_shreds as u32 - 1;
@@ -235,6 +259,7 @@ impl Shredder {
                 .into_iter()
                 .zip(next_code_index)
                 .flat_map(|(shreds, next_code_index)| {
+                    #[allow(deprecated)]
                     Shredder::generate_coding_shreds(&shreds, next_code_index, reed_solomon_cache)
                 })
                 .collect()
@@ -244,6 +269,7 @@ impl Shredder {
                     .into_par_iter()
                     .zip(next_code_index)
                     .flat_map(|(shreds, next_code_index)| {
+                        #[allow(deprecated)]
                         Shredder::generate_coding_shreds(
                             &shreds,
                             next_code_index,
@@ -270,6 +296,7 @@ impl Shredder {
     }
 
     /// Generates coding shreds for the data shreds in the current FEC set
+    #[deprecated(since = "2.3.0", note = "Legacy shreds are deprecated")]
     pub fn generate_coding_shreds<T: Borrow<Shred>>(
         data: &[T],
         next_code_index: u32,
@@ -320,6 +347,7 @@ impl Shredder {
             .enumerate()
             .map(|(i, parity)| {
                 let index = next_code_index + u32::try_from(i).unwrap();
+                #[allow(deprecated)]
                 Shred::new_from_parity_shard(
                     slot,
                     index,
@@ -501,7 +529,7 @@ fn get_fec_set_offsets(
         }
         let num_chunks = (num_shreds / min_chunk_size).max(1);
         let chunk_size = num_shreds.div_ceil(num_chunks);
-        let offsets = std::iter::repeat(offset).take(chunk_size);
+        let offsets = std::iter::repeat_n(offset, chunk_size);
         num_shreds -= chunk_size;
         offset += chunk_size;
         Some(offsets)
@@ -517,19 +545,18 @@ mod tests {
             blockstore::MAX_DATA_SHREDS_PER_SLOT,
             shred::{
                 self, max_entries_per_n_shred, max_ticks_per_n_shreds, verify_test_data_shred,
-                ShredType, MAX_CODE_SHREDS_PER_SLOT,
+                ShredType, CODING_SHREDS_PER_FEC_BLOCK, MAX_CODE_SHREDS_PER_SLOT,
             },
         },
         assert_matches::assert_matches,
-        bincode::serialized_size,
         rand::{seq::SliceRandom, Rng},
-        solana_sdk::{
-            hash::{hash, Hash},
-            pubkey::Pubkey,
-            shred_version,
-            signature::{Signature, Signer},
-            system_transaction,
-        },
+        solana_hash::Hash,
+        solana_pubkey::Pubkey,
+        solana_sha256_hasher::hash,
+        solana_shred_version as shred_version,
+        solana_signature::Signature,
+        solana_signer::Signer,
+        solana_system_transaction as system_transaction,
         std::{collections::HashSet, convert::TryInto, iter::repeat_with, sync::Arc},
         test_case::test_case,
     };
@@ -567,18 +594,8 @@ mod tests {
             })
             .collect();
 
-        let size = serialized_size(&entries).unwrap() as usize;
-        // Integer division to ensure we have enough shreds to fit all the data
-        let data_buffer_size = ShredData::capacity(/*merkle_proof_size:*/ None).unwrap();
-        let num_expected_data_shreds = size.div_ceil(data_buffer_size);
-        let num_expected_data_shreds = num_expected_data_shreds.max(if is_last_in_slot {
-            DATA_SHREDS_PER_FEC_BLOCK
-        } else {
-            1
-        });
-        let num_expected_coding_shreds =
-            get_erasure_batch_size(num_expected_data_shreds, is_last_in_slot)
-                - num_expected_data_shreds;
+        let num_expected_data_shreds = DATA_SHREDS_PER_FEC_BLOCK;
+        let num_expected_coding_shreds = CODING_SHREDS_PER_FEC_BLOCK;
         let start_index = 0;
         let (data_shreds, coding_shreds) = shredder.entries_to_shreds(
             &keypair,
@@ -1076,13 +1093,13 @@ mod tests {
         let mut rng = rand::thread_rng();
         let txs = repeat_with(|| {
             let from_pubkey = Pubkey::new_unique();
-            let instruction = solana_sdk::system_instruction::transfer(
+            let instruction = solana_system_interface::instruction::transfer(
                 &from_pubkey,
                 &Pubkey::new_unique(), // to
                 rng.gen(),             // lamports
             );
-            let message = solana_sdk::message::Message::new(&[instruction], Some(&from_pubkey));
-            let mut tx = solana_sdk::transaction::Transaction::new_unsigned(message);
+            let message = solana_message::Message::new(&[instruction], Some(&from_pubkey));
+            let mut tx = solana_transaction::Transaction::new_unsigned(message);
             // Also randomize the signatre bytes.
             let mut signature = [0u8; 64];
             rng.fill(&mut signature[..]);

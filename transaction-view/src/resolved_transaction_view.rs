@@ -149,6 +149,10 @@ impl<D: TransactionData> ResolvedTransactionView<D> {
     pub fn loaded_addresses(&self) -> Option<&LoadedAddresses> {
         self.resolved_addresses.as_ref()
     }
+
+    pub fn into_view(self) -> TransactionView<true, D> {
+        self.view
+    }
 }
 
 impl<D: TransactionData> SVMMessage for ResolvedTransactionView<D> {
@@ -181,6 +185,10 @@ impl<D: TransactionData> SVMMessage for ResolvedTransactionView<D> {
         ),
     > + Clone {
         self.view.program_instructions_iter()
+    }
+
+    fn static_account_keys(&self) -> &[Pubkey] {
+        self.view.static_account_keys()
     }
 
     fn account_keys(&self) -> AccountKeys {

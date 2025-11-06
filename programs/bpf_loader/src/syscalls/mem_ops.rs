@@ -1,17 +1,32 @@
 use {
     super::*,
+    crate::translate_mut,
     solana_program_runtime::invoke_context::SerializedAccountMetadata,
     solana_sbpf::{error::EbpfError, memory_region::MemoryRegion},
     std::slice,
 };
 
 fn mem_op_consume(invoke_context: &mut InvokeContext, n: u64) -> Result<(), Error> {
-    let compute_budget = invoke_context.get_compute_budget();
-    let cost = compute_budget.mem_op_base_cost.max(
-        n.checked_div(compute_budget.cpi_bytes_per_unit)
+    let compute_cost = invoke_context.get_execution_cost();
+    let cost = compute_cost.mem_op_base_cost.max(
+        n.checked_div(compute_cost.cpi_bytes_per_unit)
             .unwrap_or(u64::MAX),
     );
     consume_compute_meter(invoke_context, cost)
+}
+
+/// Check that two regions do not overlap.
+pub(crate) fn is_nonoverlapping<N>(src: N, src_len: N, dst: N, dst_len: N) -> bool
+where
+    N: Ord + num_traits::SaturatingSub,
+{
+    // If the absolute distance between the ptrs is at least as big as the size of the other,
+    // they do not overlap.
+    if src > dst {
+        src.saturating_sub(&dst) >= dst_len
+    } else {
+        dst.saturating_sub(&src) >= src_len
+    }
 }
 
 declare_builtin_function!(
@@ -71,16 +86,16 @@ declare_builtin_function!(
 
         if invoke_context
             .get_feature_set()
-            .is_active(&solana_feature_set::bpf_account_data_direct_mapping::id())
+            .bpf_account_data_direct_mapping
         {
-            let cmp_result = translate_type_mut::<i32>(
+            translate_mut!(
                 memory_mapping,
-                cmp_result_addr,
                 invoke_context.get_check_aligned(),
-            )?;
+                let cmp_result_ref_mut: &mut i32 = map(cmp_result_addr)?;
+            );
             let syscall_context = invoke_context.get_syscall_context()?;
 
-            *cmp_result = memcmp_non_contiguous(s1_addr, s2_addr, n, &syscall_context.accounts_metadata, memory_mapping, invoke_context.get_check_aligned())?;
+            *cmp_result_ref_mut = memcmp_non_contiguous(s1_addr, s2_addr, n, &syscall_context.accounts_metadata, memory_mapping, invoke_context.get_check_aligned())?;
         } else {
             let s1 = translate_slice::<u8>(
                 memory_mapping,
@@ -94,11 +109,6 @@ declare_builtin_function!(
                 n,
                 invoke_context.get_check_aligned(),
             )?;
-            let cmp_result = translate_type_mut::<i32>(
-                memory_mapping,
-                cmp_result_addr,
-                invoke_context.get_check_aligned(),
-            )?;
 
             debug_assert_eq!(s1.len(), n as usize);
             debug_assert_eq!(s2.len(), n as usize);
@@ -106,7 +116,14 @@ declare_builtin_function!(
             // memcmp is marked unsafe since it assumes that the inputs are at least
             // `n` bytes long. `s1` and `s2` are guaranteed to be exactly `n` bytes
             // long because `translate_slice` would have failed otherwise.
-            *cmp_result = unsafe { memcmp(s1, s2, n as usize) };
+            let result = unsafe { memcmp(s1, s2, n as usize) };
+
+            translate_mut!(
+                memory_mapping,
+                invoke_context.get_check_aligned(),
+                let cmp_result_ref_mut: &mut i32 = map(cmp_result_addr)?;
+            );
+            *cmp_result_ref_mut = result;
         }
 
         Ok(0)
@@ -129,18 +146,17 @@ declare_builtin_function!(
 
         if invoke_context
             .get_feature_set()
-            .is_active(&solana_feature_set::bpf_account_data_direct_mapping::id())
+            .bpf_account_data_direct_mapping
         {
             let syscall_context = invoke_context.get_syscall_context()?;
 
             memset_non_contiguous(dst_addr, c as u8, n, &syscall_context.accounts_metadata, memory_mapping, invoke_context.get_check_aligned())
         } else {
-            let s = translate_slice_mut::<u8>(
+            translate_mut!(
                 memory_mapping,
-                dst_addr,
-                n,
                 invoke_context.get_check_aligned(),
-            )?;
+                let s: &mut [u8] = map(dst_addr, n)?;
+            );
             s.fill(c as u8);
             Ok(0)
         }
@@ -156,7 +172,7 @@ fn memmove(
 ) -> Result<u64, Error> {
     if invoke_context
         .get_feature_set()
-        .is_active(&solana_feature_set::bpf_account_data_direct_mapping::id())
+        .bpf_account_data_direct_mapping
     {
         let syscall_context = invoke_context.get_syscall_context()?;
 
@@ -169,13 +185,12 @@ fn memmove(
             invoke_context.get_check_aligned(),
         )
     } else {
-        let dst_ptr = translate_slice_mut::<u8>(
+        translate_mut!(
             memory_mapping,
-            dst_addr,
-            n,
             invoke_context.get_check_aligned(),
-        )?
-        .as_mut_ptr();
+            let dst_ref_mut: &mut [u8] = map(dst_addr, n)?;
+        );
+        let dst_ptr = dst_ref_mut.as_mut_ptr();
         let src_ptr = translate_slice::<u8>(
             memory_mapping,
             src_addr,
@@ -310,7 +325,11 @@ fn memset_non_contiguous(
     )?;
     for item in dst_chunk_iter {
         let (dst_region, dst_vm_addr, dst_len) = item?;
-        let dst_host_addr = Result::from(dst_region.vm_to_host(dst_vm_addr, dst_len as u64))?;
+        let dst_host_addr = dst_region
+            .vm_to_host(dst_vm_addr, dst_len as u64)
+            .ok_or_else(|| {
+                EbpfError::AccessViolation(AccessType::Store, dst_vm_addr, dst_len as u64, "")
+            })?;
         unsafe { slice::from_raw_parts_mut(dst_host_addr as *mut u8, dst_len).fill(c) }
     }
 
@@ -341,8 +360,7 @@ where
         src_addr,
         n_bytes,
         resize_area,
-    )
-    .map_err(EbpfError::from)?;
+    )?;
     let mut dst_chunk_iter = MemoryChunkIterator::new(
         memory_mapping,
         accounts,
@@ -350,8 +368,7 @@ where
         dst_addr,
         n_bytes,
         resize_area,
-    )
-    .map_err(EbpfError::from)?;
+    )?;
 
     let mut src_chunk = None;
     let mut dst_chunk = None;
@@ -401,8 +418,21 @@ where
             };
 
             (
-                Result::from(src_region.vm_to_host(src_addr, chunk_len as u64))?,
-                Result::from(dst_region.vm_to_host(dst_addr, chunk_len as u64))?,
+                src_region
+                    .vm_to_host(src_addr, chunk_len as u64)
+                    .ok_or_else(|| {
+                        EbpfError::AccessViolation(AccessType::Load, src_addr, chunk_len as u64, "")
+                    })?,
+                dst_region
+                    .vm_to_host(dst_addr, chunk_len as u64)
+                    .ok_or_else(|| {
+                        EbpfError::AccessViolation(
+                            AccessType::Store,
+                            dst_addr,
+                            chunk_len as u64,
+                            "",
+                        )
+                    })?,
             )
         };
 
@@ -482,7 +512,7 @@ impl<'a> MemoryChunkIterator<'a> {
 
     fn region(&mut self, vm_addr: u64) -> Result<&'a MemoryRegion, Error> {
         match self.memory_mapping.region(self.access_type, vm_addr) {
-            Ok(region) => Ok(region),
+            Ok((_region_index, region)) => Ok(region),
             Err(error) => match error {
                 EbpfError::AccessViolation(access_type, _vm_addr, _len, name) => Err(Box::new(
                     EbpfError::AccessViolation(access_type, self.initial_vm_addr, self.len, name),
@@ -532,7 +562,7 @@ impl<'a> Iterator for MemoryChunkIterator<'a> {
                     account_index = account_index.saturating_add(1);
                     self.account_index = Some(account_index);
                 } else {
-                    region_is_account = region.vm_addr == account_addr
+                    region_is_account = (account.original_data_len != 0 && region.vm_addr == account_addr)
                         // unaligned programs do not have a resize area
                         || (self.resize_area && region.vm_addr == resize_addr);
                     break;
@@ -606,7 +636,7 @@ impl DoubleEndedIterator for MemoryChunkIterator<'_> {
 
                 self.account_index = Some(account_index);
             } else {
-                region_is_account = region.vm_addr == account_addr
+                region_is_account = (account.original_data_len != 0 && region.vm_addr == account_addr)
                     // unaligned programs do not have a resize area
                     || (self.resize_area && region.vm_addr == resize_addr);
                 break;
@@ -1170,5 +1200,20 @@ mod tests {
 
     fn flatten_memory(mem: &[Vec<u8>]) -> Vec<u8> {
         mem.iter().flatten().copied().collect()
+    }
+
+    #[test]
+    fn test_is_nonoverlapping() {
+        for dst in 0..8 {
+            assert!(is_nonoverlapping(10, 3, dst, 3));
+        }
+        for dst in 8..13 {
+            assert!(!is_nonoverlapping(10, 3, dst, 3));
+        }
+        for dst in 13..20 {
+            assert!(is_nonoverlapping(10, 3, dst, 3));
+        }
+        assert!(is_nonoverlapping::<u8>(255, 3, 254, 1));
+        assert!(!is_nonoverlapping::<u8>(255, 2, 254, 3));
     }
 }

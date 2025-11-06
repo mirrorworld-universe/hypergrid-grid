@@ -1,7 +1,7 @@
 use {
     solana_core::validator::ValidatorConfig,
-    solana_sdk::exit::Exit,
-    std::sync::{Arc, RwLock},
+    solana_validator_exit::Exit,
+    std::sync::{atomic::AtomicBool, Arc, RwLock},
 };
 
 pub fn safe_clone_config(config: &ValidatorConfig) -> ValidatorConfig {
@@ -30,7 +30,6 @@ pub fn safe_clone_config(config: &ValidatorConfig) -> ValidatorConfig {
         repair_validators: config.repair_validators.clone(),
         repair_whitelist: config.repair_whitelist.clone(),
         gossip_validators: config.gossip_validators.clone(),
-        accounts_hash_interval_slots: config.accounts_hash_interval_slots,
         max_genesis_archive_unpacked_size: config.max_genesis_archive_unpacked_size,
         run_verification: config.run_verification,
         require_tower: config.require_tower,
@@ -52,6 +51,11 @@ pub fn safe_clone_config(config: &ValidatorConfig) -> ValidatorConfig {
         tpu_coalesce: config.tpu_coalesce,
         staked_nodes_overrides: config.staked_nodes_overrides.clone(),
         validator_exit: Arc::new(RwLock::new(Exit::default())),
+        validator_exit_backpressure: config
+            .validator_exit_backpressure
+            .keys()
+            .map(|name| (name.clone(), Arc::new(AtomicBool::new(false))))
+            .collect(),
         poh_hashes_per_batch: config.poh_hashes_per_batch,
         process_ledger_before_services: config.process_ledger_before_services,
         no_wait_for_vote_to_start_leader: config.no_wait_for_vote_to_start_leader,
@@ -73,8 +77,9 @@ pub fn safe_clone_config(config: &ValidatorConfig) -> ValidatorConfig {
         replay_forks_threads: config.replay_forks_threads,
         replay_transactions_threads: config.replay_transactions_threads,
         tvu_shred_sigverify_threads: config.tvu_shred_sigverify_threads,
-        thread_manager_config: config.thread_manager_config.clone(),
         delay_leader_block_for_pending_fork: config.delay_leader_block_for_pending_fork,
+        use_tpu_client_next: config.use_tpu_client_next,
+        retransmit_xdp: config.retransmit_xdp.clone(),
     }
 }
 

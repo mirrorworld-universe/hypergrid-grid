@@ -6,16 +6,18 @@ use {
     solana_clap_utils::{input_parsers::keypair_of, input_validators::is_keypair_or_ask_keyword},
     solana_client::connection_cache::ConnectionCache,
     solana_connection_cache::client_connection::ClientConnection,
+    solana_hash::Hash,
+    solana_keypair::Keypair,
+    solana_message::Message,
     solana_net_utils::{bind_to_unspecified, SocketConfig},
-    solana_sdk::{
-        hash::Hash, message::Message, pubkey::Pubkey, signature::Keypair, signer::Signer,
-        transaction::Transaction,
-    },
+    solana_pubkey::Pubkey,
+    solana_signer::Signer,
     solana_streamer::{
         packet::PacketBatchRecycler,
         quic::{spawn_server_multi, QuicServerParams},
         streamer::{receiver, PacketBatchReceiver, StakedNodes, StreamerReceiveStats},
     },
+    solana_transaction::Transaction,
     solana_vote_program::{vote_instruction, vote_state::Vote},
     std::{
         cmp::max,
@@ -33,7 +35,7 @@ use {
 const SINK_REPORT_INTERVAL: Duration = Duration::from_secs(5);
 const SINK_RECEIVE_TIMEOUT: Duration = Duration::from_secs(1);
 const SOCKET_RECEIVE_TIMEOUT: Duration = Duration::from_secs(1);
-const COALESCE_TIME: Duration = Duration::from_millis(1);
+const COALESCE_TIME: Option<Duration> = Some(Duration::from_millis(1));
 
 fn sink(
     exit: Arc<AtomicBool>,

@@ -1,14 +1,16 @@
 pub use solana_client::connection_cache::Protocol;
 use {
-    crate::{crds_data::MAX_WALLCLOCK, legacy_contact_info::LegacyContactInfo},
+    crate::{
+        crds_data::MAX_WALLCLOCK,
+        define_tlv_enum,
+        legacy_contact_info::LegacyContactInfo,
+        tlv::{self, TlvDecodeError, TlvRecord},
+    },
     assert_matches::{assert_matches, debug_assert_matches},
     serde::{Deserialize, Deserializer, Serialize},
+    solana_pubkey::Pubkey,
+    solana_quic_definitions::QUIC_PORT_OFFSET,
     solana_sanitize::{Sanitize, SanitizeError},
-    solana_sdk::{
-        pubkey::Pubkey,
-        quic::QUIC_PORT_OFFSET,
-        rpc_port::{DEFAULT_RPC_PORT, DEFAULT_RPC_PUBSUB_PORT},
-    },
     solana_serde_varint as serde_varint, solana_short_vec as short_vec,
     solana_streamer::socket::SocketAddrSpace,
     static_assertions::const_assert_eq,
@@ -20,6 +22,9 @@ use {
     },
     thiserror::Error,
 };
+
+const DEFAULT_RPC_PORT: u16 = 8899;
+const DEFAULT_RPC_PUBSUB_PORT: u16 = 8900;
 
 pub const SOCKET_ADDR_UNSPECIFIED: SocketAddr =
     SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), /*port:*/ 0u16);
@@ -39,8 +44,9 @@ const SOCKET_TAG_TPU_VOTE: u8 = 9;
 const SOCKET_TAG_TPU_VOTE_QUIC: u8 = 12;
 const SOCKET_TAG_TVU: u8 = 10;
 const SOCKET_TAG_TVU_QUIC: u8 = 11;
-const_assert_eq!(SOCKET_CACHE_SIZE, 13);
-const SOCKET_CACHE_SIZE: usize = SOCKET_TAG_TPU_VOTE_QUIC as usize + 1usize;
+const SOCKET_TAG_ALPENGLOW: u8 = 13;
+const_assert_eq!(SOCKET_CACHE_SIZE, 14);
+const SOCKET_CACHE_SIZE: usize = SOCKET_TAG_ALPENGLOW as usize + 1usize;
 
 // An alias for a function that reads data from a ContactInfo entry stored in
 // the gossip CRDS table.
@@ -105,8 +111,19 @@ struct SocketEntry {
     offset: u16, // Port offset with respect to the previous entry.
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
-enum Extension {}
+define_tlv_enum!(
+    /// TLV encoded Extensions in ContactInfo messages
+    ///
+    /// On the wire each record is: [type: u8][len: varint][bytes]
+    /// Extensions with unknown types are skipped by tlv::parse,
+    /// so new types can be added without breaking legacy code,
+    /// and support by all clients is not required.
+    ///
+    /// Always add new TLV records to the end of this enum.
+    /// Never reorder or reuse a type.
+    /// Ensure new type collisions do not happen.
+    pub(crate) enum Extension {}
+);
 
 // As part of deserialization, self.addrs and self.sockets should be cross
 // verified and self.cache needs to be populated. This type serves as a
@@ -124,8 +141,9 @@ struct ContactInfoLite {
     addrs: Vec<IpAddr>,
     #[serde(with = "short_vec")]
     sockets: Vec<SocketEntry>,
+    #[allow(dead_code)]
     #[serde(with = "short_vec")]
-    extensions: Vec<Extension>,
+    extensions: Vec<TlvRecord>,
 }
 
 macro_rules! get_socket {
@@ -212,7 +230,7 @@ impl ContactInfo {
             version: solana_version::Version::default(),
             addrs: Vec::<IpAddr>::default(),
             sockets: Vec::<SocketEntry>::default(),
-            extensions: Vec::<Extension>::default(),
+            extensions: Vec::default(),
             cache: EMPTY_SOCKET_ADDR_CACHE,
         }
     }
@@ -268,6 +286,7 @@ impl ContactInfo {
     );
     get_socket!(tpu_vote, SOCKET_TAG_TPU_VOTE, SOCKET_TAG_TPU_VOTE_QUIC);
     get_socket!(tvu, SOCKET_TAG_TVU, SOCKET_TAG_TVU_QUIC);
+    get_socket!(alpenglow, SOCKET_TAG_ALPENGLOW);
 
     set_socket!(set_gossip, SOCKET_TAG_GOSSIP);
     set_socket!(set_rpc, SOCKET_TAG_RPC);
@@ -281,6 +300,7 @@ impl ContactInfo {
     set_socket!(@multi set_serve_repair, SOCKET_TAG_SERVE_REPAIR, SOCKET_TAG_SERVE_REPAIR_QUIC);
     set_socket!(@multi set_tpu_vote, SOCKET_TAG_TPU_VOTE, SOCKET_TAG_TPU_VOTE_QUIC);
     set_socket!(@multi set_tvu, SOCKET_TAG_TVU, SOCKET_TAG_TVU_QUIC);
+    set_socket!(set_alpenglow, SOCKET_TAG_ALPENGLOW);
 
     remove_socket!(
         remove_serve_repair,
@@ -397,7 +417,7 @@ impl ContactInfo {
     /// New random ContactInfo for tests and simulations.
     pub fn new_rand<R: rand::Rng>(rng: &mut R, pubkey: Option<Pubkey>) -> Self {
         let delay = 10 * 60 * 1000; // 10 minutes
-        let now = solana_sdk::timing::timestamp() - delay + rng.gen_range(0..2 * delay);
+        let now = solana_time_utils::timestamp() - delay + rng.gen_range(0..2 * delay);
         let pubkey = pubkey.unwrap_or_else(solana_pubkey::new_rand);
         let mut node = ContactInfo::new_localhost(&pubkey, now);
         let _ = node.set_gossip((Ipv4Addr::LOCALHOST, rng.gen_range(1024..u16::MAX)));
@@ -408,8 +428,8 @@ impl ContactInfo {
     pub fn new_gossip_entry_point(gossip_addr: &SocketAddr) -> Self {
         let mut node = Self::new(
             Pubkey::default(),
-            solana_sdk::timing::timestamp(), // wallclock
-            0,                               // shred_version
+            solana_time_utils::timestamp(), // wallclock
+            0,                              // shred_version
         );
         if let Err(err) = node.set_gossip(*gossip_addr) {
             error!("Invalid entrypoint: {gossip_addr}, {err:?}");
@@ -446,8 +466,8 @@ impl ContactInfo {
         assert_matches!(sanitize_socket(socket), Ok(()));
         let mut node = Self::new(
             *pubkey,
-            solana_sdk::timing::timestamp(), // wallclock,
-            0u16,                            // shred_version
+            solana_time_utils::timestamp(), // wallclock,
+            0u16,                           // shred_version
         );
         let (addr, port) = (socket.ip(), socket.port());
         node.set_gossip((addr, port + 1)).unwrap();
@@ -541,7 +561,7 @@ impl TryFrom<ContactInfoLite> for ContactInfo {
             version,
             addrs,
             sockets,
-            extensions,
+            extensions: tlv::parse(&extensions),
             cache: EMPTY_SOCKET_ADDR_CACHE,
         };
         // Populate node.cache.
@@ -679,7 +699,8 @@ mod tests {
     use {
         super::*,
         rand::{seq::SliceRandom, Rng},
-        solana_sdk::signature::{Keypair, Signer},
+        solana_keypair::Keypair,
+        solana_signer::Signer,
         std::{
             collections::{HashMap, HashSet},
             iter::repeat_with,
@@ -736,6 +757,7 @@ mod tests {
         assert_matches!(ci.tpu_vote(Protocol::QUIC), None);
         assert_matches!(ci.tvu(Protocol::QUIC), None);
         assert_matches!(ci.tvu(Protocol::UDP), None);
+        assert_matches!(ci.alpenglow(), None);
     }
 
     #[test]
@@ -863,6 +885,10 @@ mod tests {
             }
             assert_eq!(node.gossip().as_ref(), sockets.get(&SOCKET_TAG_GOSSIP));
             assert_eq!(node.rpc().as_ref(), sockets.get(&SOCKET_TAG_RPC));
+            assert_eq!(
+                node.alpenglow().as_ref(),
+                sockets.get(&SOCKET_TAG_ALPENGLOW)
+            );
             assert_eq!(
                 node.rpc_pubsub().as_ref(),
                 sockets.get(&SOCKET_TAG_RPC_PUBSUB)
@@ -1001,7 +1027,7 @@ mod tests {
     fn test_new_localhost() {
         let node = ContactInfo::new_localhost(
             &Keypair::new().pubkey(),
-            solana_sdk::timing::timestamp(), // wallclock
+            solana_time_utils::timestamp(), // wallclock
         );
         cross_verify_with_legacy(&node);
     }

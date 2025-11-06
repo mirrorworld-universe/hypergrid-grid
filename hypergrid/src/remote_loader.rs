@@ -4,18 +4,15 @@ use {
     log::*,
     serde::{Deserialize, Serialize},
     serde_json::json,
+    solana_account::{state_traits::StateMut, AccountSharedData, ReadableAccount, WritableAccount},
     solana_client::rpc_client::RpcClient,
+    solana_clock::Slot,
+    solana_commitment_config::CommitmentConfig,
+    solana_genesis_config::ClusterType,
+    solana_hash::Hash,
+    solana_loader_v3_interface::state::UpgradeableLoaderState,
     solana_measure::measure::Measure,
-    solana_sdk::{
-        account::{AccountSharedData, ReadableAccount, WritableAccount},
-        account_utils::StateMut,
-        bpf_loader_upgradeable::{self, UpgradeableLoaderState},
-        clock::Slot,
-        commitment_config::CommitmentConfig,
-        genesis_config::ClusterType,
-        hash::Hash,
-        pubkey::Pubkey,
-    },
+    solana_pubkey::Pubkey,
     std::{collections::HashSet, env, fs::File, sync::RwLock, thread, time::Duration},
     thiserror::Error,
 };
@@ -653,7 +650,8 @@ impl RemoteAccountLoader {
     /// Check if the account has a programdata account.
     pub fn has_programdata_account(program_account: &AccountSharedData) -> Option<Pubkey> {
         if program_account.executable()
-            && !bpf_loader_upgradeable::check_id(program_account.owner())
+            && !solana_sdk_ids::bpf_loader_deprecated::check_id(program_account.owner())
+            && !solana_sdk_ids::bpf_loader_upgradeable::check_id(program_account.owner())
         {
             return None;
         }

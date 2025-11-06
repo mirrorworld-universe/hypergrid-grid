@@ -7,13 +7,15 @@ use {
     log::*,
     rand::{thread_rng, Rng},
     rayon::prelude::*,
-    solana_client::connection_cache::ConnectionCache,
+    solana_compute_budget_interface::ComputeBudgetInstruction,
     solana_core::{
         banking_stage::{update_bank_forks_and_poh_recorder_for_new_tpu_bank, BankingStage},
         banking_trace::{BankingTracer, Channels, BANKING_TRACE_DIR_DEFAULT_BYTE_LIMIT},
         validator::{BlockProductionMethod, TransactionStructure},
     },
     solana_gossip::cluster_info::{ClusterInfo, Node},
+    solana_hash::Hash,
+    solana_keypair::Keypair,
     solana_ledger::{
         blockstore::Blockstore,
         genesis_utils::{create_genesis_config, GenesisConfigInfo},
@@ -21,23 +23,20 @@ use {
         leader_schedule_cache::LeaderScheduleCache,
     },
     solana_measure::measure::Measure,
+    solana_message::Message,
     solana_perf::packet::{to_packet_batches, PacketBatch},
     solana_poh::poh_recorder::{create_test_recorder, PohRecorder, WorkingBankEntry},
+    solana_pubkey::{self as pubkey, Pubkey},
     solana_runtime::{
         bank::Bank, bank_forks::BankForks, prioritization_fee_cache::PrioritizationFeeCache,
     },
-    solana_sdk::{
-        compute_budget::ComputeBudgetInstruction,
-        hash::Hash,
-        message::Message,
-        pubkey::{self, Pubkey},
-        signature::{Keypair, Signature, Signer},
-        system_instruction, system_transaction,
-        timing::timestamp,
-        transaction::Transaction,
-    },
+    solana_signature::Signature,
+    solana_signer::Signer,
     solana_streamer::socket::SocketAddrSpace,
-    solana_tpu_client::tpu_client::DEFAULT_TPU_CONNECTION_POOL_SIZE,
+    solana_system_interface::instruction as system_instruction,
+    solana_system_transaction as system_transaction,
+    solana_time_utils::timestamp,
+    solana_transaction::Transaction,
     std::{
         sync::{atomic::Ordering, Arc, RwLock},
         thread::sleep,
@@ -305,12 +304,6 @@ fn main() {
                 .help("Number of threads to use in the banking stage"),
         )
         .arg(
-            Arg::new("tpu_disable_quic")
-                .long("tpu-disable-quic")
-                .takes_value(false)
-                .help("Disable forwarding messages to TPU using QUIC"),
-        )
-        .arg(
             Arg::new("simulate_mint")
                 .long("simulate-mint")
                 .takes_value(false)
@@ -440,12 +433,13 @@ fn main() {
         Blockstore::open(ledger_path.path()).expect("Expected to be able to open database ledger"),
     );
     let leader_schedule_cache = Arc::new(LeaderScheduleCache::new_from_bank(&bank));
-    let (exit, poh_recorder, poh_service, signal_receiver) = create_test_recorder(
-        bank.clone(),
-        blockstore.clone(),
-        None,
-        Some(leader_schedule_cache),
-    );
+    let (exit, poh_recorder, transaction_recorder, poh_service, signal_receiver) =
+        create_test_recorder(
+            bank.clone(),
+            blockstore.clone(),
+            None,
+            Some(leader_schedule_cache),
+        );
     let (banking_tracer, tracer_thread) =
         BankingTracer::new(matches.is_present("trace_banking").then_some((
             &blockstore.banking_trace_path(),
@@ -468,23 +462,12 @@ fn main() {
         gossip_vote_sender,
         gossip_vote_receiver,
     } = banking_tracer.create_channels(false);
-    let tpu_disable_quic = matches.is_present("tpu_disable_quic");
-    let connection_cache = if tpu_disable_quic {
-        ConnectionCache::with_udp(
-            "connection_cache_banking_bench_udp",
-            DEFAULT_TPU_CONNECTION_POOL_SIZE,
-        )
-    } else {
-        ConnectionCache::new_quic(
-            "connection_cache_banking_bench_quic",
-            DEFAULT_TPU_CONNECTION_POOL_SIZE,
-        )
-    };
     let banking_stage = BankingStage::new_num_threads(
         block_production_method,
         transaction_struct,
         &cluster_info,
         &poh_recorder,
+        transaction_recorder,
         non_vote_receiver,
         tpu_vote_receiver,
         gossip_vote_receiver,
@@ -492,10 +475,8 @@ fn main() {
         None,
         replay_vote_sender,
         None,
-        Arc::new(connection_cache),
         bank_forks.clone(),
         &prioritization_fee_cache,
-        false,
     );
 
     // This is so that the signal_receiver does not go out of scope after the closure.
@@ -506,7 +487,7 @@ fn main() {
     let mut tx_total_us = 0;
     let base_tx_count = bank.transaction_count();
     let mut txs_processed = 0;
-    let collector = solana_sdk::pubkey::new_rand();
+    let collector = solana_pubkey::new_rand();
     let mut total_sent = 0;
     for current_iteration_index in 0..iterations {
         trace!("RUNNING ITERATION {}", current_iteration_index);

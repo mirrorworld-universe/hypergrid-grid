@@ -1,24 +1,43 @@
+//! The `TransactionStatusService` receives executed transactions and creates
+//! transaction metadata objects to persist into the Blockstore and optionally
+//! broadcast over geyser. The service also records block metadata for any
+//! frozen banks it receives.
+
 use {
     crate::transaction_notifier_interface::TransactionNotifierArc,
-    crossbeam_channel::{Receiver, TryRecvError},
+    crossbeam_channel::{Receiver, RecvTimeoutError},
     itertools::izip,
+    solana_clock::Slot,
     solana_ledger::{
         blockstore::{Blockstore, BlockstoreError},
         blockstore_processor::{TransactionStatusBatch, TransactionStatusMessage},
     },
+    solana_runtime::bank::{Bank, KeyedRewardsAndNumPartitions},
     solana_svm::transaction_commit_result::CommittedTransaction,
     solana_transaction_status::{
-        extract_and_fmt_memos, map_inner_instructions, Reward, TransactionStatusMeta,
+        extract_and_fmt_memos, map_inner_instructions, Reward, RewardsAndNumPartitions,
+        TransactionStatusMeta,
     },
     std::{
         sync::{
-            atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicU64, Ordering},
             Arc,
         },
-        thread::{self, sleep, Builder, JoinHandle},
+        thread::{self, Builder, JoinHandle},
         time::Duration,
     },
+    thiserror::Error,
 };
+
+#[derive(Error, Debug)]
+enum Error {
+    #[error("blockstore operation failed: {0}")]
+    Blockstore(#[from] BlockstoreError),
+
+    #[error("received nonfrozen bank: {0}")]
+    NonFrozenBank(Slot),
+}
+type Result<T> = std::result::Result<T, Error>;
 
 // Used when draining and shutting down TSS in unit tests.
 #[cfg(feature = "dev-context-only-utils")]
@@ -33,6 +52,8 @@ pub struct TransactionStatusService {
 }
 
 impl TransactionStatusService {
+    const SERVICE_NAME: &str = "TransactionStatusService";
+
     pub fn new(
         write_transaction_status_receiver: Receiver<TransactionStatusMessage>,
         max_complete_transaction_status_slot: Arc<AtomicU64>,
@@ -48,63 +69,42 @@ impl TransactionStatusService {
         let thread_hdl = Builder::new()
             .name("solTxStatusWrtr".to_string())
             .spawn(move || {
-                info!("TransactionStatusService has started");
-
-                let outstanding_thread_count = Arc::new(AtomicUsize::new(0));
+                info!("{} has started", Self::SERVICE_NAME);
                 loop {
                     if exit.load(Ordering::Relaxed) {
-                        // Wait for the outstanding worker threads to complete before
-                        // joining the main thread and shutting down the service.
-                        while outstanding_thread_count.load(Ordering::SeqCst) > 0 {
-                            sleep(Duration::from_millis(1));
-                        }
                         break;
                     }
 
-                    let message = match transaction_status_receiver_handle.try_recv() {
+                    let message = match transaction_status_receiver_handle
+                        .recv_timeout(Duration::from_secs(1))
+                    {
                         Ok(message) => message,
-                        Err(TryRecvError::Disconnected) => {
+                        Err(err @ RecvTimeoutError::Disconnected) => {
+                            info!("{} is stopping because: {err}", Self::SERVICE_NAME);
                             break;
                         }
-                        Err(TryRecvError::Empty) => {
-                            // TSS is bandwidth sensitive at high TPS, but not necessarily
-                            // latency sensitive. We use a global thread pool to handle
-                            // bursts of work below. This sleep is intended to balance that
-                            // out so other users of the pool can make progress while TSS
-                            // builds up a backlog for the next burst.
-                            sleep(Duration::from_millis(50));
+                        Err(RecvTimeoutError::Timeout) => {
                             continue;
                         }
                     };
 
-                    let max_complete_transaction_status_slot =
-                        Arc::clone(&max_complete_transaction_status_slot);
-                    let blockstore = Arc::clone(&blockstore);
-                    let transaction_notifier = transaction_notifier.clone();
-                    let exit_clone = Arc::clone(&exit);
-                    let outstanding_thread_count_handle = Arc::clone(&outstanding_thread_count);
-
-                    outstanding_thread_count.fetch_add(1, Ordering::Relaxed);
-
-                    rayon::spawn(move || {
-                        match Self::write_transaction_status_batch(
-                            message,
-                            &max_complete_transaction_status_slot,
-                            enable_rpc_transaction_history,
-                            transaction_notifier,
-                            &blockstore,
-                            enable_extended_tx_metadata_storage,
-                        ) {
-                            Ok(_) => {}
-                            Err(err) => {
-                                error!("TransactionStatusService stopping due to error: {err}");
-                                exit_clone.store(true, Ordering::Relaxed);
-                            }
+                    match Self::write_transaction_status_batch(
+                        message,
+                        &max_complete_transaction_status_slot,
+                        enable_rpc_transaction_history,
+                        transaction_notifier.clone(),
+                        &blockstore,
+                        enable_extended_tx_metadata_storage,
+                    ) {
+                        Ok(_) => {}
+                        Err(err) => {
+                            error!("{} is stopping because: {err}", Self::SERVICE_NAME);
+                            exit.store(true, Ordering::Relaxed);
+                            break;
                         }
-                        outstanding_thread_count_handle.fetch_sub(1, Ordering::Relaxed);
-                    });
+                    }
                 }
-                info!("TransactionStatusService has stopped");
+                info!("{} has stopped", Self::SERVICE_NAME);
             })
             .unwrap();
         Self {
@@ -121,7 +121,7 @@ impl TransactionStatusService {
         transaction_notifier: Option<TransactionNotifierArc>,
         blockstore: &Blockstore,
         enable_extended_tx_metadata_storage: bool,
-    ) -> Result<(), BlockstoreError> {
+    ) -> Result<()> {
         match transaction_status_message {
             TransactionStatusMessage::Batch(TransactionStatusBatch {
                 slot,
@@ -129,6 +129,7 @@ impl TransactionStatusService {
                 commit_results,
                 balances,
                 token_balances,
+                costs,
                 transaction_indexes,
             }) => {
                 let mut status_and_memos_batch = blockstore.get_write_batch()?;
@@ -140,6 +141,7 @@ impl TransactionStatusService {
                     post_balances,
                     pre_token_balances,
                     post_token_balances,
+                    cost,
                     transaction_index,
                 ) in izip!(
                     transactions,
@@ -148,6 +150,7 @@ impl TransactionStatusService {
                     balances.post_balances,
                     token_balances.pre_token_balances,
                     token_balances.post_token_balances,
+                    costs,
                     transaction_indexes,
                 ) {
                     let Ok(committed_tx) = commit_result else {
@@ -198,6 +201,7 @@ impl TransactionStatusService {
                         loaded_addresses,
                         return_data,
                         compute_units_consumed: Some(executed_units),
+                        cost_units: cost,
                     };
 
                     if let Some(transaction_notifier) = transaction_notifier.as_ref() {
@@ -248,10 +252,47 @@ impl TransactionStatusService {
                     blockstore.write_batch(status_and_memos_batch)?;
                 }
             }
-            TransactionStatusMessage::Freeze(slot) => {
-                max_complete_transaction_status_slot.fetch_max(slot, Ordering::SeqCst);
+            TransactionStatusMessage::Freeze(bank) => {
+                if !bank.is_frozen() {
+                    return Err(Error::NonFrozenBank(bank.slot()));
+                }
+                Self::write_block_meta(&bank, blockstore)?;
+                max_complete_transaction_status_slot.fetch_max(bank.slot(), Ordering::SeqCst);
             }
         }
+        Ok(())
+    }
+
+    fn write_block_meta(bank: &Bank, blockstore: &Blockstore) -> Result<()> {
+        let slot = bank.slot();
+
+        blockstore.set_block_time(slot, bank.clock().unix_timestamp)?;
+        blockstore.set_block_height(slot, bank.block_height())?;
+
+        let rewards = bank.get_rewards_and_num_partitions();
+        if rewards.should_record() {
+            let KeyedRewardsAndNumPartitions {
+                keyed_rewards,
+                num_partitions,
+            } = rewards;
+            let rewards = keyed_rewards
+                .into_iter()
+                .map(|(pubkey, reward_info)| Reward {
+                    pubkey: pubkey.to_string(),
+                    lamports: reward_info.lamports,
+                    post_balance: reward_info.post_balance,
+                    reward_type: Some(reward_info.reward_type),
+                    commission: reward_info.commission,
+                })
+                .collect();
+            let blockstore_rewards = RewardsAndNumPartitions {
+                rewards,
+                num_partitions,
+            };
+
+            blockstore.write_rewards(slot, blockstore_rewards)?;
+        }
+
         Ok(())
     }
 
@@ -283,31 +324,33 @@ pub(crate) mod tests {
     use {
         super::*,
         crate::transaction_notifier_interface::TransactionNotifier,
+        agave_reserved_account_keys::ReservedAccountKeys,
         crossbeam_channel::unbounded,
         dashmap::DashMap,
+        solana_account::state_traits::StateMut,
         solana_account_decoder::{
             parse_account_data::SplTokenAdditionalDataV2, parse_token::token_amount_to_ui_amount_v3,
         },
+        solana_clock::Slot,
+        solana_fee_structure::FeeDetails,
+        solana_hash::Hash,
+        solana_keypair::Keypair,
         solana_ledger::{genesis_utils::create_genesis_config, get_tmp_ledger_path_auto_delete},
+        solana_message::SimpleAddressLoader,
+        solana_nonce::{self as nonce, state::DurableNonce},
+        solana_nonce_account as nonce_account,
+        solana_pubkey::Pubkey,
+        solana_rent_debits::RentDebits,
         solana_runtime::bank::{Bank, TransactionBalancesSet},
-        solana_sdk::{
-            account_utils::StateMut,
-            clock::Slot,
-            fee::FeeDetails,
-            hash::Hash,
-            nonce::{self, state::DurableNonce},
-            nonce_account,
-            pubkey::Pubkey,
-            rent_debits::RentDebits,
-            reserved_account_keys::ReservedAccountKeys,
-            signature::{Keypair, Signature, Signer},
-            system_transaction,
-            transaction::{
-                MessageHash, SanitizedTransaction, SimpleAddressLoader, Transaction,
-                VersionedTransaction,
-            },
-        },
+        solana_signature::Signature,
+        solana_signer::Signer,
         solana_svm::transaction_execution_result::TransactionLoadedAccountsStats,
+        solana_system_transaction as system_transaction,
+        solana_transaction::{
+            sanitized::{MessageHash, SanitizedTransaction},
+            versioned::VersionedTransaction,
+            Transaction,
+        },
         solana_transaction_status::{
             token_balances::TransactionTokenBalancesSet, TransactionStatusMeta,
             TransactionTokenBalance,
@@ -398,9 +441,9 @@ pub(crate) mod tests {
         let durable_nonce = DurableNonce::from_blockhash(&Hash::new_from_array([42u8; 32]));
         let data = nonce::state::Data::new(Pubkey::from([1u8; 32]), durable_nonce, 42);
         nonce_account
-            .set_state(&nonce::state::Versions::new(nonce::State::Initialized(
-                data,
-            )))
+            .set_state(&nonce::versions::Versions::new(
+                nonce::state::State::Initialized(data),
+            ))
             .unwrap();
 
         let mut rent_debits = RentDebits::default();
@@ -460,6 +503,7 @@ pub(crate) mod tests {
             commit_results: vec![commit_result],
             balances,
             token_balances,
+            costs: vec![Some(123)],
             transaction_indexes: vec![transaction_index],
         };
 
@@ -563,6 +607,7 @@ pub(crate) mod tests {
             commit_results: vec![commit_result.clone(), commit_result],
             balances: balances.clone(),
             token_balances,
+            costs: vec![Some(123), Some(456)],
             transaction_indexes: vec![transaction_index1, transaction_index2],
         };
 

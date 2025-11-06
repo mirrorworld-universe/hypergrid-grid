@@ -3,24 +3,26 @@
 #![allow(unreachable_code)]
 #![allow(clippy::arithmetic_side_effects)]
 
+#[cfg(target_feature = "dynamic-frames")]
+use solana_program_memory::sol_memcmp;
 use {
+    solana_account_info::AccountInfo,
+    solana_instruction::Instruction,
+    solana_msg::msg,
     solana_program::{
-        account_info::AccountInfo,
-        bpf_loader_deprecated,
-        entrypoint::{ProgramResult, MAX_PERMITTED_DATA_INCREASE},
-        instruction::Instruction,
-        msg,
         program::{get_return_data, invoke, invoke_signed, set_return_data},
-        program_error::ProgramError,
-        pubkey::{Pubkey, PubkeyError},
         syscalls::{
             MAX_CPI_ACCOUNT_INFOS, MAX_CPI_INSTRUCTION_ACCOUNTS, MAX_CPI_INSTRUCTION_DATA_LEN,
         },
-        system_instruction, system_program,
     },
+    solana_program_entrypoint::{ProgramResult, MAX_PERMITTED_DATA_INCREASE},
+    solana_program_error::ProgramError,
+    solana_pubkey::{Pubkey, PubkeyError},
     solana_sbf_rust_invoke_dep::*,
     solana_sbf_rust_invoked_dep::*,
     solana_sbf_rust_realloc_dep::*,
+    solana_sdk_ids::bpf_loader_deprecated,
+    solana_system_interface::{instruction as system_instruction, program as system_program},
     std::{cell::RefCell, mem, rc::Rc, slice},
 };
 
@@ -65,7 +67,7 @@ fn do_nested_invokes(num_nested_invokes: u64, accounts: &[AccountInfo]) -> Progr
     Ok(())
 }
 
-solana_program::entrypoint_no_alloc!(process_instruction);
+solana_program_entrypoint::entrypoint_no_alloc!(process_instruction);
 fn process_instruction<'a>(
     program_id: &Pubkey,
     accounts: &[AccountInfo<'a>],
@@ -84,7 +86,7 @@ fn process_instruction<'a>(
                 let from_lamports = accounts[FROM_INDEX].lamports();
                 let to_lamports = accounts[DERIVED_KEY1_INDEX].lamports();
                 assert_eq!(accounts[DERIVED_KEY1_INDEX].data_len(), 0);
-                assert!(solana_program::system_program::check_id(
+                assert!(solana_system_interface::program::check_id(
                     accounts[DERIVED_KEY1_INDEX].owner
                 ));
 
@@ -768,7 +770,7 @@ fn process_instruction<'a>(
             let account = &accounts[ARGUMENT_INDEX];
             let realloc_program_id = accounts[REALLOC_PROGRAM_INDEX].key;
             let invoke_program_id = accounts[INVOKE_PROGRAM_INDEX].key;
-            account.realloc(0, false).unwrap();
+            account.realloc(0, true).unwrap();
             account.assign(realloc_program_id);
 
             // Place a RcBox<RefCell<&mut [u8]>> in the account data. This
@@ -857,9 +859,9 @@ fn process_instruction<'a>(
             let target_account = &accounts[target_account_index];
             let realloc_program_id = accounts[REALLOC_PROGRAM_INDEX].key;
             let invoke_program_id = accounts[INVOKE_PROGRAM_INDEX].key;
-            account.realloc(0, false).unwrap();
+            account.realloc(0, true).unwrap();
             account.assign(realloc_program_id);
-            target_account.realloc(0, false).unwrap();
+            target_account.realloc(0, true).unwrap();
             target_account.assign(realloc_program_id);
 
             let rc_box_addr =
@@ -966,7 +968,7 @@ fn process_instruction<'a>(
             let expected = {
                 let data = &instruction_data[1..];
                 let prev_len = account.data_len();
-                account.realloc(prev_len + data.len(), false)?;
+                account.realloc(prev_len + data.len(), true)?;
                 account.data.borrow_mut()[prev_len..].copy_from_slice(data);
                 account.data.borrow().to_vec()
             };
@@ -1074,7 +1076,7 @@ fn process_instruction<'a>(
             let prev_data = {
                 let data = &instruction_data[9..];
                 let prev_len = account.data_len();
-                account.realloc(prev_len + data.len(), false)?;
+                account.realloc(prev_len + data.len(), true)?;
                 account.data.borrow_mut()[prev_len..].copy_from_slice(data);
                 unsafe {
                     // write a sentinel value just outside the account data to
@@ -1128,7 +1130,7 @@ fn process_instruction<'a>(
             const ARGUMENT_INDEX: usize = 0;
             let account = &accounts[ARGUMENT_INDEX];
             let new_len = usize::from_le_bytes(instruction_data[1..9].try_into().unwrap());
-            account.realloc(new_len, false).unwrap();
+            account.realloc(new_len, true).unwrap();
         }
         TEST_CPI_INVALID_KEY_POINTER => {
             msg!("TEST_CPI_INVALID_KEY_POINTER");
@@ -1384,7 +1386,7 @@ fn process_instruction<'a>(
 
                 let post = accounts[ARGUMENT_INDEX].try_borrow_data().unwrap().as_ptr();
 
-                if prev == post {
+                if std::ptr::eq(prev, post) {
                     panic!("failed to clone the data");
                 }
 
@@ -1396,7 +1398,7 @@ fn process_instruction<'a>(
             let account = &accounts[ARGUMENT_INDEX];
 
             if resize != 0 {
-                account.realloc(resize, false).unwrap();
+                account.realloc(resize, true).unwrap();
             }
 
             if pre_write_offset != 0 {
@@ -1456,17 +1458,34 @@ fn process_instruction<'a>(
             heap[8..pos].fill(42);
 
             // Check that the stack is zeroed too.
-            //
+            let stack = unsafe {
+                slice::from_raw_parts_mut(
+                    MM_STACK_START as *mut u8,
+                    MAX_CALL_DEPTH * STACK_FRAME_SIZE,
+                )
+            };
+
+            #[cfg(not(target_feature = "dynamic-frames"))]
             // We don't know in which frame we are now, so we skip a few (10) frames at the start
             // which might have been used by the current call stack. We check that the memory for
             // the 10..MAX_CALL_DEPTH frames is zeroed. Then we write a sentinel value, and in the
             // next nested invocation check that it's been zeroed.
-            let stack =
-                unsafe { slice::from_raw_parts_mut(MM_STACK_START as *mut u8, 0x100000000) };
+            //
+            // When we don't have dynamic stack frames, the stack grows from lower addresses
+            // to higher addresses, so we compare accordingly.
             for i in 10..MAX_CALL_DEPTH {
                 let stack = &mut stack[i * STACK_FRAME_SIZE..][..STACK_FRAME_SIZE];
                 assert!(stack == &ZEROS[..STACK_FRAME_SIZE], "stack not zeroed");
                 stack.fill(42);
+            }
+
+            #[cfg(target_feature = "dynamic-frames")]
+            // When we have dynamic frames, the stack grows from the higher addresses, so we
+            // compare from zero until the beginning of a function frame.
+            {
+                const ZEROED_BYTES_LENGTH: usize = (MAX_CALL_DEPTH - 2) * STACK_FRAME_SIZE;
+                assert_eq!(sol_memcmp(stack, &ZEROS, ZEROED_BYTES_LENGTH), 0);
+                stack[..ZEROED_BYTES_LENGTH].fill(42);
             }
 
             // Recurse to check that the stack and heap are zeroed.

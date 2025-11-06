@@ -3,7 +3,7 @@ use std::{
     sync::Arc,
 };
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq)]
 pub enum Payload {
     Shared(Arc<Vec<u8>>),
     Unique(Vec<u8>),
@@ -37,9 +37,6 @@ macro_rules! dispatch {
 }
 
 impl Payload {
-    #[cfg(test)]
-    dispatch!(pub(crate) fn push(&mut self, byte: u8));
-
     #[inline]
     pub(crate) fn resize(&mut self, size: usize, byte: u8) {
         if self.len() != size {
@@ -84,6 +81,13 @@ pub(crate) mod serde_bytes_payload {
         Deserialize::deserialize(deserializer)
             .map(ByteBuf::into_vec)
             .map(Payload::from)
+    }
+}
+
+impl PartialEq for Payload {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        self.as_ref() == other.as_ref()
     }
 }
 

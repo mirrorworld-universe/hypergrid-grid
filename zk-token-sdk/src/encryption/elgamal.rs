@@ -142,7 +142,7 @@ impl ElGamal {
     #[cfg(not(target_os = "solana"))]
     fn decrypt(secret: &ElGamalSecretKey, ciphertext: &ElGamalCiphertext) -> DiscreteLog {
         DiscreteLog::new(
-            *G,
+            G,
             ciphertext.commitment.get_point() - &(&secret.0 * &ciphertext.handle.0),
         )
     }
@@ -244,9 +244,9 @@ impl ElGamalKeypair {
     /// Reads a JSON-encoded keypair from a `Reader` implementor
     pub fn read_json<R: Read>(reader: &mut R) -> Result<Self, Box<dyn error::Error>> {
         let bytes: Vec<u8> = serde_json::from_reader(reader)?;
-        Self::try_from(bytes.as_slice()).ok().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::Other, "Invalid ElGamalKeypair").into()
-        })
+        Self::try_from(bytes.as_slice())
+            .ok()
+            .ok_or_else(|| std::io::Error::other("Invalid ElGamalKeypair").into())
     }
 
     /// Reads keypair from a file
@@ -409,9 +409,9 @@ impl ElGamalPubkey {
 impl EncodableKey for ElGamalPubkey {
     fn read<R: Read>(reader: &mut R) -> Result<Self, Box<dyn error::Error>> {
         let bytes: Vec<u8> = serde_json::from_reader(reader)?;
-        Self::try_from(bytes.as_slice()).ok().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::Other, "Invalid ElGamalPubkey").into()
-        })
+        Self::try_from(bytes.as_slice())
+            .ok()
+            .ok_or_else(|| std::io::Error::other("Invalid ElGamalPubkey").into())
     }
 
     fn write<W: Write>(&self, writer: &mut W) -> Result<String, Box<dyn error::Error>> {
@@ -566,9 +566,9 @@ impl ElGamalSecretKey {
 impl EncodableKey for ElGamalSecretKey {
     fn read<R: Read>(reader: &mut R) -> Result<Self, Box<dyn error::Error>> {
         let bytes: Vec<u8> = serde_json::from_reader(reader)?;
-        Self::try_from(bytes.as_slice()).ok().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::Other, "Invalid ElGamalSecretKey").into()
-        })
+        Self::try_from(bytes.as_slice())
+            .ok()
+            .ok_or_else(|| std::io::Error::other("Invalid ElGamalSecretKey").into())
     }
 
     fn write<W: Write>(&self, writer: &mut W) -> Result<String, Box<dyn error::Error>> {
@@ -657,7 +657,7 @@ pub struct ElGamalCiphertext {
 }
 impl ElGamalCiphertext {
     pub fn add_amount<T: Into<Scalar>>(&self, amount: T) -> Self {
-        let point = amount.into() * &(*G);
+        let point = amount.into() * &G;
         let commitment_to_add = PedersenCommitment::new(point);
         ElGamalCiphertext {
             commitment: &self.commitment + &commitment_to_add,
@@ -666,7 +666,7 @@ impl ElGamalCiphertext {
     }
 
     pub fn subtract_amount<T: Into<Scalar>>(&self, amount: T) -> Self {
-        let point = amount.into() * &(*G);
+        let point = amount.into() * &G;
         let commitment_to_subtract = PedersenCommitment::new(point);
         ElGamalCiphertext {
             commitment: &self.commitment - &commitment_to_subtract,
@@ -879,7 +879,7 @@ mod tests {
         let amount: u32 = 57;
         let ciphertext = ElGamal::encrypt(&public, amount);
 
-        let expected_instance = DiscreteLog::new(*G, Scalar::from(amount) * &(*G));
+        let expected_instance = DiscreteLog::new(G, Scalar::from(amount) * &G);
 
         assert_eq!(expected_instance, ElGamal::decrypt(&secret, &ciphertext));
         assert_eq!(57_u64, secret.decrypt_u32(&ciphertext).unwrap());
@@ -923,7 +923,7 @@ mod tests {
             handle: handle_1,
         };
 
-        let expected_instance = DiscreteLog::new(*G, Scalar::from(amount) * &(*G));
+        let expected_instance = DiscreteLog::new(G, Scalar::from(amount) * &G);
 
         assert_eq!(expected_instance, secret_0.decrypt(&ciphertext_0));
         assert_eq!(expected_instance, secret_1.decrypt(&ciphertext_1));

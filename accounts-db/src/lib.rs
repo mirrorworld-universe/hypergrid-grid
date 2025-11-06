@@ -1,12 +1,10 @@
 #![cfg_attr(feature = "frozen-abi", feature(min_specialization))]
 #![allow(clippy::arithmetic_side_effects)]
 
-#[macro_use]
-extern crate lazy_static;
-
 pub mod account_info;
 pub mod account_locks;
 pub mod account_storage;
+pub mod account_storage_reader;
 pub mod accounts;
 mod accounts_cache;
 pub mod accounts_db;
@@ -30,6 +28,8 @@ pub mod contains;
 pub mod epoch_accounts_hash;
 mod file_io;
 pub mod hardened_unpack;
+pub mod is_loadable;
+mod is_zero_lamport;
 pub mod partitioned_rewards;
 pub mod pubkey_bins;
 #[cfg(feature = "dev-context-only-utils")]
@@ -37,7 +37,6 @@ pub mod read_only_accounts_cache;
 #[cfg(not(feature = "dev-context-only-utils"))]
 mod read_only_accounts_cache;
 mod rolling_bit_field;
-pub mod secondary_index;
 pub mod shared_buffer_reader;
 pub mod sorted_storages;
 pub mod stake_rewards;

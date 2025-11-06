@@ -7,7 +7,8 @@ use {
         banking_trace::Channels,
         validator::{BlockProductionMethod, TransactionStructure},
     },
-    solana_vote_program::{vote_state::TowerSync, vote_transaction::new_tower_sync_transaction},
+    solana_vote::vote_transaction::new_tower_sync_transaction,
+    solana_vote_program::vote_state::TowerSync,
 };
 
 extern crate test;
@@ -17,46 +18,32 @@ use {
     log::*,
     rand::{thread_rng, Rng},
     rayon::prelude::*,
-    solana_client::connection_cache::ConnectionCache,
-    solana_core::{
-        banking_stage::{
-            committer::Committer,
-            consumer::Consumer,
-            leader_slot_metrics::LeaderSlotMetricsTracker,
-            qos_service::QosService,
-            unprocessed_packet_batches::*,
-            unprocessed_transaction_storage::{ThreadType, UnprocessedTransactionStorage},
-            BankingStage, BankingStageStats,
-        },
-        banking_trace::BankingTracer,
-    },
+    solana_core::{banking_stage::BankingStage, banking_trace::BankingTracer},
     solana_entry::entry::{next_hash, Entry},
+    solana_genesis_config::GenesisConfig,
     solana_gossip::cluster_info::{ClusterInfo, Node},
+    solana_hash::Hash,
+    solana_keypair::Keypair,
     solana_ledger::{
         blockstore::Blockstore,
         blockstore_processor::process_entries_for_tests,
         genesis_utils::{create_genesis_config, GenesisConfigInfo},
         get_tmp_ledger_path_auto_delete,
     },
-    solana_perf::{
-        packet::{to_packet_batches, Packet},
-        test_tx::test_tx,
-    },
+    solana_message::Message,
+    solana_perf::packet::to_packet_batches,
     solana_poh::poh_recorder::{create_test_recorder, WorkingBankEntry},
+    solana_pubkey as pubkey,
     solana_runtime::{
         bank::Bank, bank_forks::BankForks, prioritization_fee_cache::PrioritizationFeeCache,
     },
-    solana_sdk::{
-        genesis_config::GenesisConfig,
-        hash::Hash,
-        message::Message,
-        pubkey,
-        signature::{Keypair, Signature, Signer},
-        system_instruction, system_transaction,
-        timing::timestamp,
-        transaction::{Transaction, VersionedTransaction},
-    },
+    solana_signature::Signature,
+    solana_signer::Signer,
     solana_streamer::socket::SocketAddrSpace,
+    solana_system_interface::instruction as system_instruction,
+    solana_system_transaction as system_transaction,
+    solana_time_utils::timestamp,
+    solana_transaction::{versioned::VersionedTransaction, Transaction},
     std::{
         iter::repeat_with,
         sync::{atomic::Ordering, Arc},
@@ -80,54 +67,6 @@ fn check_txs(receiver: &Arc<Receiver<WorkingBankEntry>>, ref_tx_count: usize) {
         }
     }
     assert_eq!(total, ref_tx_count);
-}
-
-#[bench]
-fn bench_consume_buffered(bencher: &mut Bencher) {
-    let GenesisConfigInfo { genesis_config, .. } = create_genesis_config(100_000);
-    let bank = Bank::new_for_benches(&genesis_config)
-        .wrap_with_bank_forks_for_tests()
-        .0;
-    let ledger_path = get_tmp_ledger_path_auto_delete!();
-    let blockstore = Arc::new(
-        Blockstore::open(ledger_path.path()).expect("Expected to be able to open database ledger"),
-    );
-    let (exit, poh_recorder, poh_service, _signal_receiver) =
-        create_test_recorder(bank, blockstore, None, None);
-
-    let recorder = poh_recorder.read().unwrap().new_recorder();
-    let bank_start = poh_recorder.read().unwrap().bank_start().unwrap();
-
-    let tx = test_tx();
-    let transactions = vec![tx; 4194304];
-    let batches = transactions
-        .iter()
-        .filter_map(|transaction| {
-            let packet = Packet::from_data(None, transaction).ok().unwrap();
-            DeserializedPacket::new(packet).ok()
-        })
-        .collect::<Vec<_>>();
-    let batches_len = batches.len();
-    let mut transaction_buffer = UnprocessedTransactionStorage::new_transaction_storage(
-        UnprocessedPacketBatches::from_iter(batches, 2 * batches_len),
-        ThreadType::Transactions,
-    );
-    let (s, _r) = unbounded();
-    let committer = Committer::new(None, s, Arc::new(PrioritizationFeeCache::new(0u64)));
-    let consumer = Consumer::new(committer, recorder, QosService::new(1), None);
-    // This tests the performance of buffering packets.
-    // If the packet buffers are copied, performance will be poor.
-    bencher.iter(move || {
-        consumer.consume_buffered_packets(
-            &bank_start,
-            &mut transaction_buffer,
-            &BankingStageStats::default(),
-            &mut LeaderSlotMetricsTracker::new(0),
-        );
-    });
-
-    exit.store(true, Ordering::Relaxed);
-    poh_service.join().unwrap();
 }
 
 fn make_accounts_txs(txes: usize, mint_keypair: &Keypair, hash: Hash) -> Vec<Transaction> {
@@ -284,7 +223,7 @@ fn bench_banking(
     let vote_packets = vote_txs.map(|vote_txs| {
         let mut packet_batches = to_packet_batches(&vote_txs, PACKETS_PER_BATCH);
         for batch in packet_batches.iter_mut() {
-            for packet in batch.iter_mut() {
+            for mut packet in batch.iter_mut() {
                 packet.meta_mut().set_simple_vote(true);
             }
         }
@@ -295,7 +234,7 @@ fn bench_banking(
     let blockstore = Arc::new(
         Blockstore::open(ledger_path.path()).expect("Expected to be able to open database ledger"),
     );
-    let (exit, poh_recorder, poh_service, signal_receiver) =
+    let (exit, poh_recorder, transaction_recorder, poh_service, signal_receiver) =
         create_test_recorder(bank.clone(), blockstore, None, None);
     let cluster_info = {
         let keypair = Arc::new(Keypair::new());
@@ -309,16 +248,15 @@ fn bench_banking(
         transaction_struct,
         &cluster_info,
         &poh_recorder,
+        transaction_recorder,
         non_vote_receiver,
         tpu_vote_receiver,
         gossip_vote_receiver,
         None,
         s,
         None,
-        Arc::new(ConnectionCache::new("connection_cache_test")),
         bank_forks,
         &Arc::new(PrioritizationFeeCache::new(0u64)),
-        false,
     );
 
     let chunk_len = verified.len() / CHUNKS;

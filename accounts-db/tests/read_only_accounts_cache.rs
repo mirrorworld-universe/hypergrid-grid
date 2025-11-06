@@ -1,8 +1,8 @@
 use {
     rand::{rngs::SmallRng, SeedableRng},
+    solana_account::{Account, AccountSharedData},
     solana_accounts_db::read_only_accounts_cache::{ReadOnlyAccountsCache, CACHE_ENTRY_SIZE},
     solana_pubkey::Pubkey,
-    solana_sdk::account::{Account, AccountSharedData},
     std::{collections::HashSet, sync::atomic::Ordering},
     test_case::test_matrix,
 };
@@ -55,6 +55,7 @@ fn test_read_only_accounts_cache_eviction(num_accounts: (usize, usize), evict_sa
     let mut evicted = vec![];
     for _ in 0..1000 {
         cache.evict_in_foreground(evict_sample_size, &mut rng, |pubkey, entry| {
+            let entry = entry.unwrap();
             evicts = evicts.saturating_add(1);
             if newer_half.contains(pubkey) {
                 evicts_from_newer_half = evicts_from_newer_half.saturating_add(1);

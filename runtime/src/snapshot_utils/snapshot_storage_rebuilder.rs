@@ -15,11 +15,12 @@ use {
     },
     regex::Regex,
     solana_accounts_db::{
-        account_storage::{AccountStorageMap, AccountStorageReference},
-        accounts_db::{AccountStorageEntry, AccountsFileId, AtomicAccountsFileId},
+        account_storage::AccountStorageMap,
+        accounts_db::{AccountsFileId, AtomicAccountsFileId},
         accounts_file::StorageAccess,
     },
-    solana_sdk::clock::Slot,
+    solana_clock::Slot,
+    solana_nohash_hasher::BuildNoHashHasher,
     std::{
         collections::HashMap,
         fs::File,
@@ -33,11 +34,6 @@ use {
         time::Instant,
     },
 };
-
-lazy_static! {
-    static ref VERSION_FILE_REGEX: Regex = Regex::new(r"^version$").unwrap();
-    static ref BANK_FIELDS_FILE_REGEX: Regex = Regex::new(r"^[0-9]+(\.pre)?$").unwrap();
-}
 
 /// Convenient wrapper for snapshot version and rebuilt storages
 pub(crate) struct RebuiltSnapshotStorage {
@@ -118,7 +114,10 @@ impl SnapshotStorageRebuilder {
         snapshot_from: SnapshotFrom,
         storage_access: StorageAccess,
     ) -> Self {
-        let storage = DashMap::with_capacity(snapshot_storage_lengths.len());
+        let storage = DashMap::with_capacity_and_hasher(
+            snapshot_storage_lengths.len(),
+            BuildNoHashHasher::default(),
+        );
         let storage_paths: DashMap<_, _> = snapshot_storage_lengths
             .iter()
             .map(|(slot, storage_lengths)| {
@@ -338,10 +337,9 @@ impl SnapshotStorageRebuilder {
                     )?,
                 };
 
-                Ok((storage_entry.id(), storage_entry))
+                Ok(storage_entry)
             })
-            .collect::<Result<HashMap<AccountsFileId, Arc<AccountStorageEntry>>, SnapshotError>>(
-            )?;
+            .collect::<Result<Vec<_>, SnapshotError>>()?;
 
         if slot_stores.len() != 1 {
             return Err(SnapshotError::RebuildStorages(format!(
@@ -351,10 +349,9 @@ impl SnapshotStorageRebuilder {
         }
         // SAFETY: The check above guarantees there is one item in slot_stores,
         // so `.next()` will always return `Some`
-        let (id, storage) = slot_stores.into_iter().next().unwrap();
+        let storage = slot_stores.into_iter().next().unwrap();
 
-        self.storage
-            .insert(slot, AccountStorageReference { id, storage });
+        self.storage.insert(slot, storage);
         Ok(())
     }
 
@@ -411,6 +408,11 @@ enum SnapshotFileKind {
 
 /// Determines `SnapshotFileKind` for `filename` if any
 fn get_snapshot_file_kind(filename: &str) -> Option<SnapshotFileKind> {
+    static VERSION_FILE_REGEX: std::sync::LazyLock<Regex> =
+        std::sync::LazyLock::new(|| Regex::new(r"^version$").unwrap());
+    static BANK_FIELDS_FILE_REGEX: std::sync::LazyLock<Regex> =
+        std::sync::LazyLock::new(|| Regex::new(r"^[0-9]+(\.pre)?$").unwrap());
+
     if VERSION_FILE_REGEX.is_match(filename) {
         Some(SnapshotFileKind::Version)
     } else if BANK_FIELDS_FILE_REGEX.is_match(filename) {

@@ -1,24 +1,31 @@
+// Sonic:
 use {
+    agave_feature_set::{FeatureSet, FEATURE_NAMES},
     log::*,
-    solana_feature_set::{FeatureSet, FEATURE_NAMES},
-    solana_sdk::{
-        account::{Account, AccountSharedData},
-        feature::{self, Feature},
-        fee_calculator::FeeRateGovernor,
-        genesis_config::{ClusterType, GenesisConfig},
-        native_token::sol_to_lamports,
-        pubkey::Pubkey,
-        rent::Rent,
-        signature::{Keypair, Signer},
-        signer::SeedDerivable,
-        sonic_account_migrater, sonic_fee_settlement,
-        stake::state::StakeStateV2,
-        system_program,
-    },
+    solana_account::{Account, AccountSharedData},
+    solana_feature_gate_interface::{self as feature, Feature},
+    solana_fee_calculator::FeeRateGovernor,
+    solana_genesis_config::{ClusterType, GenesisConfig},
+    solana_keypair::Keypair,
+    solana_native_token::sol_to_lamports,
+    solana_program::{sonic_account_migrater, sonic_fee_settlement},
+    solana_pubkey::Pubkey,
+    solana_rent::Rent,
+    solana_seed_derivable::SeedDerivable,
+    solana_signer::Signer,
+    solana_stake_interface::state::StakeStateV2,
     solana_stake_program::stake_state,
+    solana_system_interface::program as system_program,
     solana_vote_program::vote_state,
     std::borrow::Borrow,
 };
+
+//Sonic: added this
+pub(crate) mod token_2022 {
+    pub(crate) mod native_mint {
+        solana_pubkey::declare_id!("9pan9bMn5HatX4EJdBwg9VgCa7Uz5HL8N1m5D3NdXejP");
+    }
+}
 
 // Default amount received by the validator
 const VALIDATOR_LAMPORTS: u64 = 42;
@@ -30,7 +37,7 @@ pub fn bootstrap_validator_stake_lamports() -> u64 {
 
 // Number of lamports automatically used for genesis accounts
 pub const fn genesis_sysvar_and_builtin_program_lamports() -> u64 {
-    const NUM_BUILTIN_PROGRAMS: u64 = 9;
+    const NUM_BUILTIN_PROGRAMS: u64 = 7;
     const NUM_PRECOMPILES: u64 = 2;
     const STAKE_HISTORY_MIN_BALANCE: u64 = 114_979_200;
     const CLOCK_SYSVAR_MIN_BALANCE: u64 = 1_169_280;
@@ -223,8 +230,8 @@ pub fn create_genesis_config_with_leader_with_mint_keypair(
 
 pub fn activate_all_features(genesis_config: &mut GenesisConfig) {
     // Activate all features at genesis in development mode
-    for feature_id in FeatureSet::default().inactive {
-        activate_feature(genesis_config, feature_id);
+    for feature_id in FeatureSet::default().inactive() {
+        activate_feature(genesis_config, *feature_id);
     }
 }
 
@@ -297,33 +304,33 @@ pub fn create_genesis_config_with_leader_ex_no_features(
     initial_accounts.push((*validator_vote_account_pubkey, validator_vote_account));
     initial_accounts.push((*validator_stake_account_pubkey, validator_stake_account));
 
-    let native_mint_account = solana_sdk::account::AccountSharedData::from(Account {
-        owner: solana_inline_spl::token::id(),
-        data: solana_inline_spl::token::native_mint::ACCOUNT_DATA.to_vec(),
+    let native_mint_account = solana_account::AccountSharedData::from(Account {
+        owner: spl_generic_token::token::id(),
+        data: spl_generic_token::token::native_mint::ACCOUNT_DATA.to_vec(),
         lamports: sol_to_lamports(1.),
         executable: false,
         rent_epoch: 1,
     });
     initial_accounts.push((
-        solana_inline_spl::token::native_mint::id(),
+        spl_generic_token::token::native_mint::id(),
         native_mint_account,
     ));
 
     // Sonic: Add the native mint 2022
-    let native_mint_account = solana_sdk::account::AccountSharedData::from(Account {
-        owner: solana_inline_spl::token_2022::id(),
-        data: solana_inline_spl::token::native_mint::ACCOUNT_DATA.to_vec(),
+    let native_mint_account = AccountSharedData::from(Account {
+        owner: spl_generic_token::token_2022::id(),
+        data: spl_generic_token::token::native_mint::ACCOUNT_DATA.to_vec(),
         lamports: sol_to_lamports(1.),
         executable: false,
         rent_epoch: 1,
     });
     initial_accounts.push((
-        solana_inline_spl::token_2022::native_mint::id(),
+        token_2022::native_mint::id(),
         native_mint_account,
     ));
 
     // Sonic: Add Sonic account migrater
-    let migrater_data_account = solana_sdk::account::AccountSharedData::from(Account {
+    let migrater_data_account = AccountSharedData::from(Account {
         owner: sonic_account_migrater::program::id(),
         data: vec![
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -341,7 +348,7 @@ pub fn create_genesis_config_with_leader_ex_no_features(
     ));
 
     // Sonic: Add Sonic fee settlement data account
-    let migrater_data_account = solana_sdk::account::AccountSharedData::from(Account {
+    let migrater_data_account = AccountSharedData::from(Account {
         owner: sonic_fee_settlement::program::id(),
         data: vec![
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,

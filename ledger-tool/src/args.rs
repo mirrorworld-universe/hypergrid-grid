@@ -1,8 +1,9 @@
 use {
     crate::LEDGER_TOOL_DIRECTORY,
     clap::{value_t, value_t_or_exit, values_t, values_t_or_exit, Arg, ArgMatches},
+    solana_account_decoder::{UiAccountEncoding, UiDataSliceConfig},
     solana_accounts_db::{
-        accounts_db::{AccountsDb, AccountsDbConfig, CreateAncientStorage},
+        accounts_db::{AccountsDb, AccountsDbConfig},
         accounts_file::StorageAccess,
         accounts_index::{AccountsIndexConfig, IndexLimitMb, ScanFilter},
         utils::create_and_canonicalize_directories,
@@ -12,12 +13,13 @@ use {
         input_parsers::pubkeys_of,
         input_validators::{is_parsable, is_pow2, is_within_range},
     },
+    solana_cli_output::CliAccountNewConfig,
+    solana_clock::Slot,
     solana_ledger::{
         blockstore_processor::ProcessOptions,
         use_snapshot_archives_at_startup::{self, UseSnapshotArchivesAtStartup},
     },
     solana_runtime::runtime_config::RuntimeConfig,
-    solana_sdk::clock::Slot,
     std::{
         collections::HashSet,
         num::NonZeroUsize,
@@ -92,13 +94,6 @@ pub fn accounts_db_args<'a, 'b>() -> Box<[Arg<'a, 'b>]> {
                 verify that on-disk account entries are indeed normal.",
             )
             .hidden(hidden_unless_forced()),
-        Arg::with_name("accounts_db_test_skip_rewrites")
-            .long("accounts-db-test-skip-rewrites")
-            .help(
-                "Debug option to skip rewrites for rent-exempt accounts but still add them in \
-                 bank delta hash calculation",
-            )
-            .hidden(hidden_unless_forced()),
         Arg::with_name("accounts_db_skip_initial_hash_calculation")
             .long("accounts-db-skip-initial-hash-calculation")
             .help("Do not verify accounts hash at startup.")
@@ -113,22 +108,15 @@ pub fn accounts_db_args<'a, 'b>() -> Box<[Arg<'a, 'b>]> {
                  together.",
             )
             .hidden(hidden_unless_forced()),
-        Arg::with_name("accounts_db_squash_storages_method")
-            .long("accounts-db-squash-storages-method")
-            .value_name("METHOD")
-            .takes_value(true)
-            .possible_values(&["pack", "append"])
-            .help("Squash multiple account storage files together using this method")
-            .hidden(hidden_unless_forced()),
         Arg::with_name("accounts_db_access_storages_method")
             .long("accounts-db-access-storages-method")
             .value_name("METHOD")
             .takes_value(true)
             .possible_values(&["mmap", "file"])
             .help("Access account storages using this method"),
-        Arg::with_name("accounts_db_experimental_accumulator_hash")
-            .long("accounts-db-experimental-accumulator-hash")
-            .help("Enables the experimental accumulator hash")
+        Arg::with_name("no_accounts_db_experimental_accumulator_hash")
+            .long("no-accounts-db-experimental-accumulator-hash")
+            .help("Disables the experimental accumulator hash")
             .hidden(hidden_unless_forced()),
         Arg::with_name("accounts_db_verify_experimental_accumulator_hash")
             .long("accounts-db-verify-experimental-accumulator-hash")
@@ -291,7 +279,7 @@ pub fn get_accounts_db_config(
     let accounts_index_index_limit_mb = if arg_matches.is_present("disable_accounts_disk_index") {
         IndexLimitMb::InMemOnly
     } else {
-        IndexLimitMb::Unlimited
+        IndexLimitMb::Minimal
     };
     let accounts_index_drives = values_t!(arg_matches, "accounts_index_path", String)
         .ok()
@@ -321,17 +309,6 @@ pub fn get_accounts_db_config(
         .pop()
         .unwrap();
 
-    let create_ancient_storage = arg_matches
-        .value_of("accounts_db_squash_storages_method")
-        .map(|method| match method {
-            "pack" => CreateAncientStorage::Pack,
-            "append" => CreateAncientStorage::Append,
-            _ => {
-                // clap will enforce one of the above values is given
-                unreachable!("invalid value given to accounts-db-squash-storages-method")
-            }
-        })
-        .unwrap_or_default();
     let storage_access = arg_matches
         .value_of("accounts_db_access_storages_method")
         .map(|method| match method {
@@ -382,19 +359,48 @@ pub fn get_accounts_db_config(
         .ok(),
         exhaustively_verify_refcounts: arg_matches.is_present("accounts_db_verify_refcounts"),
         skip_initial_hash_calc: arg_matches.is_present("accounts_db_skip_initial_hash_calculation"),
-        test_skip_rewrites_but_include_in_bank_hash: arg_matches
-            .is_present("accounts_db_test_skip_rewrites"),
-        create_ancient_storage,
+        test_skip_rewrites_but_include_in_bank_hash: false,
         storage_access,
         scan_filter_for_shrinking,
-        enable_experimental_accumulator_hash: arg_matches
-            .is_present("accounts_db_experimental_accumulator_hash"),
+        enable_experimental_accumulator_hash: !arg_matches
+            .is_present("no_accounts_db_experimental_accumulator_hash"),
         verify_experimental_accumulator_hash: arg_matches
             .is_present("accounts_db_verify_experimental_accumulator_hash"),
         snapshots_use_experimental_accumulator_hash: arg_matches
             .is_present("accounts_db_snapshots_use_experimental_accumulator_hash"),
         num_hash_threads,
         ..AccountsDbConfig::default()
+    }
+}
+
+pub(crate) fn parse_encoding_format(matches: &ArgMatches<'_>) -> UiAccountEncoding {
+    match matches.value_of("encoding") {
+        Some("jsonParsed") => UiAccountEncoding::JsonParsed,
+        Some("base64") => UiAccountEncoding::Base64,
+        Some("base64+zstd") => UiAccountEncoding::Base64Zstd,
+        _ => UiAccountEncoding::Base64,
+    }
+}
+
+pub(crate) fn parse_account_output_config(matches: &ArgMatches<'_>) -> CliAccountNewConfig {
+    let data_encoding = parse_encoding_format(matches);
+    let output_account_data = !matches.is_present("no_account_data");
+    let data_slice_config = if output_account_data {
+        // None yields the entire account in the slice
+        None
+    } else {
+        // usize::MAX is a sentinel that will yield an
+        // empty data slice. Because of this, length is
+        // ignored so any value will do
+        let offset = usize::MAX;
+        let length = 0;
+        Some(UiDataSliceConfig { offset, length })
+    };
+
+    CliAccountNewConfig {
+        data_encoding,
+        data_slice_config,
+        ..CliAccountNewConfig::default()
     }
 }
 

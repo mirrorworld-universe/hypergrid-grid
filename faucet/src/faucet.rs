@@ -4,6 +4,8 @@
 //! checking requests against a single-request cap and a per-IP limit
 //! for a given time time_slice.
 
+#![allow(deprecated)] // Sonic: use of deprecated function `solana_native_token::lamports_to_sol`: solana_cli_output::display::build_balance_message
+
 use {
     bincode::{deserialize, serialize, serialized_size},
     crossbeam_channel::{unbounded, Sender},

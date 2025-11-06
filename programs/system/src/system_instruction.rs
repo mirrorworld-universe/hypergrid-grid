@@ -253,8 +253,8 @@ mod test {
         assert_matches::assert_matches,
         solana_account::AccountSharedData,
         solana_nonce::{self as nonce, state::State},
+        solana_nonce_account::{create_account, verify_nonce_account},
         solana_program_runtime::with_mock_invoke_context,
-        solana_sdk::nonce_account::{create_account, verify_nonce_account},
         solana_sdk_ids::system_program,
         solana_sha256_hasher::hash,
         solana_transaction_context::InstructionAccount,
@@ -1129,9 +1129,9 @@ mod test {
         assert_matches!(
             verify_nonce_account(
                 &transaction_context
-                    .get_account_at_index(NONCE_ACCOUNT_INDEX)
-                    .unwrap()
-                    .borrow(),
+                    .accounts()
+                    .try_borrow(NONCE_ACCOUNT_INDEX)
+                    .unwrap(),
                 DurableNonce::from_blockhash(&invoke_context.environment_config.blockhash)
                     .as_hash(),
             ),
@@ -1151,9 +1151,9 @@ mod test {
         assert_eq!(
             verify_nonce_account(
                 &transaction_context
-                    .get_account_at_index(NONCE_ACCOUNT_INDEX)
-                    .unwrap()
-                    .borrow(),
+                    .accounts()
+                    .try_borrow(NONCE_ACCOUNT_INDEX)
+                    .unwrap(),
                 &Hash::default(),
             ),
             None
@@ -1191,9 +1191,9 @@ mod test {
         assert_eq!(
             verify_nonce_account(
                 &transaction_context
-                    .get_account_at_index(NONCE_ACCOUNT_INDEX)
-                    .unwrap()
-                    .borrow(),
+                    .accounts()
+                    .try_borrow(NONCE_ACCOUNT_INDEX)
+                    .unwrap(),
                 DurableNonce::from_blockhash(&invoke_context.environment_config.blockhash)
                     .as_hash(),
             ),

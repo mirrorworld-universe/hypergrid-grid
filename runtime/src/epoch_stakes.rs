@@ -1,7 +1,8 @@
 use {
     crate::stakes::{serde_stakes_to_delegation_format, SerdeStakesToStakeFormat, StakesEnum},
     serde::{Deserialize, Serialize},
-    solana_sdk::{clock::Epoch, pubkey::Pubkey},
+    solana_clock::Epoch,
+    solana_pubkey::Pubkey,
     solana_vote::vote_account::VoteAccountsHashMap,
     std::{collections::HashMap, sync::Arc},
 };
@@ -100,21 +101,20 @@ impl EpochStakes {
         let epoch_authorized_voters = epoch_vote_accounts
             .iter()
             .filter_map(|(key, (stake, account))| {
-                let vote_state = account.vote_state();
+                let vote_state = account.vote_state_view();
 
                 if *stake > 0 {
-                    if let Some(authorized_voter) = vote_state
-                        .authorized_voters()
-                        .get_authorized_voter(leader_schedule_epoch)
+                    if let Some(authorized_voter) =
+                        vote_state.get_authorized_voter(leader_schedule_epoch)
                     {
                         let node_vote_accounts = node_id_to_vote_accounts
-                            .entry(vote_state.node_pubkey)
+                            .entry(*vote_state.node_pubkey())
                             .or_default();
 
                         node_vote_accounts.total_stake += stake;
                         node_vote_accounts.vote_accounts.push(*key);
 
-                        Some((*key, authorized_voter))
+                        Some((*key, *authorized_voter))
                     } else {
                         None
                     }
@@ -229,7 +229,8 @@ pub(crate) mod tests {
             stake_account::StakeAccount,
             stakes::{Stakes, StakesCache},
         },
-        solana_sdk::{account::AccountSharedData, rent::Rent},
+        solana_account::AccountSharedData,
+        solana_rent::Rent,
         solana_stake_program::stake_state::{self, Delegation, Stake},
         solana_vote::vote_account::VoteAccount,
         solana_vote_program::vote_state::{self, create_account_with_authorized},

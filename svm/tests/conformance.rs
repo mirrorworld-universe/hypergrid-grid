@@ -1,37 +1,37 @@
+// Sonic:
+use mock_bank::{MockAccountsDb, TransactionBatchProcessor};
 use {
     crate::{
-        mock_bank::{MockBankCallback, MockForkGraph, TransactionBatchProcessor},
+        mock_bank::{MockBankCallback, MockForkGraph},
         transaction_builder::SanitizedTransactionBuilder,
     },
-    lazy_static::lazy_static,
+    agave_feature_set::{FeatureSet, FEATURE_NAMES},
     prost::Message,
+    solana_account::{AccountSharedData, ReadableAccount, WritableAccount},
     solana_bpf_loader_program::syscalls::create_program_runtime_environment_v1,
-    solana_compute_budget::compute_budget::ComputeBudget,
-    solana_feature_set::{FeatureSet, FEATURE_NAMES},
+    solana_clock::Clock,
+    solana_epoch_schedule::EpochSchedule,
+    solana_hash::Hash,
+    solana_instruction::AccountMeta,
     solana_log_collector::LogCollector,
+    solana_message::SanitizedMessage,
     solana_program_runtime::{
+        execution_budget::{SVMTransactionExecutionBudget, SVMTransactionExecutionCost},
         invoke_context::{EnvironmentConfig, InvokeContext},
         loaded_programs::{ProgramCacheEntry, ProgramCacheForTxBatch},
     },
-    solana_sdk::{
-        account::{AccountSharedData, ReadableAccount, WritableAccount},
-        clock::Clock,
-        epoch_schedule::EpochSchedule,
-        hash::Hash,
-        instruction::AccountMeta,
-        message::SanitizedMessage,
-        pubkey::Pubkey,
-        rent::Rent,
-        signature::Signature,
-        sysvar::{last_restart_slot, SysvarId},
-        transaction_context::{
-            ExecutionRecord, IndexOfAccount, InstructionAccount, TransactionAccount,
-            TransactionContext,
-        },
-    },
-    solana_svm::{program_loader, transaction_processing_callback::TransactionProcessingCallback},
+    solana_pubkey::Pubkey,
+    solana_rent::Rent,
+    solana_signature::Signature,
+    solana_svm::program_loader,
+    solana_svm_callback::TransactionProcessingCallback,
     solana_svm_conformance::proto::{AcctState, InstrEffects, InstrFixture},
+    solana_sysvar::last_restart_slot,
+    solana_sysvar_id::SysvarId,
     solana_timings::ExecuteTimings,
+    solana_transaction_context::{
+        ExecutionRecord, IndexOfAccount, InstructionAccount, TransactionAccount, TransactionContext,
+    },
     std::{
         collections::{hash_map::Entry, HashMap},
         env,
@@ -50,23 +50,22 @@ mod transaction_builder;
 const fn feature_u64(feature: &Pubkey) -> u64 {
     let feature_id = feature.to_bytes();
     feature_id[0] as u64
-        | (feature_id[1] as u64) << 8
-        | (feature_id[2] as u64) << 16
-        | (feature_id[3] as u64) << 24
-        | (feature_id[4] as u64) << 32
-        | (feature_id[5] as u64) << 40
-        | (feature_id[6] as u64) << 48
-        | (feature_id[7] as u64) << 56
+        | ((feature_id[1] as u64) << 8)
+        | ((feature_id[2] as u64) << 16)
+        | ((feature_id[3] as u64) << 24)
+        | ((feature_id[4] as u64) << 32)
+        | ((feature_id[5] as u64) << 40)
+        | ((feature_id[6] as u64) << 48)
+        | ((feature_id[7] as u64) << 56)
 }
 
-lazy_static! {
-    static ref INDEXED_FEATURES: HashMap<u64, Pubkey> = {
+static INDEXED_FEATURES: std::sync::LazyLock<HashMap<u64, Pubkey>> =
+    std::sync::LazyLock::new(|| {
         FEATURE_NAMES
             .iter()
             .map(|(pubkey, _)| (feature_u64(pubkey), *pubkey))
             .collect()
-    };
-}
+    });
 
 fn setup() -> PathBuf {
     let mut dir = env::current_dir().unwrap();
@@ -213,15 +212,20 @@ fn run_fixture(fixture: InstrFixture, filename: OsString) {
 
     let transactions = vec![transaction];
 
-    let compute_budget = ComputeBudget {
+    let compute_budget = SVMTransactionExecutionBudget {
         compute_unit_limit: input.cu_avail,
-        ..ComputeBudget::default()
+        ..SVMTransactionExecutionBudget::default()
     };
 
-    let v1_environment =
-        create_program_runtime_environment_v1(&feature_set, &compute_budget, false, false).unwrap();
+    let v1_environment = create_program_runtime_environment_v1(
+        &feature_set.runtime_features(),
+        &compute_budget,
+        false,
+        false,
+    )
+    .unwrap();
 
-    mock_bank.override_feature_set(feature_set);
+    mock_bank.override_feature_set(feature_set.runtime_features());
 
     let fork_graph = Arc::new(RwLock::new(MockForkGraph {}));
     let batch_processor = TransactionBatchProcessor::new(
@@ -231,8 +235,8 @@ fn run_fixture(fixture: InstrFixture, filename: OsString) {
         Some(Arc::new(v1_environment)),
         None,
         // Sonic:
-        Default::default(),
-        Default::default(),
+        Arc::new(MockAccountsDb::default()),
+        Arc::new(std::collections::HashSet::new()),
     );
 
     batch_processor
@@ -279,7 +283,7 @@ fn execute_fixture_as_instr(
     mock_bank: &MockBankCallback,
     batch_processor: &TransactionBatchProcessor<MockForkGraph>,
     sanitized_message: &SanitizedMessage,
-    compute_budget: ComputeBudget,
+    compute_budget: SVMTransactionExecutionBudget,
     output: &InstrEffects,
     filename: OsString,
     cu_avail: u64,
@@ -354,9 +358,8 @@ fn execute_fixture_as_instr(
     let env_config = EnvironmentConfig::new(
         blockhash,
         lamports_per_signature,
-        0,
-        &|_| 0,
-        mock_bank.feature_set.clone(),
+        mock_bank,
+        &mock_bank.feature_set,
         sysvar_cache,
     );
 
@@ -366,6 +369,7 @@ fn execute_fixture_as_instr(
         env_config,
         Some(log_collector.clone()),
         compute_budget,
+        SVMTransactionExecutionCost::default(),
     );
 
     let mut instruction_accounts: Vec<InstructionAccount> =

@@ -34,7 +34,7 @@ use {
     },
     crate::banking_trace::Channels,
     agave_banking_stage_ingress_types::BankingPacketBatch,
-    solana_poh::poh_recorder::PohRecorder,
+    solana_poh::{poh_recorder::PohRecorder, transaction_recorder::TransactionRecorder},
     solana_runtime::{bank_forks::BankForks, root_bank_cache::RootBankCache},
     solana_unified_scheduler_pool::{BankingStageHelper, DefaultSchedulerPool},
     std::sync::{Arc, RwLock},
@@ -48,16 +48,21 @@ pub(crate) fn ensure_banking_stage_setup(
     channels: &Channels,
     cluster_info: &impl LikeClusterInfo,
     poh_recorder: &Arc<RwLock<PohRecorder>>,
+    transaction_recorder: TransactionRecorder,
+    num_threads: u32,
 ) {
     let mut root_bank_cache = RootBankCache::new(bank_forks.clone());
     let unified_receiver = channels.unified_receiver().clone();
     let mut decision_maker = DecisionMaker::new(cluster_info.id(), poh_recorder.clone());
-    let transaction_recorder = poh_recorder.read().unwrap().new_recorder();
+    let banking_stage_monitor = Box::new(decision_maker.clone());
 
     let banking_packet_handler = Box::new(
         move |helper: &BankingStageHelper, batches: BankingPacketBatch| {
             let decision = decision_maker.make_consume_or_forward_decision();
             if matches!(decision, BufferedPacketsDecision::Forward) {
+                // discard newly-arriving packets. note that already handled packets (thus buffered
+                // by scheduler internally) will be discarded as well via BankingStageMonitor api
+                // by solScCleaner.
                 return;
             }
             let bank = root_bank_cache.root_bank();
@@ -87,8 +92,10 @@ pub(crate) fn ensure_banking_stage_setup(
     );
 
     pool.register_banking_stage(
+        Some(num_threads.try_into().unwrap()),
         unified_receiver,
         banking_packet_handler,
         transaction_recorder,
+        banking_stage_monitor,
     );
 }

@@ -4,46 +4,51 @@
 // Export tokio for test clients
 pub use tokio;
 use {
+    agave_feature_set::FEATURE_NAMES,
     async_trait::async_trait,
     base64::{prelude::BASE64_STANDARD, Engine},
     chrono_humanize::{Accuracy, HumanTime, Tense},
     log::*,
+    solana_account::{create_account_shared_data_for_test, Account, AccountSharedData},
+    solana_account_info::AccountInfo,
     solana_accounts_db::epoch_accounts_hash::EpochAccountsHash,
     solana_banks_client::start_client,
     solana_banks_server::banks_server::start_local_server,
-    solana_bpf_loader_program::serialization::serialize_parameters,
+    solana_clock::{Epoch, Slot},
     solana_compute_budget::compute_budget::ComputeBudget,
-    solana_feature_set::FEATURE_NAMES,
-    solana_instruction::{error::InstructionError, Instruction},
-    solana_log_collector::ic_msg,
-    solana_program_runtime::{
-        invoke_context::BuiltinFunctionWithContext, loaded_programs::ProgramCacheEntry, stable_log,
+    solana_fee_calculator::{FeeRateGovernor, DEFAULT_TARGET_LAMPORTS_PER_SIGNATURE},
+    solana_genesis_config::{ClusterType, GenesisConfig},
+    solana_hash::Hash,
+    solana_instruction::{
+        error::{InstructionError, UNSUPPORTED_SYSVAR},
+        Instruction,
     },
+    solana_keypair::Keypair,
+    solana_log_collector::ic_msg,
+    solana_native_token::sol_to_lamports,
+    solana_poh_config::PohConfig,
+    solana_program_entrypoint::{deserialize, SUCCESS},
+    solana_program_error::{ProgramError, ProgramResult},
+    solana_program_runtime::{
+        invoke_context::BuiltinFunctionWithContext, loaded_programs::ProgramCacheEntry,
+        serialization::serialize_parameters, stable_log,
+    },
+    solana_pubkey::Pubkey,
+    solana_rent::Rent,
     solana_runtime::{
-        accounts_background_service::{AbsRequestSender, SnapshotRequestKind},
+        accounts_background_service::SnapshotRequestKind,
         bank::Bank,
         bank_forks::BankForks,
         commitment::BlockCommitmentCache,
         genesis_utils::{create_genesis_config_with_leader_ex, GenesisConfigInfo},
         runtime_config::RuntimeConfig,
+        snapshot_config::SnapshotConfig,
+        snapshot_controller::SnapshotController,
     },
-    solana_sdk::{
-        account::{create_account_shared_data_for_test, Account, AccountSharedData},
-        account_info::AccountInfo,
-        clock::{Epoch, Slot},
-        entrypoint::{deserialize, ProgramResult, SUCCESS},
-        fee_calculator::{FeeRateGovernor, DEFAULT_TARGET_LAMPORTS_PER_SIGNATURE},
-        genesis_config::{ClusterType, GenesisConfig},
-        hash::Hash,
-        native_token::sol_to_lamports,
-        poh_config::PohConfig,
-        program_error::{ProgramError, UNSUPPORTED_SYSVAR},
-        pubkey::Pubkey,
-        rent::Rent,
-        signature::{Keypair, Signer},
-        stable_layout::stable_instruction::StableInstruction,
-        sysvar::{Sysvar, SysvarId},
-    },
+    solana_signer::Signer,
+    solana_stable_layout::stable_instruction::StableInstruction,
+    solana_sysvar::Sysvar,
+    solana_sysvar_id::SysvarId,
     solana_timings::ExecuteTimings,
     solana_vote_program::vote_state::{self, VoteState, VoteStateVersions},
     std::{
@@ -73,7 +78,7 @@ pub use {
         error::EbpfError,
         vm::{get_runtime_environment_key, EbpfVm},
     },
-    solana_sdk::transaction_context::IndexOfAccount,
+    solana_transaction_context::IndexOfAccount,
 };
 
 pub mod programs;
@@ -103,7 +108,7 @@ fn get_invoke_context<'a, 'b>() -> &'a mut InvokeContext<'b> {
 }
 
 pub fn invoke_builtin_function(
-    builtin_function: solana_sdk::entrypoint::ProcessInstruction,
+    builtin_function: solana_program_entrypoint::ProcessInstruction,
     invoke_context: &mut InvokeContext,
 ) -> Result<u64, Box<dyn std::error::Error>> {
     set_invoke_context(invoke_context);
@@ -127,10 +132,14 @@ pub fn invoke_builtin_function(
     let deduplicated_indices: HashSet<IndexOfAccount> = instruction_account_indices.collect();
 
     // Serialize entrypoint parameters with SBF ABI
+    let mask_out_rent_epoch_in_vm_serialization = invoke_context
+        .get_feature_set()
+        .mask_out_rent_epoch_in_vm_serialization;
     let (mut parameter_bytes, _regions, _account_lengths) = serialize_parameters(
         transaction_context,
         instruction_context,
         true, // copy_account_data // There is no VM so direct mapping can not be implemented here
+        mask_out_rent_epoch_in_vm_serialization,
     )?;
 
     // Deserialize data back into instruction params
@@ -180,7 +189,6 @@ pub fn invoke_builtin_function(
                 if borrowed_account
                     .can_data_be_resized(account_info.data_len())
                     .is_ok()
-                    && borrowed_account.can_data_be_changed().is_ok()
                 {
                     borrowed_account.set_data_from_slice(&account_info.data.borrow())?;
                 }
@@ -218,7 +226,7 @@ fn get_sysvar<T: Default + Sysvar + Sized + serde::de::DeserializeOwned + Clone>
 ) -> u64 {
     let invoke_context = get_invoke_context();
     if invoke_context
-        .consume_checked(invoke_context.get_compute_budget().sysvar_base_cost + T::size_of() as u64)
+        .consume_checked(invoke_context.get_execution_cost().sysvar_base_cost + T::size_of() as u64)
         .is_err()
     {
         panic!("Exceeded compute budget");
@@ -234,7 +242,7 @@ fn get_sysvar<T: Default + Sysvar + Sized + serde::de::DeserializeOwned + Clone>
 }
 
 struct SyscallStubs {}
-impl solana_sdk::program_stubs::SyscallStubs for SyscallStubs {
+impl solana_sysvar::program_stubs::SyscallStubs for SyscallStubs {
     fn sol_log(&self, message: &str) {
         let invoke_context = get_invoke_context();
         ic_msg!(invoke_context, "Program log: {}", message);
@@ -301,10 +309,7 @@ impl solana_sdk::program_stubs::SyscallStubs for SyscallStubs {
             }
             let account_info_data = account_info.try_borrow_data().unwrap();
             // The redundant check helps to avoid the expensive data comparison if we can
-            match borrowed_account
-                .can_data_be_resized(account_info_data.len())
-                .and_then(|_| borrowed_account.can_data_be_changed())
-            {
+            match borrowed_account.can_data_be_resized(account_info_data.len()) {
                 Ok(()) => borrowed_account
                     .set_data_from_slice(&account_info_data)
                     .unwrap(),
@@ -360,7 +365,7 @@ impl solana_sdk::program_stubs::SyscallStubs for SyscallStubs {
 
             // Resize account_info data
             if account_info.data_len() != new_len {
-                account_info.realloc(new_len, false)?;
+                account_info.realloc(new_len, true)?;
             }
 
             // Clone the data
@@ -685,7 +690,7 @@ impl ProgramTest {
                 Account {
                     lamports: Rent::default().minimum_balance(data.len()).max(1),
                     data,
-                    owner: solana_sdk::bpf_loader::id(),
+                    owner: solana_sdk_ids::bpf_loader::id(),
                     executable: true,
                     rent_epoch: 0,
                 },
@@ -789,7 +794,7 @@ impl ProgramTest {
             static ONCE: Once = Once::new();
 
             ONCE.call_once(|| {
-                solana_sdk::program_stubs::set_syscall_stubs(Box::new(SyscallStubs {}));
+                solana_sysvar::program_stubs::set_syscall_stubs(Box::new(SyscallStubs {}));
             });
         }
 
@@ -1001,15 +1006,12 @@ impl ProgramTestBanksClientExt for BanksClient {
             num_retries += 1;
         }
 
-        Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!(
-                "Unable to get new blockhash after {}ms (retried {} times), stuck at {}",
-                start.elapsed().as_millis(),
-                num_retries,
-                blockhash
-            ),
-        ))
+        Err(io::Error::other(format!(
+            "Unable to get new blockhash after {}ms (retried {} times), stuck at {}",
+            start.elapsed().as_millis(),
+            num_retries,
+            blockhash
+        )))
     }
 }
 
@@ -1171,10 +1173,18 @@ impl ProgramTestContext {
         };
 
         let (snapshot_request_sender, snapshot_request_receiver) = crossbeam_channel::unbounded();
-        let abs_request_sender = AbsRequestSender::new(snapshot_request_sender);
+        let snapshot_controller = SnapshotController::new(
+            snapshot_request_sender,
+            SnapshotConfig::new_disabled(),
+            bank_forks.root(),
+        );
 
         bank_forks
-            .set_root(pre_warp_slot, &abs_request_sender, Some(pre_warp_slot))
+            .set_root(
+                pre_warp_slot,
+                Some(&snapshot_controller),
+                Some(pre_warp_slot),
+            )
             .unwrap();
 
         // The call to `set_root()` above will send an EAH request.  Need to intercept and handle
@@ -1240,7 +1250,7 @@ impl ProgramTestContext {
         bank_forks
             .set_root(
                 pre_warp_slot,
-                &solana_runtime::accounts_background_service::AbsRequestSender::default(),
+                None, // snapshot_controller
                 Some(pre_warp_slot),
             )
             .unwrap();

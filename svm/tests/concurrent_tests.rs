@@ -11,15 +11,16 @@ use {
         sync::{Arc, RwLock},
         thread, Runner,
     },
-    solana_program_runtime::loaded_programs::ProgramCacheEntryType,
-    solana_sdk::{
-        account::{AccountSharedData, ReadableAccount, WritableAccount},
-        bpf_loader_upgradeable,
-        hash::Hash,
-        instruction::AccountMeta,
-        pubkey::Pubkey,
-        signature::Signature,
+    solana_account::{AccountSharedData, ReadableAccount, WritableAccount},
+    solana_hash::Hash,
+    solana_instruction::AccountMeta,
+    solana_program_runtime::{
+        execution_budget::SVMTransactionExecutionAndFeeBudgetLimits,
+        loaded_programs::ProgramCacheEntryType,
     },
+    solana_pubkey::Pubkey,
+    solana_sdk_ids::bpf_loader_upgradeable,
+    solana_signature::Signature,
     solana_svm::{
         account_loader::{CheckedTransactionDetails, TransactionCheckResult},
         transaction_processing_result::{
@@ -144,7 +145,7 @@ fn svm_concurrent() {
 
     mock_bank.configure_sysvars();
     batch_processor.fill_missing_sysvar_cache_entries(&*mock_bank);
-    register_builtins(&mock_bank, &batch_processor);
+    register_builtins(&mock_bank, &batch_processor, false);
 
     let mut transaction_builder = SanitizedTransactionBuilder::default();
     let program_id = deploy_program("transfer-from-account".to_string(), 0, &mock_bank);
@@ -238,16 +239,23 @@ fn svm_concurrent() {
             let local_batch = batch_processor.clone();
             let local_bank = mock_bank.clone();
             let th_txs = std::mem::take(&mut transactions[idx]);
-            let check_results = vec![
-                Ok(CheckedTransactionDetails::new(None, 20))
-                    as TransactionCheckResult;
-                TRANSACTIONS_PER_THREAD
-            ];
+            let check_results = th_txs
+                .iter()
+                .map(|tx| {
+                    Ok(CheckedTransactionDetails::new(
+                        None,
+                        Ok(SVMTransactionExecutionAndFeeBudgetLimits::with_fee(
+                            MockBankCallback::calculate_fee_details(tx, 0),
+                        )),
+                    )) as TransactionCheckResult
+                })
+                .collect();
             let processing_config = TransactionProcessingConfig {
                 recording_config: ExecutionRecordingConfig {
                     enable_log_recording: true,
                     enable_return_data_recording: false,
                     enable_cpi_recording: false,
+                    enable_transaction_balance_recording: false,
                 },
                 ..Default::default()
             };

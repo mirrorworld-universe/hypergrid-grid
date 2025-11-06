@@ -86,7 +86,7 @@ fn bench_poh_recorder_record_transaction_index(bencher: &mut Bencher) {
     let bank = Arc::new(Bank::new_for_tests(&genesis_config));
     let prev_hash = bank.last_blockhash();
 
-    let (mut poh_recorder, _entry_receiver, _record_receiver) = PohRecorder::new(
+    let (mut poh_recorder, _entry_receiver) = PohRecorder::new(
         0,
         prev_hash,
         bank.clone(),
@@ -111,15 +111,13 @@ fn bench_poh_recorder_record_transaction_index(bencher: &mut Bencher) {
         SanitizedTransaction::from_transaction_for_tests(test_tx()),
     ];
 
+    let txs: Vec<_> = txs.iter().map(|tx| tx.to_versioned_transaction()).collect();
     bencher.iter(|| {
         let _record_result = poh_recorder
             .record(
                 bank.slot(),
-                test::black_box(h1),
-                test::black_box(&txs)
-                    .iter()
-                    .map(|tx| tx.to_versioned_transaction())
-                    .collect(),
+                vec![test::black_box(h1)],
+                vec![test::black_box(txs.clone())],
             )
             .unwrap()
             .unwrap();
@@ -136,7 +134,7 @@ fn bench_poh_recorder_set_bank(bencher: &mut Bencher) {
     let bank = Arc::new(Bank::new_for_tests(&genesis_config));
     let prev_hash = bank.last_blockhash();
 
-    let (mut poh_recorder, _entry_receiver, _record_receiver) = PohRecorder::new(
+    let (mut poh_recorder, _entry_receiver) = PohRecorder::new(
         0,
         prev_hash,
         bank.clone(),

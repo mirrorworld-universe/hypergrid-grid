@@ -33,9 +33,10 @@ fn do_bench_dedup_packets(bencher: &mut Bencher, mut batches: Vec<PacketBatch>) 
             0.001,                  // false_positive_rate
             Duration::from_secs(2), // reset_cycle
         );
-        batches
-            .iter_mut()
-            .for_each(|b| b.iter_mut().for_each(|p| p.meta_mut().set_discard(false)));
+        batches.iter_mut().for_each(|b| {
+            b.iter_mut()
+                .for_each(|mut p| p.meta_mut().set_discard(false))
+        });
     });
 }
 
@@ -46,9 +47,7 @@ fn bench_dedup_same_small_packets(bencher: &mut Bencher) {
     let small_packet = test_packet_with_size(128, &mut rng);
 
     let batches = to_packet_batches(
-        &std::iter::repeat(small_packet)
-            .take(NUM)
-            .collect::<Vec<_>>(),
+        &std::iter::repeat_n(small_packet, NUM).collect::<Vec<_>>(),
         128,
     );
 
@@ -62,7 +61,7 @@ fn bench_dedup_same_big_packets(bencher: &mut Bencher) {
     let big_packet = test_packet_with_size(1024, &mut rng);
 
     let batches = to_packet_batches(
-        &std::iter::repeat(big_packet).take(NUM).collect::<Vec<_>>(),
+        &std::iter::repeat_n(big_packet, NUM).collect::<Vec<_>>(),
         128,
     );
 

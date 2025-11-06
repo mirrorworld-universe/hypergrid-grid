@@ -2,16 +2,25 @@
 
 use {
     solana_bpf_loader_program::syscalls::create_program_runtime_environment_v1,
-    solana_compute_budget::compute_budget::ComputeBudget,
-    solana_program_runtime::loaded_programs::{BlockRelation, ForkGraph, ProgramCacheEntry},
-    solana_sdk::{clock::Slot, feature_set::FeatureSet, transaction},
+    solana_clock::Slot,
+    solana_compute_budget::compute_budget_limits::ComputeBudgetLimits,
+    solana_fee_structure::FeeDetails,
+    solana_program_runtime::{
+        execution_budget::SVMTransactionExecutionBudget,
+        loaded_programs::{BlockRelation, ForkGraph, ProgramCacheEntry},
+    },
     solana_svm::{
         account_loader::CheckedTransactionDetails,
-        transaction_processing_callback::TransactionProcessingCallback,
     },
+    solana_svm_callback::TransactionProcessingCallback,
+    solana_svm_feature_set::SVMFeatureSet,
     solana_system_program::system_processor,
     std::sync::{Arc, RwLock},
 };
+
+mod transaction {
+    pub use solana_transaction_error::TransactionResult as Result;
+}
 
 pub(crate) type TransactionBatchProcessor<A, B = solana_accounts_db::accounts_db::AccountsDb> =
     solana_svm::transaction_processor::TransactionBatchProcessor<A, B>;
@@ -36,8 +45,8 @@ impl ForkGraph for PayTubeForkGraph {
 /// cache, then adding the System program to the processor's builtins.
 pub(crate) fn create_transaction_batch_processor<CB: TransactionProcessingCallback>(
     callbacks: &CB,
-    feature_set: &FeatureSet,
-    compute_budget: &ComputeBudget,
+    feature_set: &SVMFeatureSet,
+    compute_budget: &SVMTransactionExecutionBudget,
     fork_graph: Arc<RwLock<PayTubeForkGraph>>,
 ) -> TransactionBatchProcessor<PayTubeForkGraph> {
     // Create a new transaction batch processor.
@@ -78,7 +87,7 @@ pub(crate) fn create_transaction_batch_processor<CB: TransactionProcessingCallba
     // Add the BPF Loader v2 builtin, for the SPL Token program.
     processor.add_builtin(
         callbacks,
-        solana_sdk::bpf_loader::id(),
+        solana_sdk_ids::bpf_loader::id(),
         "solana_bpf_loader_program",
         ProgramCacheEntry::new_builtin(
             0,
@@ -95,7 +104,16 @@ pub(crate) fn create_transaction_batch_processor<CB: TransactionProcessingCallba
 /// PayTube, since we don't need to perform such pre-checks.
 pub(crate) fn get_transaction_check_results(
     len: usize,
-    lamports_per_signature: u64,
 ) -> Vec<transaction::Result<CheckedTransactionDetails>> {
-    vec![transaction::Result::Ok(CheckedTransactionDetails::new(None, lamports_per_signature)); len]
+    let compute_budget_limit = ComputeBudgetLimits::default();
+    vec![
+        transaction::Result::Ok(CheckedTransactionDetails::new(
+            None,
+            Ok(compute_budget_limit.get_compute_budget_and_limits(
+                compute_budget_limit.loaded_accounts_bytes,
+                FeeDetails::default()
+            )),
+        ));
+        len
+    ]
 }

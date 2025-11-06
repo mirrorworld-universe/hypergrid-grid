@@ -21,10 +21,11 @@ solana-frozen-abi-macro = { workspace = true }
 solana-program = { workspace = true }
 solana-log-collector.workspace = true
 thiserror = { workspace = true }
-
-[target.'cfg(not(target_os = "solana"))'.dependencies]
 solana-program-runtime = { workspace = true }
-solana-sdk = { workspace = true }
+solana-bincode = { workspace = true }
+solana-pubkey = { workspace = true }
+solana-instruction = { workspace = true }
+solana-packet = { workspace = true }
 
 [lib]
 crate-type = ["lib"]

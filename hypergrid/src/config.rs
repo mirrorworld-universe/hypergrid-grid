@@ -1,6 +1,6 @@
 use {
     serde::{Deserialize, Serialize},
-    solana_sdk::genesis_config::ClusterType,
+    solana_genesis_config::ClusterType,
     std::{fs::File, io, path::Path},
 };
 

@@ -1,4 +1,4 @@
-use {log::*, solana_sdk::pubkey::Pubkey, std::process::Command};
+use {log::*, solana_pubkey::Pubkey, std::process::Command};
 
 const COSMOS_CHAIN_ID: &str = "hypergridssn";
 const COSMOS_HOME: &str = ".hypergrid-ssn";

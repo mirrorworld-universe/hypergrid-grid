@@ -21,26 +21,24 @@ use {
     },
     crate::replay_stage::DUPLICATE_THRESHOLD,
     chrono::prelude::*,
+    solana_clock::{Slot, UnixTimestamp},
+    solana_hash::Hash,
+    solana_instruction::Instruction,
+    solana_keypair::Keypair,
     solana_ledger::{
         ancestor_iterator::AncestorIterator,
         blockstore::{self, Blockstore},
     },
+    solana_pubkey::Pubkey,
     solana_runtime::{bank::Bank, bank_forks::BankForks, commitment::VOTE_THRESHOLD_SIZE},
-    solana_sdk::{
-        clock::{Slot, UnixTimestamp},
-        hash::Hash,
-        instruction::Instruction,
-        pubkey::Pubkey,
-        signature::Keypair,
-        slot_history::{Check, SlotHistory},
-    },
-    solana_vote::vote_account::VoteAccountsHashMap,
+    solana_slot_history::{Check, SlotHistory},
+    solana_vote::{vote_account::VoteAccountsHashMap, vote_transaction::VoteTransaction},
     solana_vote_program::{
         vote_error::VoteError,
         vote_instruction,
         vote_state::{
-            process_slot_vote_unchecked, BlockTimestamp, Lockout, TowerSync, Vote,
-            VoteState1_14_11, VoteStateUpdate, VoteTransaction, MAX_LOCKOUT_HISTORY,
+            BlockTimestamp, Lockout, TowerSync, Vote, VoteState1_14_11, VoteStateUpdate,
+            MAX_LOCKOUT_HISTORY,
         },
     },
     std::{
@@ -364,10 +362,14 @@ impl Tower {
         vote_account: &Pubkey,
     ) -> Self {
         let root_bank = bank_forks.root_bank();
+        let frozen_banks: Vec<_> = bank_forks
+            .frozen_banks()
+            .map(|(_slot, bank)| bank)
+            .collect();
         let (_progress, heaviest_subtree_fork_choice) =
             crate::replay_stage::ReplayStage::initialize_progress_and_fork_choice(
                 root_bank.deref(),
-                bank_forks.frozen_banks().values().cloned().collect(),
+                frozen_banks,
                 node_pubkey,
                 vote_account,
                 vec![],
@@ -406,10 +408,10 @@ impl Tower {
                 continue;
             }
             trace!("{} {} with stake {}", vote_account_pubkey, key, voted_stake);
-            let mut vote_state = account.vote_state().clone();
+            let mut vote_state = TowerVoteState::from(account.vote_state_view());
             for vote in &vote_state.votes {
                 lockout_intervals
-                    .entry(vote.lockout.last_locked_out_slot())
+                    .entry(vote.last_locked_out_slot())
                     .or_default()
                     .push((vote.slot(), key));
             }
@@ -450,7 +452,7 @@ impl Tower {
                 );
             }
 
-            process_slot_vote_unchecked(&mut vote_state, bank_slot);
+            vote_state.process_next_vote_slot(bank_slot);
 
             for vote in &vote_state.votes {
                 vote_slots.insert(vote.slot());
@@ -576,7 +578,7 @@ impl Tower {
         if let Some(last_voted_slot) = self.last_vote.last_voted_slot() {
             if heaviest_slot_on_same_fork <= last_voted_slot {
                 warn!(
-                    "Trying to refresh timestamp for vote on {last_voted_slot}
+                    "Trying to refresh timestamp for vote on {last_voted_slot} \
                      using smaller heaviest bank {heaviest_slot_on_same_fork}"
                 );
                 return;
@@ -588,8 +590,8 @@ impl Tower {
             self.last_vote.set_timestamp(Some(timestamp));
         } else {
             warn!(
-                "Trying to refresh timestamp for last vote on heaviest bank on same fork
-                   {heaviest_slot_on_same_fork}, but there is no vote to refresh"
+                "Trying to refresh timestamp for last vote on heaviest bank on same fork \
+                 {heaviest_slot_on_same_fork}, but there is no vote to refresh"
             );
         }
     }
@@ -608,8 +610,7 @@ impl Tower {
 
     pub fn last_voted_slot_in_bank(bank: &Bank, vote_account_pubkey: &Pubkey) -> Option<Slot> {
         let vote_account = bank.get_vote_account(vote_account_pubkey)?;
-        let vote_state = vote_account.vote_state();
-        vote_state.last_voted_slot()
+        vote_account.vote_state_view().last_voted_slot()
     }
 
     pub fn record_bank_vote(&mut self, bank: &Bank) -> Option<Slot> {
@@ -626,7 +627,7 @@ impl Tower {
             bank.slot(),
             bank.hash(),
             bank.feature_set
-                .is_active(&solana_feature_set::enable_tower_sync_ix::id()),
+                .is_active(&agave_feature_set::enable_tower_sync_ix::id()),
             block_id,
         )
     }
@@ -1115,8 +1116,8 @@ impl Tower {
                             last_vote_ancestors,
                         )
                         .expect(
-                            "candidate_slot and switch_slot exist in descendants map,
-                        so they must exist in ancestors map",
+                            "candidate_slot and switch_slot exist in descendants map, \
+                             so they must exist in ancestors map",
                         )
                 }
             {
@@ -1618,7 +1619,7 @@ impl Tower {
         bank: &Bank,
     ) {
         if let Some(vote_account) = bank.get_vote_account(vote_account_pubkey) {
-            self.vote_state = TowerVoteState::from(vote_account.vote_state().clone());
+            self.vote_state = TowerVoteState::from(vote_account.vote_state_view());
             self.initialize_root(root);
             self.initialize_lockouts(|v| v.slot() > root);
         } else {
@@ -1783,19 +1784,17 @@ pub mod test {
             vote_simulator::VoteSimulator,
         },
         itertools::Itertools,
+        solana_account::{Account, AccountSharedData, ReadableAccount, WritableAccount},
+        solana_clock::Slot,
+        solana_hash::Hash,
         solana_ledger::{blockstore::make_slot_entries, get_tmp_ledger_path_auto_delete},
+        solana_pubkey::Pubkey,
         solana_runtime::bank::Bank,
-        solana_sdk::{
-            account::{Account, AccountSharedData, ReadableAccount, WritableAccount},
-            clock::Slot,
-            hash::Hash,
-            pubkey::Pubkey,
-            signature::Signer,
-            slot_history::SlotHistory,
-        },
+        solana_signer::Signer,
+        solana_slot_history::SlotHistory,
         solana_vote::vote_account::VoteAccount,
         solana_vote_program::vote_state::{
-            Vote, VoteState, VoteStateVersions, MAX_LOCKOUT_HISTORY,
+            process_slot_vote_unchecked, Vote, VoteState, VoteStateVersions, MAX_LOCKOUT_HISTORY,
         },
         std::{
             collections::{HashMap, VecDeque},
@@ -2446,8 +2445,8 @@ pub mod test {
             .unwrap()
             .get_vote_account(&vote_pubkey)
             .unwrap();
-        let state = observed.vote_state();
-        info!("observed tower: {:#?}", state.votes);
+        let state = observed.vote_state_view();
+        info!("observed tower: {:#?}", state.votes_iter().collect_vec());
 
         let num_slots_to_try = 200;
         cluster_votes
@@ -3414,7 +3413,7 @@ pub mod test {
 
     #[test]
     fn test_adjust_lockouts_after_replay_all_rooted_with_too_old() {
-        use solana_sdk::slot_history::MAX_ENTRIES;
+        use solana_slot_history::MAX_ENTRIES;
 
         let mut tower = Tower::new_for_tests(10, 0.9);
         tower.record_vote(0, Hash::default());
@@ -3540,7 +3539,7 @@ pub mod test {
 
     #[test]
     fn test_adjust_lockouts_after_replay_too_old_tower() {
-        use solana_sdk::slot_history::MAX_ENTRIES;
+        use solana_slot_history::MAX_ENTRIES;
 
         let mut tower = Tower::new_for_tests(10, 0.9);
         tower.record_vote(0, Hash::default());
@@ -3596,7 +3595,7 @@ pub mod test {
 
     #[test]
     fn test_adjust_lockouts_after_replay_out_of_order() {
-        use solana_sdk::slot_history::MAX_ENTRIES;
+        use solana_slot_history::MAX_ENTRIES;
 
         let mut tower = Tower::new_for_tests(10, 0.9);
         tower

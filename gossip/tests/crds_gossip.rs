@@ -1,6 +1,7 @@
 #![allow(clippy::arithmetic_side_effects)]
 use {
     bincode::serialized_size,
+    itertools::Itertools,
     log::*,
     rayon::{prelude::*, ThreadPool, ThreadPoolBuilder},
     serial_test::serial,
@@ -11,21 +12,22 @@ use {
         crds_data::CrdsData,
         crds_gossip::*,
         crds_gossip_error::CrdsGossipError,
-        crds_gossip_pull::{CrdsTimeouts, ProcessPullStats, CRDS_GOSSIP_PULL_CRDS_TIMEOUT_MS},
+        crds_gossip_pull::{
+            CrdsTimeouts, ProcessPullStats, PullRequest, CRDS_GOSSIP_PULL_CRDS_TIMEOUT_MS,
+        },
         crds_gossip_push::CRDS_GOSSIP_PUSH_MSG_TIMEOUT_MS,
         crds_value::{CrdsValue, CrdsValueLabel},
     },
+    solana_keypair::Keypair,
+    solana_pubkey::Pubkey,
     solana_rayon_threadlimit::get_thread_count,
-    solana_sdk::{
-        hash::hash,
-        pubkey::Pubkey,
-        signature::{Keypair, Signer},
-        timing::timestamp,
-    },
+    solana_sha256_hasher::hash,
+    solana_signer::Signer,
     solana_streamer::socket::SocketAddrSpace,
+    solana_time_utils::timestamp,
     std::{
         collections::{HashMap, HashSet},
-        net::Ipv4Addr,
+        net::{Ipv4Addr, SocketAddr},
         ops::Deref,
         sync::{Arc, Mutex},
         time::{Duration, Instant},
@@ -304,7 +306,7 @@ fn network_simulator(thread_pool: &ThreadPool, network: &mut Network, max_conver
     let mut total_bytes = bytes_tx;
     let mut ts = timestamp();
     for _ in 1..num {
-        let start = ((ts + 99) / 100) as usize;
+        let start = ts.div_ceil(100) as usize;
         let end = start + 10;
         let now = (start * 100) as u64;
         ts += 1000;
@@ -529,6 +531,14 @@ fn network_run_pull(
             }
         }
     }
+    let nodes: HashMap<SocketAddr, ContactInfo> = network
+        .nodes
+        .values()
+        .map(|node| {
+            let node = &node.contact_info;
+            (node.gossip().unwrap(), node.clone())
+        })
+        .collect();
     for t in start..end {
         let now = t as u64 * 100;
         let requests: Vec<_> = {
@@ -550,6 +560,15 @@ fn network_run_pull(
                             &mut pings,
                             &SocketAddrSpace::Unspecified,
                         )
+                        .map(|requests| {
+                            requests
+                                .into_group_map()
+                                .into_iter()
+                                .map(|(addr, filters)| {
+                                    (nodes.get(&addr).cloned().unwrap(), filters)
+                                })
+                                .collect::<Vec<_>>()
+                        })
                         .unwrap_or_default();
                     let from_pubkey = from.keypair.pubkey();
                     let label = CrdsValueLabel::ContactInfo(from_pubkey);
@@ -574,9 +593,14 @@ fn network_run_pull(
                     .map(|f| f.filter.bits.len() as usize / 8)
                     .sum::<usize>();
                 bytes += caller_info.bincode_serialized_size();
-                let filters: Vec<_> = filters
+                let requests: Vec<_> = filters
                     .into_iter()
-                    .map(|f| (caller_info.clone(), f))
+                    .map(|filter| PullRequest {
+                        pubkey: from,
+                        addr: SocketAddr::from(([0; 4], 0)),
+                        wallclock: now,
+                        filter,
+                    })
                     .collect();
                 let rsp: Vec<_> = network
                     .get(&to)
@@ -584,10 +608,11 @@ fn network_run_pull(
                         node.gossip
                             .generate_pull_responses(
                                 thread_pool,
-                                &filters,
+                                &requests,
                                 usize::MAX, // output_size_limit
                                 now,
                                 |_| true, // should_retain_crds_value
+                                0,        // network shred version
                                 &GossipStats::default(),
                             )
                             .into_iter()

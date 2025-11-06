@@ -12,9 +12,10 @@ license = { workspace = true }
 edition = { workspace = true }
 
 [dependencies]
+agave-banking-stage-ingress-types = { workspace = true }
 async-channel = { workspace = true }
 bytes = { workspace = true }
-clap = { workspace = true }
+clap = { version = "4.5.31", features = ["cargo", "derive", "error-context"] }
 crossbeam-channel = { workspace = true }
 dashmap = { workspace = true }
 futures  = { workspace = true }
@@ -32,26 +33,35 @@ quinn = { workspace = true }
 quinn-proto = { workspace = true }
 rand = { workspace = true }
 rustls = { workspace = true }
+signal-hook = { workspace = true }
 smallvec = { workspace = true }
 socket2 = { workspace = true }
 solana-clap-utils = { workspace = true }
+solana-client = { workspace = true }
+solana-clock = { workspace = true }
+solana-commitment-config = { workspace = true }
 solana-core = { workspace = true }
+solana-keypair = { workspace = true }
+solana-logger = { workspace = true }
 solana-measure = { workspace = true }
 solana-metrics = { workspace = true }
 solana-net-utils = { workspace = true }
 solana-perf = { workspace = true }
-solana-sdk = { workspace = true }
+solana-pubkey = { workspace = true }
+solana-quic-definitions = { workspace = true }
+solana-signer = { workspace = true }
 solana-streamer = { workspace = true }
 solana-transaction-metrics-tracker = { workspace = true }
 solana-version = { workspace = true }
-
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
+url = { workspace = true }
 x509-parser = { workspace = true }
 
 [dev-dependencies]
 assert_matches = { workspace = true }
-solana-logger = { workspace = true }
+solana-local-cluster = { workspace = true }
+solana-native-token = { workspace = true }
 solana-streamer = { workspace = true, features = ["dev-context-only-utils"] }
 
 [lib]

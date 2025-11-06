@@ -51,7 +51,12 @@
 
 #[cfg(test)]
 pub(crate) use self::shred_code::MAX_CODE_SHREDS_PER_SLOT;
-pub(crate) use self::{merkle::SIZE_OF_MERKLE_ROOT, payload::serde_bytes_payload};
+pub(crate) use self::{
+    merkle_tree::{PROOF_ENTRIES_FOR_32_32_BATCH, SIZE_OF_MERKLE_ROOT},
+    payload::serde_bytes_payload,
+};
+#[cfg(any(test, feature = "dev-context-only-utils"))]
+use solana_perf::packet::{bytes::Bytes, BytesPacket, Meta, Packet};
 pub use {
     self::{
         payload::Payload,
@@ -68,14 +73,15 @@ use {
     num_enum::{IntoPrimitive, TryFromPrimitive},
     rayon::ThreadPool,
     serde::{Deserialize, Serialize},
+    solana_clock::Slot,
     solana_entry::entry::{create_ticks, Entry},
-    solana_perf::packet::Packet,
-    solana_sdk::{
-        clock::Slot,
-        hash::{hashv, Hash},
-        pubkey::Pubkey,
-        signature::{Keypair, Signature, Signer, SIGNATURE_BYTES},
-    },
+    solana_hash::Hash,
+    solana_keypair::Keypair,
+    solana_perf::packet::PacketRef,
+    solana_pubkey::Pubkey,
+    solana_sha256_hasher::hashv,
+    solana_signature::{Signature, SIGNATURE_BYTES},
+    solana_signer::Signer,
     static_assertions::const_assert_eq,
     std::{fmt::Debug, time::Instant},
     thiserror::Error,
@@ -84,6 +90,7 @@ use {
 mod common;
 mod legacy;
 mod merkle;
+mod merkle_tree;
 mod payload;
 pub mod shred_code;
 mod shred_data;
@@ -103,7 +110,6 @@ pub const SIZE_OF_NONCE: usize = std::mem::size_of::<Nonce>();
 
 /// The following constants are computed by hand, and hardcoded.
 /// `test_shred_constants` ensures that the values are correct.
-/// Constants are used over lazy_static for performance reasons.
 const SIZE_OF_COMMON_SHRED_HEADER: usize = 83;
 const SIZE_OF_DATA_SHRED_HEADERS: usize = 88;
 const SIZE_OF_CODING_SHRED_HEADERS: usize = 89;
@@ -114,6 +120,23 @@ const SIZE_OF_SIGNATURE: usize = SIGNATURE_BYTES;
 // each erasure batch depends on the number of shreds obtained from serializing
 // a &[Entry].
 pub const DATA_SHREDS_PER_FEC_BLOCK: usize = 32;
+pub const CODING_SHREDS_PER_FEC_BLOCK: usize = 32;
+pub const SHREDS_PER_FEC_BLOCK: usize = DATA_SHREDS_PER_FEC_BLOCK + CODING_SHREDS_PER_FEC_BLOCK;
+
+// Statically compute the typical data batch size assuming:
+// 1. 32:32 erasure coding batch
+// 2. Merkles are chained
+// 3. No retransmit signature (only included for last batch)
+pub const fn get_data_shred_bytes_per_batch_typical() -> u64 {
+    let capacity =
+        match merkle::ShredData::const_capacity(PROOF_ENTRIES_FOR_32_32_BATCH, true, false) {
+            Ok(v) => v,
+            Err(_proof_size) => {
+                panic!("this is unreachable");
+            }
+        };
+    (DATA_SHREDS_PER_FEC_BLOCK * capacity) as u64
+}
 
 // For legacy tests and benchmarks.
 const_assert_eq!(LEGACY_SHRED_DATA_CAPACITY, 1051);
@@ -276,13 +299,23 @@ pub struct ShredId(Slot, /*shred index:*/ u32, ShredType);
 
 impl ShredId {
     #[inline]
-    pub(crate) fn new(slot: Slot, index: u32, shred_type: ShredType) -> ShredId {
+    pub fn new(slot: Slot, index: u32, shred_type: ShredType) -> ShredId {
         ShredId(slot, index, shred_type)
     }
 
     #[inline]
     pub fn slot(&self) -> Slot {
         self.0
+    }
+
+    #[inline]
+    pub fn index(&self) -> u32 {
+        self.1
+    }
+
+    #[inline]
+    pub fn shred_type(&self) -> ShredType {
+        self.2
     }
 
     #[inline]
@@ -379,15 +412,27 @@ impl Shred {
     dispatch!(pub fn payload(&self) -> &Payload);
     dispatch!(pub fn sanitize(&self) -> Result<(), Error>);
 
-    // Only for tests.
-    dispatch!(pub fn set_index(&mut self, index: u32));
-    dispatch!(pub fn set_slot(&mut self, slot: Slot));
+    #[deprecated(since = "2.3.0")]
+    pub fn set_index(&mut self, _index: u32) {}
+    #[deprecated(since = "2.3.0")]
+    pub fn set_slot(&mut self, _slot: Slot) {}
 
+    #[cfg(any(test, feature = "dev-context-only-utils"))]
     pub fn copy_to_packet(&self, packet: &mut Packet) {
         let payload = self.payload();
         let size = payload.len();
         packet.buffer_mut()[..size].copy_from_slice(&payload[..]);
         packet.meta_mut().size = size;
+    }
+
+    #[cfg(any(test, feature = "dev-context-only-utils"))]
+    pub fn to_packet(&self) -> BytesPacket {
+        let buffer: &[u8] = match self.payload() {
+            Payload::Shared(bytes) => bytes.as_ref(),
+            Payload::Unique(bytes) => bytes.as_ref(),
+        };
+        let buffer = Bytes::copy_from_slice(buffer);
+        BytesPacket::new(buffer, Meta::default())
     }
 
     // TODO: Should this sanitize output?
@@ -438,6 +483,7 @@ impl Shred {
         })
     }
 
+    #[deprecated(since = "2.3.0", note = "Legacy shreds are deprecated")]
     pub fn new_from_parity_shard(
         slot: Slot,
         index: u32,
@@ -769,7 +815,7 @@ impl TryFrom<u8> for ShredVariant {
     }
 }
 
-pub(crate) fn recover(
+pub fn recover(
     shreds: impl IntoIterator<Item = Shred>,
     reed_solomon_cache: &ReedSolomonCache,
 ) -> Result<impl Iterator<Item = Result<Shred, Error>>, Error> {
@@ -809,7 +855,7 @@ pub(crate) fn make_merkle_shreds_from_entries(
     next_code_index: u32,
     reed_solomon_cache: &ReedSolomonCache,
     stats: &mut ProcessShredsStats,
-) -> Result<Vec<Shred>, Error> {
+) -> Result<impl Iterator<Item = Shred>, Error> {
     let now = Instant::now();
     let entries = bincode::serialize(entries)?;
     stats.serialize_elapsed += now.elapsed().as_micros() as u64;
@@ -828,19 +874,22 @@ pub(crate) fn make_merkle_shreds_from_entries(
         reed_solomon_cache,
         stats,
     )?;
-    Ok(shreds.into_iter().map(Shred::from).collect())
+    Ok(shreds.into_iter().map(Shred::from))
 }
 
 // Accepts shreds in the slot range [root + 1, max_slot].
 #[must_use]
-pub fn should_discard_shred(
-    packet: &Packet,
+pub fn should_discard_shred<'a, P>(
+    packet: P,
     root: Slot,
     max_slot: Slot,
     shred_version: u16,
     drop_unchained_merkle_shreds: impl Fn(Slot) -> bool,
     stats: &mut ShredFetchStats,
-) -> bool {
+) -> bool
+where
+    P: Into<PacketRef<'a>>,
+{
     debug_assert!(root < max_slot);
     let shred = match layout::get_shred(packet) {
         None => {
@@ -1001,7 +1050,8 @@ mod tests {
         rand::Rng,
         rand_chacha::{rand_core::SeedableRng, ChaChaRng},
         rayon::ThreadPoolBuilder,
-        solana_sdk::{shred_version, signature::Signer, signer::keypair::keypair_from_seed},
+        solana_keypair::keypair_from_seed,
+        solana_signer::Signer,
         std::io::{Cursor, Seek, SeekFrom, Write},
         test_case::test_case,
     };
@@ -1127,19 +1177,19 @@ mod tests {
             0x5a, 0x5a, 0xa5, 0xa5, 0x5a, 0x5a, 0xa5, 0xa5, 0x5a, 0x5a, 0xa5, 0xa5, 0x5a, 0x5a,
             0xa5, 0xa5, 0x5a, 0x5a,
         ];
-        let version = shred_version::version_from_hash(&Hash::new_from_array(hash));
+        let version = solana_shred_version::version_from_hash(&Hash::new_from_array(hash));
         assert_eq!(version, 1);
         let hash = [
             0xa5u8, 0xa5, 0x5a, 0x5a, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             0, 0, 0, 0, 0, 0, 0, 0,
         ];
-        let version = shred_version::version_from_hash(&Hash::new_from_array(hash));
+        let version = solana_shred_version::version_from_hash(&Hash::new_from_array(hash));
         assert_eq!(version, 0xffff);
         let hash = [
             0xa5u8, 0xa5, 0x5a, 0x5a, 0xa5, 0xa5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         ];
-        let version = shred_version::version_from_hash(&Hash::new_from_array(hash));
+        let version = solana_shred_version::version_from_hash(&Hash::new_from_array(hash));
         assert_eq!(version, 0x5a5b);
     }
 
@@ -1703,48 +1753,6 @@ mod tests {
         assert!(shred.verify(&keypair.pubkey()));
         assert_matches!(shred.sanitize(), Ok(()));
         let payload = bs58_decode(PAYLOAD);
-        let mut packet = Packet::default();
-        packet.buffer_mut()[..payload.len()].copy_from_slice(&payload);
-        packet.meta_mut().size = payload.len();
-        assert_eq!(shred.bytes_to_store(), payload);
-        assert_eq!(shred, Shred::new_from_serialized_shred(payload).unwrap());
-        verify_shred_layout(&shred, &packet);
-    }
-
-    #[test]
-    fn test_serde_compat_shred_code() {
-        const SEED: &str = "4jfjh3UZVyaEgvyG9oQmNyFY9yHDmbeH9eUhnBKkrcrN";
-        const PAYLOAD: &str = "3xGsXwzkPpLFuKwbbfKMUxt1B6VqQPzbvvAkxRNCX9kNEP\
-        sa2VifwGBtFuNm3CWXdmQizDz5vJjDHu6ZqqaBCSfrHurag87qAXwTtjNPhZzKEew5pLc\
-        aY6cooiAch2vpfixNYSDjnirozje5cmUtGuYs1asXwsAKSN3QdWHz3XGParWkZeUMAzRV\
-        1UPEDZ7vETKbxeNixKbzZzo47Lakh3C35hS74ocfj23CWoW1JpkETkXjUpXcfcv6cS";
-        let mut rng = {
-            let seed = <[u8; 32]>::try_from(bs58_decode(SEED)).unwrap();
-            ChaChaRng::from_seed(seed)
-        };
-        let mut parity_shard = vec![0u8; legacy::SIZE_OF_ERASURE_ENCODED_SLICE];
-        rng.fill(&mut parity_shard[..]);
-        let mut seed = [0u8; Keypair::SECRET_KEY_LENGTH];
-        rng.fill(&mut seed[..]);
-        let keypair = keypair_from_seed(&seed).unwrap();
-        let mut shred = Shred::new_from_parity_shard(
-            141945197, // slot
-            23418,     // index
-            &parity_shard,
-            21259, // fec_set_index
-            32,    // num_data_shreds
-            58,    // num_coding_shreds
-            43,    // position
-            47298, // version
-        );
-        shred.sign(&keypair);
-        assert!(shred.verify(&keypair.pubkey()));
-        assert_matches!(shred.sanitize(), Ok(()));
-        let mut payload = bs58_decode(PAYLOAD);
-        payload.extend({
-            let skip = payload.len() - SIZE_OF_CODING_SHRED_HEADERS;
-            parity_shard.iter().skip(skip).copied()
-        });
         let mut packet = Packet::default();
         packet.buffer_mut()[..payload.len()].copy_from_slice(&payload);
         packet.meta_mut().size = payload.len();

@@ -35,6 +35,12 @@ pub struct RuntimeTransaction<T> {
     meta: TransactionMeta,
 }
 
+impl<T> RuntimeTransaction<T> {
+    pub fn into_inner_transaction(self) -> T {
+        self.transaction
+    }
+}
+
 impl<T> StaticMeta for RuntimeTransaction<T> {
     fn message_hash(&self) -> &Hash {
         &self.meta.message_hash
@@ -47,6 +53,9 @@ impl<T> StaticMeta for RuntimeTransaction<T> {
     }
     fn compute_budget_instruction_details(&self) -> &ComputeBudgetInstructionDetails {
         &self.meta.compute_budget_instruction_details
+    }
+    fn instruction_data_len(&self) -> u16 {
+        self.meta.instruction_data_len
     }
 }
 
@@ -101,6 +110,10 @@ impl<T: SVMMessage> SVMMessage for RuntimeTransaction<T> {
 
     fn program_instructions_iter(&self) -> impl Iterator<Item = (&Pubkey, SVMInstruction)> + Clone {
         self.transaction.program_instructions_iter()
+    }
+
+    fn static_account_keys(&self) -> &[Pubkey] {
+        self.transaction.static_account_keys()
     }
 
     fn account_keys(&self) -> AccountKeys {

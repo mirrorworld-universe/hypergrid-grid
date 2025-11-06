@@ -1,32 +1,34 @@
 use {
     crate::{
         account_locks::{validate_account_locks, AccountLocks},
+        account_storage::stored_account_info::StoredAccountInfo,
         accounts_db::{
             AccountStorageEntry, AccountsAddRootTiming, AccountsDb, LoadHint, LoadedAccount,
             ScanAccountStorageData, ScanStorageResult, VerifyAccountsHashAndLamportsConfig,
         },
-        accounts_index::{IndexKey, ScanConfig, ScanError, ScanResult},
+        accounts_index::{IndexKey, ScanConfig, ScanError, ScanOrder, ScanResult},
         ancestors::Ancestors,
+        is_loadable::IsLoadable as _,
         storable_accounts::StorableAccounts,
     },
-    dashmap::DashMap,
     log::*,
-    solana_pubkey::Pubkey,
-    solana_sdk::{
-        account::{AccountSharedData, ReadableAccount},
-        address_lookup_table::{self, error::AddressLookupError, state::AddressLookupTable},
-        clock::{BankId, Slot},
-        message::v0::LoadedAddresses,
-        slot_hashes::SlotHashes,
-        transaction::{Result, SanitizedTransaction},
-        transaction_context::TransactionAccount,
+    solana_account::{AccountSharedData, ReadableAccount},
+    solana_address_lookup_table_interface::{
+        self as address_lookup_table, error::AddressLookupError, state::AddressLookupTable,
     },
+    solana_clock::{BankId, Slot},
+    solana_message::v0::LoadedAddresses,
+    solana_pubkey::Pubkey,
+    solana_slot_hashes::SlotHashes,
     solana_svm_transaction::{
         message_address_table_lookup::SVMMessageAddressTableLookup, svm_message::SVMMessage,
     },
+    solana_transaction::sanitized::SanitizedTransaction,
+    solana_transaction_context::TransactionAccount,
+    solana_transaction_error::TransactionResult as Result,
     std::{
         cmp::Reverse,
-        collections::{BinaryHeap, HashSet},
+        collections::{BinaryHeap, HashMap, HashSet},
         ops::RangeBounds,
         sync::{
             atomic::{AtomicUsize, Ordering},
@@ -214,21 +216,23 @@ impl Accounts {
                 // Cache only has one version per key, don't need to worry about versioning
                 func(loaded_account)
             },
-            |accum: &DashMap<Pubkey, B>, loaded_account: &LoadedAccount, _data| {
+            |accum: &mut HashMap<Pubkey, B>, stored_account, data| {
+                // SAFETY: We called scan_account_storage() with
+                // ScanAccountStorageData::DataRefForStorage, so `data` must be Some.
+                let data = data.unwrap();
+                let loaded_account =
+                    LoadedAccount::Stored(StoredAccountInfo::new_from(stored_account, data));
                 let loaded_account_pubkey = *loaded_account.pubkey();
-                if let Some(val) = func(loaded_account) {
+                if let Some(val) = func(&loaded_account) {
                     accum.insert(loaded_account_pubkey, val);
                 }
             },
-            ScanAccountStorageData::NoData,
+            ScanAccountStorageData::DataRefForStorage,
         );
 
         match scan_result {
             ScanStorageResult::Cached(cached_result) => cached_result,
-            ScanStorageResult::Stored(stored_result) => stored_result
-                .into_iter()
-                .map(|(_pubkey, val)| val)
-                .collect(),
+            ScanStorageResult::Stored(stored_result) => stored_result.into_values().collect(),
         }
     }
 
@@ -260,6 +264,11 @@ impl Accounts {
         if num == 0 {
             return Ok(vec![]);
         }
+        let scan_order = if sort_results {
+            ScanOrder::Sorted
+        } else {
+            ScanOrder::Unsorted
+        };
         let mut account_balances = BinaryHeap::new();
         self.accounts_db.scan_accounts(
             ancestors,
@@ -289,7 +298,7 @@ impl Accounts {
                     account_balances.push(Reverse((account.lamports(), *pubkey)));
                 }
             },
-            &ScanConfig::new(!sort_results),
+            &ScanConfig::new(scan_order),
         )?;
         Ok(account_balances
             .into_sorted_vec()
@@ -322,19 +331,13 @@ impl Accounts {
         }
     }
 
-    pub fn is_loadable(lamports: u64) -> bool {
-        // Don't ever load zero lamport accounts into runtime because
-        // the existence of zero-lamport accounts are never deterministic!!
-        lamports > 0
-    }
-
     fn load_while_filtering<F: Fn(&AccountSharedData) -> bool>(
         collector: &mut Vec<TransactionAccount>,
         some_account_tuple: Option<(&Pubkey, AccountSharedData, Slot)>,
         filter: F,
     ) {
         if let Some(mapped_account_tuple) = some_account_tuple
-            .filter(|(_, account, _)| Self::is_loadable(account.lamports()) && filter(account))
+            .filter(|(_, account, _)| account.is_loadable() && filter(account))
             .map(|(pubkey, account, _slot)| (*pubkey, account))
         {
             collector.push(mapped_account_tuple)
@@ -346,7 +349,7 @@ impl Accounts {
         some_account_tuple: Option<(&Pubkey, AccountSharedData, Slot)>,
     ) {
         if let Some(mapped_account_tuple) = some_account_tuple
-            .filter(|(_, account, _)| Self::is_loadable(account.lamports()))
+            .filter(|(_, account, _)| account.is_loadable())
             .map(|(pubkey, account, slot)| (*pubkey, account, slot))
         {
             collector.push(mapped_account_tuple)
@@ -484,19 +487,24 @@ impl Accounts {
         bank_id: BankId,
         sort_results: bool,
     ) -> ScanResult<Vec<PubkeyAccountSlot>> {
+        let scan_order = if sort_results {
+            ScanOrder::Sorted
+        } else {
+            ScanOrder::Unsorted
+        };
         let mut collector = Vec::new();
         self.accounts_db
             .scan_accounts(
                 ancestors,
                 bank_id,
                 |some_account_tuple| {
-                    if let Some((pubkey, account, slot)) = some_account_tuple
-                        .filter(|(_, account, _)| Self::is_loadable(account.lamports()))
+                    if let Some((pubkey, account, slot)) =
+                        some_account_tuple.filter(|(_, account, _)| account.is_loadable())
                     {
                         collector.push((*pubkey, account, slot))
                     }
                 },
-                &ScanConfig::new(!sort_results),
+                &ScanConfig::new(scan_order),
             )
             .map(|_| collector)
     }
@@ -511,12 +519,13 @@ impl Accounts {
     where
         F: FnMut(Option<(&Pubkey, AccountSharedData, Slot)>),
     {
-        self.accounts_db.scan_accounts(
-            ancestors,
-            bank_id,
-            scan_func,
-            &ScanConfig::new(!sort_results),
-        )
+        let scan_order = if sort_results {
+            ScanOrder::Sorted
+        } else {
+            ScanOrder::Unsorted
+        };
+        self.accounts_db
+            .scan_accounts(ancestors, bank_id, scan_func, &ScanConfig::new(scan_order))
     }
 
     pub fn hold_range_in_memory<R>(
@@ -551,62 +560,45 @@ impl Accounts {
     /// Slow because lock is held for 1 operation instead of many.
     /// WARNING: This noncached version is only to be used for tests/benchmarking
     /// as bypassing the cache in general is not supported
+    #[cfg(feature = "dev-context-only-utils")]
     pub fn store_slow_uncached(&self, slot: Slot, pubkey: &Pubkey, account: &AccountSharedData) {
         self.accounts_db.store_uncached(slot, &[(pubkey, account)]);
     }
 
     /// This function will prevent multiple threads from modifying the same account state at the
-    /// same time
+    /// same time, possibly excluding transactions based on prior results
     #[must_use]
-    pub fn lock_accounts<'a, Tx: SVMMessage + 'a>(
-        &self,
-        txs: impl Iterator<Item = &'a Tx>,
-        tx_account_lock_limit: usize,
-    ) -> Vec<Result<()>> {
-        // Validate the account locks, then get iterator if successful validation.
-        let tx_account_locks_results: Vec<Result<_>> = txs
-            .map(|tx| {
-                validate_account_locks(tx.account_keys(), tx_account_lock_limit)
-                    .map(|_| TransactionAccountLocksIterator::new(tx))
-            })
-            .collect();
-        self.lock_accounts_inner(tx_account_locks_results)
-    }
-
-    #[must_use]
-    pub fn lock_accounts_with_results<'a>(
+    pub fn lock_accounts<'a>(
         &self,
         txs: impl Iterator<Item = &'a (impl SVMMessage + 'a)>,
         results: impl Iterator<Item = Result<()>>,
         tx_account_lock_limit: usize,
+        relax_intrabatch_account_locks: bool,
     ) -> Vec<Result<()>> {
-        // Validate the account locks, then get iterator if successful validation.
-        let tx_account_locks_results: Vec<Result<_>> = txs
+        // Validate the account locks, then get keys and is_writable if successful validation.
+        // We collect to fully evaluate before taking the account_locks mutex.
+        let validated_batch_keys = txs
             .zip(results)
-            .map(|(tx, result)| match result {
-                Ok(()) => validate_account_locks(tx.account_keys(), tx_account_lock_limit)
-                    .map(|_| TransactionAccountLocksIterator::new(tx)),
-                Err(err) => Err(err),
+            .map(|(tx, result)| {
+                result
+                    .and_then(|_| validate_account_locks(tx.account_keys(), tx_account_lock_limit))
+                    .map(|_| TransactionAccountLocksIterator::new(tx).accounts_with_is_writable())
             })
-            .collect();
-        self.lock_accounts_inner(tx_account_locks_results)
-    }
+            .collect::<Vec<_>>();
 
-    #[must_use]
-    fn lock_accounts_inner(
-        &self,
-        tx_account_locks_results: Vec<Result<TransactionAccountLocksIterator<impl SVMMessage>>>,
-    ) -> Vec<Result<()>> {
         let account_locks = &mut self.account_locks.lock().unwrap();
-        tx_account_locks_results
-            .into_iter()
-            .map(|tx_account_locks_result| match tx_account_locks_result {
-                Ok(tx_account_locks) => {
-                    account_locks.try_lock_accounts(tx_account_locks.accounts_with_is_writable())
-                }
-                Err(err) => Err(err),
-            })
-            .collect()
+
+        if relax_intrabatch_account_locks {
+            account_locks.try_lock_transaction_batch(validated_batch_keys)
+        } else {
+            validated_batch_keys
+                .into_iter()
+                .map(|result_validated_tx_keys| match result_validated_tx_keys {
+                    Ok(validated_tx_keys) => account_locks.try_lock_accounts(validated_tx_keys),
+                    Err(e) => Err(e),
+                })
+                .collect()
+        }
     }
 
     /// Once accounts are unlocked, new transactions that modify that state can enter the pipeline
@@ -652,22 +644,28 @@ impl Accounts {
 mod tests {
     use {
         super::*,
-        solana_sdk::{
-            account::{AccountSharedData, WritableAccount},
-            address_lookup_table::state::LookupTableMeta,
-            hash::Hash,
-            instruction::CompiledInstruction,
-            message::{v0::MessageAddressTableLookup, Message, MessageHeader},
-            native_loader,
-            signature::{signers::Signers, Keypair, Signer},
-            transaction::{Transaction, TransactionError, MAX_TX_ACCOUNT_LOCKS},
+        agave_reserved_account_keys::ReservedAccountKeys,
+        solana_account::{AccountSharedData, WritableAccount},
+        solana_address_lookup_table_interface::state::LookupTableMeta,
+        solana_hash::Hash,
+        solana_instruction::{AccountMeta, Instruction},
+        solana_keypair::Keypair,
+        solana_message::{
+            compiled_instruction::CompiledInstruction, v0::MessageAddressTableLookup,
+            LegacyMessage, Message, MessageHeader, SanitizedMessage,
         },
+        solana_sdk_ids::native_loader,
+        solana_signature::Signature,
+        solana_signer::{signers::Signers, Signer},
+        solana_transaction::{sanitized::MAX_TX_ACCOUNT_LOCKS, Transaction},
+        solana_transaction_error::TransactionError,
         std::{
             borrow::Cow,
             iter,
             sync::atomic::{AtomicBool, AtomicU64, Ordering},
             thread, time,
         },
+        test_case::test_case,
     };
 
     fn new_sanitized_tx<T: Signers>(
@@ -680,6 +678,23 @@ mod tests {
             message,
             recent_blockhash,
         ))
+    }
+
+    fn sanitized_tx_from_metas(accounts: Vec<AccountMeta>) -> SanitizedTransaction {
+        let instruction = Instruction {
+            accounts,
+            program_id: Pubkey::default(),
+            data: vec![],
+        };
+
+        let message = Message::new(&[instruction], None);
+
+        let sanitized_message = SanitizedMessage::Legacy(LegacyMessage::new(
+            message,
+            &ReservedAccountKeys::empty_key_set(),
+        ));
+
+        SanitizedTransaction::new_for_tests(sanitized_message, vec![Signature::new_unique()], false)
     }
 
     #[test]
@@ -705,8 +720,7 @@ mod tests {
         // use bins * 2 to get the first half of the range within bin 0
         let bins_2 = bins * 2;
         let binner = crate::pubkey_bins::PubkeyBinCalculator24::new(bins_2);
-        let range2 =
-            binner.lowest_pubkey_from_bin(0, bins_2)..binner.lowest_pubkey_from_bin(1, bins_2);
+        let range2 = binner.lowest_pubkey_from_bin(0)..binner.lowest_pubkey_from_bin(1);
         let range2_inclusive = range2.start..=range2.end;
         assert_eq!(0, idx.bin_calculator.bin_from_pubkey(&range2.start));
         assert_eq!(0, idx.bin_calculator.bin_from_pubkey(&range2.end));
@@ -884,8 +898,9 @@ mod tests {
         assert_eq!(loaded, vec![]);
     }
 
-    #[test]
-    fn test_lock_accounts_with_duplicates() {
+    #[test_case(false; "old")]
+    #[test_case(true; "simd83")]
+    fn test_lock_accounts_with_duplicates(relax_intrabatch_account_locks: bool) {
         let accounts_db = AccountsDb::new_single_for_tests();
         let accounts = Accounts::new(Arc::new(accounts_db));
 
@@ -900,12 +915,18 @@ mod tests {
         };
 
         let tx = new_sanitized_tx(&[&keypair], message, Hash::default());
-        let results = accounts.lock_accounts([tx].iter(), MAX_TX_ACCOUNT_LOCKS);
+        let results = accounts.lock_accounts(
+            [tx].iter(),
+            [Ok(())].into_iter(),
+            MAX_TX_ACCOUNT_LOCKS,
+            relax_intrabatch_account_locks,
+        );
         assert_eq!(results[0], Err(TransactionError::AccountLoadedTwice));
     }
 
-    #[test]
-    fn test_lock_accounts_with_too_many_accounts() {
+    #[test_case(false; "old")]
+    #[test_case(true; "simd83")]
+    fn test_lock_accounts_with_too_many_accounts(relax_intrabatch_account_locks: bool) {
         let accounts_db = AccountsDb::new_single_for_tests();
         let accounts = Accounts::new(Arc::new(accounts_db));
 
@@ -928,7 +949,12 @@ mod tests {
             };
 
             let txs = vec![new_sanitized_tx(&[&keypair], message, Hash::default())];
-            let results = accounts.lock_accounts(txs.iter(), MAX_TX_ACCOUNT_LOCKS);
+            let results = accounts.lock_accounts(
+                txs.iter(),
+                vec![Ok(()); txs.len()].into_iter(),
+                MAX_TX_ACCOUNT_LOCKS,
+                relax_intrabatch_account_locks,
+            );
             assert_eq!(results, vec![Ok(())]);
             accounts.unlock_accounts(txs.iter().zip(&results));
         }
@@ -950,13 +976,19 @@ mod tests {
             };
 
             let txs = vec![new_sanitized_tx(&[&keypair], message, Hash::default())];
-            let results = accounts.lock_accounts(txs.iter(), MAX_TX_ACCOUNT_LOCKS);
+            let results = accounts.lock_accounts(
+                txs.iter(),
+                vec![Ok(()); txs.len()].into_iter(),
+                MAX_TX_ACCOUNT_LOCKS,
+                relax_intrabatch_account_locks,
+            );
             assert_eq!(results[0], Err(TransactionError::TooManyAccountLocks));
         }
     }
 
-    #[test]
-    fn test_accounts_locks() {
+    #[test_case(false; "old")]
+    #[test_case(true; "simd83")]
+    fn test_accounts_locks(relax_intrabatch_account_locks: bool) {
         let keypair0 = Keypair::new();
         let keypair1 = Keypair::new();
         let keypair2 = Keypair::new();
@@ -984,7 +1016,12 @@ mod tests {
             instructions,
         );
         let tx = new_sanitized_tx(&[&keypair0], message, Hash::default());
-        let results0 = accounts.lock_accounts([tx.clone()].iter(), MAX_TX_ACCOUNT_LOCKS);
+        let results0 = accounts.lock_accounts(
+            [tx.clone()].iter(),
+            [Ok(())].into_iter(),
+            MAX_TX_ACCOUNT_LOCKS,
+            relax_intrabatch_account_locks,
+        );
 
         assert_eq!(results0, vec![Ok(())]);
         assert!(accounts
@@ -1014,7 +1051,12 @@ mod tests {
         );
         let tx1 = new_sanitized_tx(&[&keypair1], message, Hash::default());
         let txs = vec![tx0, tx1];
-        let results1 = accounts.lock_accounts(txs.iter(), MAX_TX_ACCOUNT_LOCKS);
+        let results1 = accounts.lock_accounts(
+            txs.iter(),
+            vec![Ok(()); txs.len()].into_iter(),
+            MAX_TX_ACCOUNT_LOCKS,
+            relax_intrabatch_account_locks,
+        );
         assert_eq!(
             results1,
             vec![
@@ -1040,7 +1082,12 @@ mod tests {
             instructions,
         );
         let tx = new_sanitized_tx(&[&keypair1], message, Hash::default());
-        let results2 = accounts.lock_accounts([tx].iter(), MAX_TX_ACCOUNT_LOCKS);
+        let results2 = accounts.lock_accounts(
+            [tx].iter(),
+            [Ok(())].into_iter(),
+            MAX_TX_ACCOUNT_LOCKS,
+            relax_intrabatch_account_locks,
+        );
         assert_eq!(
             results2,
             vec![Ok(())] // Now keypair1 account can be locked as writable
@@ -1054,8 +1101,9 @@ mod tests {
             .is_locked_readonly(&keypair1.pubkey()));
     }
 
-    #[test]
-    fn test_accounts_locks_multithreaded() {
+    #[test_case(false; "old")]
+    #[test_case(true; "simd83")]
+    fn test_accounts_locks_multithreaded(relax_intrabatch_account_locks: bool) {
         let counter = Arc::new(AtomicU64::new(0));
         let exit = Arc::new(AtomicBool::new(false));
 
@@ -1102,9 +1150,12 @@ mod tests {
         let exit_clone = exit.clone();
         thread::spawn(move || loop {
             let txs = vec![writable_tx.clone()];
-            let results = accounts_clone
-                .clone()
-                .lock_accounts(txs.iter(), MAX_TX_ACCOUNT_LOCKS);
+            let results = accounts_clone.clone().lock_accounts(
+                txs.iter(),
+                vec![Ok(()); txs.len()].into_iter(),
+                MAX_TX_ACCOUNT_LOCKS,
+                relax_intrabatch_account_locks,
+            );
             for result in results.iter() {
                 if result.is_ok() {
                     counter_clone.clone().fetch_add(1, Ordering::Release);
@@ -1118,9 +1169,12 @@ mod tests {
         let counter_clone = counter;
         for _ in 0..5 {
             let txs = vec![readonly_tx.clone()];
-            let results = accounts_arc
-                .clone()
-                .lock_accounts(txs.iter(), MAX_TX_ACCOUNT_LOCKS);
+            let results = accounts_arc.clone().lock_accounts(
+                txs.iter(),
+                vec![Ok(()); txs.len()].into_iter(),
+                MAX_TX_ACCOUNT_LOCKS,
+                relax_intrabatch_account_locks,
+            );
             if results[0].is_ok() {
                 let counter_value = counter_clone.clone().load(Ordering::Acquire);
                 thread::sleep(time::Duration::from_millis(50));
@@ -1132,8 +1186,9 @@ mod tests {
         exit.store(true, Ordering::Relaxed);
     }
 
-    #[test]
-    fn test_demote_program_write_locks() {
+    #[test_case(false; "old")]
+    #[test_case(true; "simd83")]
+    fn test_demote_program_write_locks(relax_intrabatch_account_locks: bool) {
         let keypair0 = Keypair::new();
         let keypair1 = Keypair::new();
         let keypair2 = Keypair::new();
@@ -1161,7 +1216,12 @@ mod tests {
             instructions,
         );
         let tx = new_sanitized_tx(&[&keypair0], message, Hash::default());
-        let results0 = accounts.lock_accounts([tx].iter(), MAX_TX_ACCOUNT_LOCKS);
+        let results0 = accounts.lock_accounts(
+            [tx].iter(),
+            [Ok(())].into_iter(),
+            MAX_TX_ACCOUNT_LOCKS,
+            relax_intrabatch_account_locks,
+        );
 
         assert!(results0[0].is_ok());
         // Instruction program-id account demoted to readonly
@@ -1197,8 +1257,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_accounts_locks_with_results() {
+    #[test_case(false; "old")]
+    #[test_case(true; "simd83")]
+    fn test_accounts_locks_with_results(relax_intrabatch_account_locks: bool) {
         let keypair0 = Keypair::new();
         let keypair1 = Keypair::new();
         let keypair2 = Keypair::new();
@@ -1254,10 +1315,11 @@ mod tests {
             Ok(()),
         ];
 
-        let results = accounts.lock_accounts_with_results(
+        let results = accounts.lock_accounts(
             txs.iter(),
             qos_results.into_iter(),
             MAX_TX_ACCOUNT_LOCKS,
+            relax_intrabatch_account_locks,
         );
 
         assert_eq!(
@@ -1281,6 +1343,94 @@ mod tests {
             .lock()
             .unwrap()
             .is_locked_write(&keypair2.pubkey()));
+    }
+
+    #[test_case(false; "old")]
+    #[test_case(true; "simd83")]
+    fn test_accounts_locks_intrabatch_conflicts(relax_intrabatch_account_locks: bool) {
+        let pubkey = Pubkey::new_unique();
+        let account_data = AccountSharedData::new(1, 0, &Pubkey::default());
+        let accounts_db = Arc::new(AccountsDb::new_single_for_tests());
+        accounts_db.store_for_tests(
+            0,
+            &[
+                (&Pubkey::default(), &account_data),
+                (&pubkey, &account_data),
+            ],
+        );
+
+        let r_tx = sanitized_tx_from_metas(vec![AccountMeta {
+            pubkey,
+            is_writable: false,
+            is_signer: false,
+        }]);
+
+        let w_tx = sanitized_tx_from_metas(vec![AccountMeta {
+            pubkey,
+            is_writable: true,
+            is_signer: false,
+        }]);
+
+        // one w tx alone always works
+        let accounts = Accounts::new(accounts_db.clone());
+        let results = accounts.lock_accounts(
+            [w_tx.clone()].iter(),
+            [Ok(())].into_iter(),
+            MAX_TX_ACCOUNT_LOCKS,
+            relax_intrabatch_account_locks,
+        );
+
+        assert_eq!(results, vec![Ok(())]);
+
+        // wr conflict cross-batch always fails
+        let results = accounts.lock_accounts(
+            [r_tx.clone()].iter(),
+            [Ok(())].into_iter(),
+            MAX_TX_ACCOUNT_LOCKS,
+            relax_intrabatch_account_locks,
+        );
+
+        assert_eq!(results, vec![Err(TransactionError::AccountInUse)]);
+
+        // ww conflict cross-batch always fails
+        let results = accounts.lock_accounts(
+            [w_tx.clone()].iter(),
+            [Ok(())].into_iter(),
+            MAX_TX_ACCOUNT_LOCKS,
+            relax_intrabatch_account_locks,
+        );
+
+        assert_eq!(results, vec![Err(TransactionError::AccountInUse)]);
+
+        // wr conflict in-batch succeeds or fails based on feature
+        let accounts = Accounts::new(accounts_db.clone());
+        let results = accounts.lock_accounts(
+            [w_tx.clone(), r_tx.clone()].iter(),
+            [Ok(()), Ok(())].into_iter(),
+            MAX_TX_ACCOUNT_LOCKS,
+            relax_intrabatch_account_locks,
+        );
+
+        if relax_intrabatch_account_locks {
+            assert_eq!(results, vec![Ok(()), Ok(())]);
+        } else {
+            assert_eq!(results, vec![Ok(()), Err(TransactionError::AccountInUse)]);
+        }
+
+        // ww conflict in-batch succeeds or fails based on feature
+        let accounts = Accounts::new(accounts_db.clone());
+        let results = accounts.lock_accounts(
+            [w_tx.clone(), r_tx.clone()].iter(),
+            [Ok(()), Ok(())].into_iter(),
+            MAX_TX_ACCOUNT_LOCKS,
+            relax_intrabatch_account_locks,
+        );
+
+        if relax_intrabatch_account_locks {
+            assert_eq!(results, vec![Ok(()), Ok(())]);
+        } else {
+            assert_eq!(results, vec![Ok(()), Err(TransactionError::AccountInUse)]);
+        }
     }
 
     #[test]
@@ -1531,10 +1681,12 @@ mod tests {
     #[test]
     fn test_maybe_abort_scan() {
         assert!(Accounts::maybe_abort_scan(ScanResult::Ok(vec![]), &ScanConfig::default()).is_ok());
-        assert!(
-            Accounts::maybe_abort_scan(ScanResult::Ok(vec![]), &ScanConfig::new(false)).is_ok()
-        );
-        let config = ScanConfig::new(false).recreate_with_abort();
+        assert!(Accounts::maybe_abort_scan(
+            ScanResult::Ok(vec![]),
+            &ScanConfig::new(ScanOrder::Sorted)
+        )
+        .is_ok());
+        let config = ScanConfig::new(ScanOrder::Sorted).recreate_with_abort();
         assert!(Accounts::maybe_abort_scan(ScanResult::Ok(vec![]), &config).is_ok());
         config.abort();
         assert!(Accounts::maybe_abort_scan(ScanResult::Ok(vec![]), &config).is_err());

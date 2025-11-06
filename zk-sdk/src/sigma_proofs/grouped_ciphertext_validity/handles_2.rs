@@ -93,7 +93,7 @@ impl GroupedCiphertext2HandlesValidityProof {
         let mut y_r = Scalar::random(&mut OsRng);
         let mut y_x = Scalar::random(&mut OsRng);
 
-        let Y_0 = RistrettoPoint::multiscalar_mul(vec![&y_r, &y_x], vec![&(*H), &(*G)]).compress();
+        let Y_0 = RistrettoPoint::multiscalar_mul(vec![&y_r, &y_x], vec![&(*H), &G]).compress();
         let Y_1 = (&y_r * P_first).compress();
         let Y_2 = (&y_r * P_second).compress();
 
@@ -147,6 +147,9 @@ impl GroupedCiphertext2HandlesValidityProof {
         transcript.append_point(b"Y_2", &self.Y_2);
 
         let c = transcript.challenge_scalar(b"c");
+
+        transcript.append_scalar(b"z_r", &self.z_r);
+        transcript.append_scalar(b"z_x", &self.z_x);
         let w = transcript.challenge_scalar(b"w");
         let ww = &w * &w;
 
@@ -189,7 +192,7 @@ impl GroupedCiphertext2HandlesValidityProof {
             ],
             vec![
                 &(*H),    // H
-                &(*G),    // G
+                &G,       // G
                 C,        // C
                 &Y_0,     // Y_0
                 P_first,  // P_first

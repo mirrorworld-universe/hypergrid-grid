@@ -8,15 +8,14 @@ use {
     bytemuck_derive::{Pod, Zeroable},
     log::*,
     rayon::prelude::*,
+    solana_clock::Slot,
+    solana_hash::{Hash, HASH_BYTES},
     solana_lattice_hash::lt_hash::LtHash,
     solana_measure::{measure::Measure, measure_us},
     solana_pubkey::Pubkey,
-    solana_sdk::{
-        hash::{Hash, Hasher, HASH_BYTES},
-        rent_collector::RentCollector,
-        slot_history::Slot,
-        sysvar::epoch_schedule::EpochSchedule,
-    },
+    solana_rent_collector::RentCollector,
+    solana_sha256_hasher::Hasher,
+    solana_sysvar::epoch_schedule::EpochSchedule,
     std::{
         clone,
         collections::HashSet,
@@ -1362,9 +1361,8 @@ mod tests {
         std::str::FromStr, tempfile::tempdir,
     };
 
-    lazy_static! {
-        static ref ACTIVE_STATS: ActiveStats = ActiveStats::default();
-    }
+    static ACTIVE_STATS: std::sync::LazyLock<ActiveStats> =
+        std::sync::LazyLock::new(ActiveStats::default);
 
     impl AccountsHasher<'_> {
         fn new(dir_for_temp_cache_files: PathBuf) -> Self {
@@ -1427,7 +1425,7 @@ mod tests {
                             CalculateHashIntermediate {
                                 hash: AccountHash(Hash::default()),
                                 lamports: 0,
-                                pubkey: binner.lowest_pubkey_from_bin(bin, bins),
+                                pubkey: binner.lowest_pubkey_from_bin(bin),
                             }
                         })
                     })
@@ -2290,24 +2288,25 @@ mod tests {
     fn test_hashing(hashes: Vec<Hash>, fanout: usize) -> Hash {
         let temp: Vec<_> = hashes.iter().map(|h| (Pubkey::default(), *h)).collect();
         let result = AccountsHasher::compute_merkle_root(temp, fanout);
-        let reduced: Vec<_> = hashes.clone();
+        let len = hashes.len();
+        let reduced = hashes;
         let result2 = AccountsHasher::compute_merkle_root_from_slices(
-            hashes.len(),
+            len,
             fanout,
             None,
             |start| &reduced[start..],
             None,
         );
-        assert_eq!(result, result2.0, "len: {}", hashes.len());
+        assert_eq!(result, result2.0, "len: {}", len);
 
         let result2 = AccountsHasher::compute_merkle_root_from_slices(
-            hashes.len(),
+            len,
             fanout,
             Some(1),
             |start| &reduced[start..],
             None,
         );
-        assert_eq!(result, result2.0, "len: {}", hashes.len());
+        assert_eq!(result, result2.0, "len: {}", len);
 
         let max = std::cmp::min(reduced.len(), fanout * 2);
         for left in 0..max {

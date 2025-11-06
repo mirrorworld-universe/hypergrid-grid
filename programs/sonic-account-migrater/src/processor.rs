@@ -1,16 +1,14 @@
 use {
+    solana_bincode::limited_deserialize,
+    solana_instruction::error::InstructionError,
     solana_log_collector::ic_msg,
-    solana_program_runtime::{declare_process_instruction, invoke_context::InvokeContext},
-    solana_sdk::{
-        instruction::InstructionError,
-        program_utils::limited_deserialize,
-        pubkey::Pubkey,
-        sonic_account_migrater::{
-            instruction::ProgramInstruction,
-            migrated_accounts,
-            state::{MigratedAccount, MigratedAccountsState},
-        },
+    solana_program::sonic_account_migrater::{
+        instruction::ProgramInstruction,
+        migrated_accounts,
+        state::{MigratedAccount, MigratedAccountsState},
     },
+    solana_program_runtime::{declare_process_instruction, invoke_context::InvokeContext},
+    solana_pubkey::Pubkey,
     std::collections::HashMap,
 };
 
@@ -23,7 +21,7 @@ declare_process_instruction!(Entrypoint, DEFAULT_COMPUTE_UNITS, |invoke_context|
     let transaction_context = &invoke_context.transaction_context;
     let instruction_context = transaction_context.get_current_instruction_context()?;
     let instruction_data = instruction_context.get_instruction_data();
-    match limited_deserialize(instruction_data)? {
+    match limited_deserialize(instruction_data, solana_packet::PACKET_DATA_SIZE as u64)? {
         ProgramInstruction::MigrateRemoteAccounts { addresses } => {
             Processor::migrate_remote_accounts(invoke_context, addresses)
         }
