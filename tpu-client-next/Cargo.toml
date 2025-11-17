@@ -8,9 +8,18 @@ homepage = { workspace = true }
 license = { workspace = true }
 edition = { workspace = true }
 
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]
+
+[features]
+default = ["log"]
+log = ["dep:log"]
+tracing = ["dep:tracing"]
+metrics = ["dep:solana-metrics"]
+
 [dependencies]
 async-trait = { workspace = true }
-log = { workspace = true }
+log = { workspace = true, optional = true }
 lru = { workspace = true }
 quinn = { workspace = true }
 rustls = { workspace = true }
@@ -18,7 +27,7 @@ solana-clock = { workspace = true }
 solana-connection-cache = { workspace = true }
 solana-keypair = { workspace = true }
 solana-measure = { workspace = true }
-solana-metrics ={ workspace = true, optional = true }
+solana-metrics = { workspace = true, optional = true }
 solana-quic-definitions = { workspace = true }
 solana-rpc-client = { workspace = true }
 solana-streamer = { workspace = true }
@@ -28,6 +37,7 @@ solana-tpu-client = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
+tracing = { workspace = true, optional = true }
 
 [dev-dependencies]
 crossbeam-channel = { workspace = true }
@@ -38,9 +48,3 @@ solana-net-utils = { workspace = true }
 solana-pubkey = { workspace = true }
 solana-signer = { workspace = true }
 solana-streamer = { workspace = true, features = ["dev-context-only-utils"] }
-
-[package.metadata.docs.rs]
-targets = ["x86_64-unknown-linux-gnu"]
-
-[features]
-metrics =["dep:solana-metrics"]

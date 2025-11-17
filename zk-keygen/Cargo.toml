@@ -15,26 +15,26 @@ homepage = { workspace = true }
 license = { workspace = true }
 edition = { workspace = true }
 
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]
+
+[[bin]]
+name = "solana-zk-keygen"
+path = "src/main.rs"
+
 [dependencies]
 bs58 = { workspace = true }
 clap = { version = "3.1.5", features = ["cargo", "derive"] }
 dirs-next = { workspace = true }
-solana-clap-v3-utils = { workspace = true }
+solana-clap-v3-utils = { workspace = true, features = ["elgamal"] }
 solana-remote-wallet = { workspace = true, features = ["default"] }
-solana-seed-derivable = "=2.2.1"
-solana-signer = "=2.2.1"
+solana-seed-derivable = "=3.0.0"
+solana-signer = "=3.0.0"
 solana-version = { workspace = true }
-solana-zk-token-sdk = { workspace = true }
+solana-zk-sdk = { workspace = true }
 thiserror = { workspace = true }
 tiny-bip39 = { workspace = true }
 
 [dev-dependencies]
 solana-pubkey = { workspace = true, features = ["rand"] }
 tempfile = { workspace = true }
-
-[[bin]]
-name = "solana-zk-keygen"
-path = "src/main.rs"
-
-[package.metadata.docs.rs]
-targets = ["x86_64-unknown-linux-gnu"]

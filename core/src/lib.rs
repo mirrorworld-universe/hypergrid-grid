@@ -8,7 +8,6 @@
 //! command-line tools to spin up validators and a Rust library
 //!
 
-pub mod accounts_hash_verifier;
 pub mod admin_rpc_post_init;
 pub mod banking_simulation;
 pub mod banking_stage;
@@ -23,6 +22,7 @@ pub mod drop_bank_service;
 pub mod fetch_stage;
 pub mod forwarding_stage;
 pub mod gen_keys;
+mod mock_alpenglow_consensus;
 pub mod next_leader;
 pub mod optimistic_confirmation_verifier;
 pub mod repair;

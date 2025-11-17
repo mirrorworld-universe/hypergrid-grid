@@ -1,7 +1,6 @@
 use {
     solana_bincode::limited_deserialize,
     solana_instruction::error::InstructionError,
-    solana_log_collector::ic_msg,
     solana_program::sonic_account_migrater::{
         instruction::ProgramInstruction,
         migrated_accounts,
@@ -9,6 +8,7 @@ use {
     },
     solana_program_runtime::{declare_process_instruction, invoke_context::InvokeContext},
     solana_pubkey::Pubkey,
+    solana_svm_log_collector::ic_msg,
     std::collections::HashMap,
 };
 
@@ -51,8 +51,7 @@ impl Processor {
 
         let mut data_account_index: u16 = 0;
         for i in 0..n {
-            let account =
-                instruction_context.try_borrow_instruction_account(transaction_context, i)?;
+            let account = instruction_context.try_borrow_instruction_account(i)?;
             if migrated_accounts::check_id(account.get_key())
                 && !account.is_signer()
                 && account.is_writable()
@@ -66,8 +65,8 @@ impl Processor {
             }
         }
 
-        let mut data_account = instruction_context
-            .try_borrow_instruction_account(transaction_context, data_account_index)?;
+        let mut data_account =
+            instruction_context.try_borrow_instruction_account(data_account_index)?;
         if let MigratedAccountsState::MigratedAccounts(_) = data_account.get_state()? {
             ic_msg!(invoke_context, "data account is alread initialized.");
             return Err(InstructionError::InvalidAccountData);
@@ -109,8 +108,7 @@ impl Processor {
         let mut has_data_acount = false;
         let mut data_account_index: u16 = 0;
         for i in 0..n {
-            let account =
-                instruction_context.try_borrow_instruction_account(transaction_context, i)?;
+            let account = instruction_context.try_borrow_instruction_account(i)?;
             if migrated_accounts::check_id(account.get_key())
                 && !account.is_signer()
                 && account.is_writable()
@@ -130,8 +128,8 @@ impl Processor {
             return Err(InstructionError::NotEnoughAccountKeys);
         }
 
-        let mut data_account = instruction_context
-            .try_borrow_instruction_account(transaction_context, data_account_index)?;
+        let mut data_account =
+            instruction_context.try_borrow_instruction_account(data_account_index)?;
         let MigratedAccountsState::MigratedAccounts(migrated_accounts) =
             data_account.get_state()?
         else {
@@ -212,8 +210,7 @@ impl Processor {
         let mut has_data_acount = false;
         let mut data_account_index: u16 = 0;
         for i in 0..n {
-            let account =
-                instruction_context.try_borrow_instruction_account(transaction_context, i)?;
+            let account = instruction_context.try_borrow_instruction_account(i)?;
             if migrated_accounts::check_id(account.get_key())
                 && !account.is_signer()
                 && account.is_writable()
@@ -230,8 +227,8 @@ impl Processor {
         }
 
         let mut accouts: HashMap<Pubkey, MigratedAccount> = HashMap::new();
-        let mut data_account = instruction_context
-            .try_borrow_instruction_account(transaction_context, data_account_index)?;
+        let mut data_account =
+            instruction_context.try_borrow_instruction_account(data_account_index)?;
         if let MigratedAccountsState::MigratedAccounts(accounts2) = data_account.get_state()? {
             accounts2.iter().for_each(|account: &MigratedAccount| {
                 ic_msg!(
@@ -309,8 +306,7 @@ impl Processor {
         let mut has_data_acount = false;
         let mut data_account_index: u16 = 0;
         for i in 0..n {
-            let account =
-                instruction_context.try_borrow_instruction_account(transaction_context, i)?;
+            let account = instruction_context.try_borrow_instruction_account(i)?;
             if migrated_accounts::check_id(account.get_key())
                 && !account.is_signer()
                 && account.is_writable()
@@ -327,8 +323,8 @@ impl Processor {
         }
 
         let mut accouts: HashMap<Pubkey, MigratedAccount> = HashMap::new();
-        let mut data_account = instruction_context
-            .try_borrow_instruction_account(transaction_context, data_account_index)?;
+        let mut data_account =
+            instruction_context.try_borrow_instruction_account(data_account_index)?;
         if let MigratedAccountsState::MigratedAccounts(accounts2) = data_account.get_state()? {
             accounts2.iter().for_each(|account| {
                 accouts.insert(account.address, account.clone());

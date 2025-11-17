@@ -9,12 +9,17 @@ homepage = { workspace = true }
 license = { workspace = true }
 edition = { workspace = true }
 
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]
+
 [dependencies]
 clap = { workspace = true }
 solana-account = { workspace = true }
 solana-clap-utils = { workspace = true }
 solana-cli-config = { workspace = true }
+solana-cli-output = { workspace = true }
 solana-clock = { workspace = true }
+solana-commitment-config = { workspace = true }
 solana-fee-calculator = { workspace = true }
 solana-genesis-config = { workspace = true }
 solana-instruction = { workspace = true }
@@ -35,6 +40,3 @@ solana-version = { workspace = true }
 [dev-dependencies]
 solana-client-traits = { workspace = true }
 solana-runtime = { workspace = true, features = ["dev-context-only-utils"] }
-
-[package.metadata.docs.rs]
-targets = ["x86_64-unknown-linux-gnu"]

@@ -11,6 +11,16 @@ homepage = { workspace = true }
 license = { workspace = true }
 edition = { workspace = true }
 
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]
+
+[lib]
+crate-type = ["lib"]
+name = "solana_vortexor"
+
+[features]
+dev-context-only-utils = []
+
 [dependencies]
 agave-banking-stage-ingress-types = { workspace = true }
 async-channel = { workspace = true }
@@ -60,13 +70,6 @@ x509-parser = { workspace = true }
 
 [dev-dependencies]
 assert_matches = { workspace = true }
-solana-local-cluster = { workspace = true }
+solana-local-cluster = { workspace = true, features = ["dev-context-only-utils"] }
 solana-native-token = { workspace = true }
 solana-streamer = { workspace = true, features = ["dev-context-only-utils"] }
-
-[lib]
-crate-type = ["lib"]
-name = "solana_vortexor"
-
-[package.metadata.docs.rs]
-targets = ["x86_64-unknown-linux-gnu"]

@@ -1,7 +1,6 @@
 use {
     solana_bincode::limited_deserialize,
     solana_instruction::error::InstructionError,
-    solana_log_collector::ic_msg,
     solana_program::sonic_fee_settlement::{
         data_account,
         instruction::{ProgramInstruction, SettlementBillParam},
@@ -9,6 +8,7 @@ use {
     },
     solana_program_runtime::{declare_process_instruction, invoke_context::InvokeContext},
     solana_pubkey::Pubkey,
+    solana_svm_log_collector::ic_msg,
     std::collections::HashMap,
 };
 
@@ -56,8 +56,7 @@ impl Processor {
         let mut has_data_acount = false;
         let mut data_account_index: u16 = 0;
         for i in 0..n {
-            let account =
-                instruction_context.try_borrow_instruction_account(transaction_context, i)?;
+            let account = instruction_context.try_borrow_instruction_account(i)?;
             if data_account::check_id(account.get_key())
                 && !account.is_signer()
                 && account.is_writable()
@@ -74,8 +73,8 @@ impl Processor {
         }
 
         let mut accouts: HashMap<Pubkey, SettlementAccount> = HashMap::new();
-        let mut data_account = instruction_context
-            .try_borrow_instruction_account(transaction_context, data_account_index)?;
+        let mut data_account =
+            instruction_context.try_borrow_instruction_account(data_account_index)?;
         if let SettlementState::FeeBillSettled(accounts2) = data_account.get_state()? {
             accounts2.iter().for_each(|account: &SettlementAccount| {
                 accouts.insert(account.owner, account.clone());
@@ -136,8 +135,7 @@ impl Processor {
         let mut has_data_acount = false;
         let mut data_account_index: u16 = 0;
         for i in 0..n {
-            let account =
-                instruction_context.try_borrow_instruction_account(transaction_context, i)?;
+            let account = instruction_context.try_borrow_instruction_account(i)?;
             if data_account::check_id(account.get_key())
                 && !account.is_signer()
                 && account.is_writable()
@@ -157,8 +155,8 @@ impl Processor {
         let mut burn_account_id: Option<Pubkey> = None;
         let mut hssn_account_id: Option<Pubkey> = None;
         let mut sonic_account_id: Option<Pubkey> = None;
-        let mut data_account = instruction_context
-            .try_borrow_instruction_account(transaction_context, data_account_index)?;
+        let mut data_account =
+            instruction_context.try_borrow_instruction_account(data_account_index)?;
         if let SettlementState::FeeBillSettled(accounts2) = data_account.get_state()? {
             accounts2.iter().for_each(|account: &SettlementAccount| {
                 accouts.insert(account.owner, account.clone());
@@ -271,8 +269,7 @@ impl Processor {
         let mut has_data_acount = false;
         let mut data_account_index: u16 = 0;
         for i in 0..n {
-            let account =
-                instruction_context.try_borrow_instruction_account(transaction_context, i)?;
+            let account = instruction_context.try_borrow_instruction_account(i)?;
             if data_account::check_id(account.get_key())
                 && !account.is_signer()
                 && account.is_writable()
@@ -289,8 +286,8 @@ impl Processor {
         }
 
         let mut accouts: HashMap<Pubkey, SettlementAccount> = HashMap::new();
-        let mut data_account = instruction_context
-            .try_borrow_instruction_account(transaction_context, data_account_index)?;
+        let mut data_account =
+            instruction_context.try_borrow_instruction_account(data_account_index)?;
         if let SettlementState::FeeBillSettled(accounts2) = data_account.get_state()? {
             accounts2.iter().for_each(|account: &SettlementAccount| {
                 accouts.insert(account.owner, account.clone());

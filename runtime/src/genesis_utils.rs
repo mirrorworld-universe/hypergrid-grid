@@ -1,13 +1,13 @@
-// Sonic:
 use {
     agave_feature_set::{FeatureSet, FEATURE_NAMES},
     log::*,
     solana_account::{Account, AccountSharedData},
+    solana_cluster_type::ClusterType,
     solana_feature_gate_interface::{self as feature, Feature},
     solana_fee_calculator::FeeRateGovernor,
-    solana_genesis_config::{ClusterType, GenesisConfig},
+    solana_genesis_config::GenesisConfig,
     solana_keypair::Keypair,
-    solana_native_token::sol_to_lamports,
+    solana_native_token::LAMPORTS_PER_SOL,
     solana_program::{sonic_account_migrater, sonic_fee_settlement},
     solana_pubkey::Pubkey,
     solana_rent::Rent,
@@ -228,10 +228,20 @@ pub fn create_genesis_config_with_leader_with_mint_keypair(
     }
 }
 
+pub fn activate_all_features_alpenglow(genesis_config: &mut GenesisConfig) {
+    do_activate_all_features::<true>(genesis_config);
+}
+
 pub fn activate_all_features(genesis_config: &mut GenesisConfig) {
+    do_activate_all_features::<false>(genesis_config);
+}
+
+fn do_activate_all_features<const IS_ALPENGLOW: bool>(genesis_config: &mut GenesisConfig) {
     // Activate all features at genesis in development mode
     for feature_id in FeatureSet::default().inactive() {
-        activate_feature(genesis_config, *feature_id);
+        if IS_ALPENGLOW || *feature_id != agave_feature_set::alpenglow::id() {
+            activate_feature(genesis_config, *feature_id);
+        }
     }
 }
 
@@ -245,8 +255,8 @@ pub fn deactivate_features(
             genesis_config.accounts.remove(deactivate_feature_pk);
         } else {
             warn!(
-                "Feature {:?} set for deactivation is not a known Feature public key",
-                deactivate_feature_pk
+                "Feature {deactivate_feature_pk:?} set for deactivation is not a known Feature \
+                 public key"
             );
         }
     }
@@ -307,7 +317,7 @@ pub fn create_genesis_config_with_leader_ex_no_features(
     let native_mint_account = solana_account::AccountSharedData::from(Account {
         owner: spl_generic_token::token::id(),
         data: spl_generic_token::token::native_mint::ACCOUNT_DATA.to_vec(),
-        lamports: sol_to_lamports(1.),
+        lamports: LAMPORTS_PER_SOL,
         executable: false,
         rent_epoch: 1,
     });
@@ -320,14 +330,11 @@ pub fn create_genesis_config_with_leader_ex_no_features(
     let native_mint_account = AccountSharedData::from(Account {
         owner: spl_generic_token::token_2022::id(),
         data: spl_generic_token::token::native_mint::ACCOUNT_DATA.to_vec(),
-        lamports: sol_to_lamports(1.),
+        lamports: solana_native_token::LAMPORTS_PER_SOL,
         executable: false,
         rent_epoch: 1,
     });
-    initial_accounts.push((
-        token_2022::native_mint::id(),
-        native_mint_account,
-    ));
+    initial_accounts.push((token_2022::native_mint::id(), native_mint_account));
 
     // Sonic: Add Sonic account migrater
     let migrater_data_account = AccountSharedData::from(Account {
@@ -338,7 +345,7 @@ pub fn create_genesis_config_with_leader_ex_no_features(
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         ],
-        lamports: sol_to_lamports(100.),
+        lamports: 100 * solana_native_token::LAMPORTS_PER_SOL,
         executable: false,
         rent_epoch: 1,
     });
@@ -356,7 +363,7 @@ pub fn create_genesis_config_with_leader_ex_no_features(
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         ],
-        lamports: sol_to_lamports(100.),
+        lamports: 100 * solana_native_token::LAMPORTS_PER_SOL,
         executable: false,
         rent_epoch: 1,
     });

@@ -9,7 +9,18 @@ homepage = { workspace = true }
 license = { workspace = true }
 edition = { workspace = true }
 
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]
+
+[lib]
+crate-type = ["lib"]
+name = "solana_poh"
+
+[features]
+dev-context-only-utils = []
+
 [dependencies]
+arc-swap = { workspace = true }
 core_affinity = { workspace = true }
 crossbeam-channel = { workspace = true }
 log = { workspace = true }
@@ -32,6 +43,7 @@ assert_matches = { workspace = true }
 bincode = { workspace = true }
 criterion = { workspace = true }
 rand = { workspace = true }
+solana-entry = { workspace = true, features = ["dev-context-only-utils"] }
 solana-keypair = { workspace = true }
 solana-logger = { workspace = true }
 solana-perf = { workspace = true, features = ["dev-context-only-utils"] }
@@ -41,12 +53,8 @@ solana-sha256-hasher = { workspace = true }
 solana-signer = { workspace = true }
 solana-system-transaction = { workspace = true }
 
-[features]
-dev-context-only-utils = []
-
-[lib]
-crate-type = ["lib"]
-name = "solana_poh"
+[target.'cfg(not(any(target_env = "msvc", target_os = "freebsd")))'.dev-dependencies]
+jemallocator = { workspace = true }
 
 [[bench]]
 name = "poh"
@@ -54,6 +62,3 @@ name = "poh"
 [[bench]]
 name = "transaction_recorder"
 harness = false
-
-[package.metadata.docs.rs]
-targets = ["x86_64-unknown-linux-gnu"]
