@@ -2342,6 +2342,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
+name = "foldhash"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
+
+[[package]]
 name = "foreign-types"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2732,6 +2738,17 @@ name = "hashbrown"
 version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e087f84d4f86bf4b218b927129862374b72199ae7d8657835f1e89000eea4fb"
+
+[[package]]
+name = "hashbrown"
+version = "0.16.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
+dependencies = [
+ "allocator-api2",
+ "equivalent",
+ "foldhash",
+]
 
 [[package]]
 name = "headers"
@@ -3496,6 +3513,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e999beba7b6e8345721bd280141ed958096a2e4abdf74f67ff4ce49b4b54e47a"
 dependencies = [
  "hashbrown 0.12.3",
+]
+
+[[package]]
+name = "lru"
+version = "0.16.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "96051b46fc183dc9cd4a223960ef37b9af631b55191852a8274bfef064cda20f"
+dependencies = [
+ "hashbrown 0.16.1",
 ]
 
 [[package]]
@@ -4812,7 +4838,7 @@ dependencies = [
  "cc",
  "libc",
  "libm",
- "lru",
+ "lru 0.7.8",
  "parking_lot 0.11.2",
  "smallvec",
  "spin 0.9.2",
@@ -6450,7 +6476,7 @@ dependencies = [
  "itertools 0.12.1",
  "lazy_static",
  "log",
- "lru",
+ "lru 0.16.2",
  "min-max-heap",
  "num_enum",
  "prio-graph",
@@ -6855,7 +6881,7 @@ dependencies = [
  "indexmap 2.6.0",
  "itertools 0.12.1",
  "log",
- "lru",
+ "lru 0.16.2",
  "num-traits",
  "num_cpus",
  "rand 0.8.5",
@@ -7015,7 +7041,7 @@ dependencies = [
  "lazy_static",
  "libc",
  "log",
- "lru",
+ "lru 0.16.2",
  "mockall",
  "num_cpus",
  "num_enum",
@@ -8601,7 +8627,7 @@ dependencies = [
  "crossbeam-channel",
  "futures 0.3.31",
  "log",
- "lru",
+ "lru 0.16.2",
  "quinn",
  "rustls 0.23.15",
  "solana-cli-config",
@@ -8724,7 +8750,7 @@ dependencies = [
  "itertools 0.12.1",
  "lazy-lru",
  "log",
- "lru",
+ "lru 0.16.2",
  "quinn",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
