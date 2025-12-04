@@ -22,7 +22,7 @@ use serde_derive::{Deserialize, Serialize};
 use solana_sdk_macro::CloneZeroed;
 
 // inlined to avoid solana_clock dep
-const DEFAULT_SLOTS_PER_EPOCH: u64 = 432_000 * 2; // Sonic:
+const DEFAULT_SLOTS_PER_EPOCH: u64 = 432_000;
 #[cfg(test)]
 static_assertions::const_assert_eq!(
     DEFAULT_SLOTS_PER_EPOCH,
