@@ -1,13 +1,17 @@
 // Sonic:
 use solana_accounts_db::accounts_db::AccountsDb;
 use {
+    agave_feature_set::FeatureSet,
     log::*,
+    solana_account::{Account, AccountSharedData, ReadableAccount},
     solana_bpf_loader_program::syscalls::{
         SyscallAbort, SyscallGetClockSysvar, SyscallInvokeSignedRust, SyscallLog,
         SyscallLogBpfComputeUnits, SyscallLogPubkey, SyscallLogU64, SyscallMemcpy, SyscallMemset,
         SyscallSetReturnData,
     },
+    solana_clock::{Clock, Slot, UnixTimestamp},
     solana_compute_budget::compute_budget::ComputeBudget,
+    solana_message::AccountKeys,
     solana_program_runtime::{
         invoke_context::InvokeContext,
         loaded_programs::{
@@ -19,27 +23,24 @@ use {
             vm::Config,
         },
     },
-    solana_sdk::{
-        account::{AccountSharedData, ReadableAccount},
-        clock::{Clock, Slot, UnixTimestamp},
-        feature_set::FeatureSet,
-        message::AccountKeys,
-        native_loader,
-        pubkey::Pubkey,
-        sysvar::SysvarId,
-        transaction::SanitizedTransaction,
-    },
+    solana_pubkey::Pubkey,
     solana_svm::{
-        transaction_processing_callback::TransactionProcessingCallback,
         transaction_processing_result::TransactionProcessingResult,
         transaction_processor::TransactionBatchProcessor,
     },
+    solana_svm_callback::{InvokeContextCallback, TransactionProcessingCallback},
+    solana_sysvar_id::SysvarId,
+    solana_transaction::sanitized::SanitizedTransaction,
     std::{
         collections::HashMap,
         sync::{Arc, RwLock},
         time::{SystemTime, UNIX_EPOCH},
     },
 };
+
+mod transaction {
+    pub use solana_transaction_error::TransactionResult as Result;
+}
 
 const DEPLOYMENT_SLOT: u64 = 0;
 const DEPLOYMENT_EPOCH: u64 = 0;
@@ -60,6 +61,8 @@ pub struct MockBankCallback {
     pub feature_set: Arc<FeatureSet>,
     pub account_shared_data: RwLock<HashMap<Pubkey, AccountSharedData>>,
 }
+
+impl InvokeContextCallback for MockBankCallback {}
 
 impl TransactionProcessingCallback for MockBankCallback {
     fn account_matches_owners(&self, account: &Pubkey, owners: &[Pubkey]) -> Option<usize> {
@@ -87,7 +90,13 @@ impl TransactionProcessingCallback for MockBankCallback {
     }
 
     fn add_builtin_account(&self, name: &str, program_id: &Pubkey) {
-        let account_data = native_loader::create_loadable_account_with_fields(name, (5000, 0));
+        let account_data = AccountSharedData::from(Account {
+            lamports: 5000,
+            data: name.as_bytes().to_vec(),
+            owner: solana_sdk_ids::native_loader::id(),
+            executable: true,
+            rent_epoch: 0,
+        });
 
         self.account_shared_data
             .write()
@@ -117,13 +126,13 @@ pub struct LoadAndExecuteTransactionsOutput {
 }
 
 pub struct TransactionBatch<'a> {
-    lock_results: Vec<solana_sdk::transaction::Result<()>>,
+    lock_results: Vec<transaction::Result<()>>,
     sanitized_txs: std::borrow::Cow<'a, [SanitizedTransaction]>,
 }
 
 impl<'a> TransactionBatch<'a> {
     pub fn new(
-        lock_results: Vec<solana_sdk::transaction::Result<()>>,
+        lock_results: Vec<transaction::Result<()>>,
         sanitized_txs: std::borrow::Cow<'a, [SanitizedTransaction]>,
     ) -> Self {
         assert_eq!(lock_results.len(), sanitized_txs.len());
@@ -133,7 +142,7 @@ impl<'a> TransactionBatch<'a> {
         }
     }
 
-    pub fn lock_results(&self) -> &Vec<solana_sdk::transaction::Result<()>> {
+    pub fn lock_results(&self) -> &Vec<transaction::Result<()>> {
         &self.lock_results
     }
 
@@ -214,7 +223,8 @@ pub fn create_executable_environment(
     // add programs to cache
     for key in account_keys.iter() {
         if let Some(account) = mock_bank.get_account_shared_data(key) {
-            if account.executable() && *account.owner() == solana_sdk::bpf_loader_upgradeable::id()
+            if account.executable()
+                && *account.owner() == solana_sdk_ids::bpf_loader_upgradeable::id()
             {
                 let data = account.data();
                 let program_data_account_key = Pubkey::try_from(data[4..].to_vec()).unwrap();
@@ -230,7 +240,7 @@ pub fn create_executable_environment(
                     *key,
                     Arc::new(
                         ProgramCacheEntry::new(
-                            &solana_sdk::bpf_loader_upgradeable::id(),
+                            &solana_sdk_ids::bpf_loader_upgradeable::id(),
                             program_runtime_environment,
                             0,
                             0,

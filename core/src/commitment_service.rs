@@ -1,15 +1,15 @@
 use {
-    crate::consensus::Stake,
+    crate::consensus::{tower_vote_state::TowerVoteState, Stake},
     crossbeam_channel::{unbounded, Receiver, RecvTimeoutError, Sender},
+    solana_clock::Slot,
     solana_measure::measure::Measure,
     solana_metrics::datapoint_info,
+    solana_pubkey::Pubkey,
     solana_rpc::rpc_subscriptions::RpcSubscriptions,
     solana_runtime::{
         bank::Bank,
         commitment::{BlockCommitment, BlockCommitmentCache, CommitmentSlots, VOTE_THRESHOLD_SIZE},
     },
-    solana_sdk::{clock::Slot, pubkey::Pubkey},
-    solana_vote_program::vote_state::VoteState,
     std::{
         cmp::max,
         collections::HashMap,
@@ -28,7 +28,7 @@ pub struct CommitmentAggregationData {
     total_stake: Stake,
     // The latest local vote state of the node running this service.
     // Used for commitment aggregation if the node's vote account is staked.
-    node_vote_state: (Pubkey, VoteState),
+    node_vote_state: (Pubkey, TowerVoteState),
 }
 
 impl CommitmentAggregationData {
@@ -36,7 +36,7 @@ impl CommitmentAggregationData {
         bank: Arc<Bank>,
         root: Slot,
         total_stake: Stake,
-        node_vote_state: (Pubkey, VoteState),
+        node_vote_state: (Pubkey, TowerVoteState),
     ) -> Self {
         Self {
             bank,
@@ -185,7 +185,7 @@ impl AggregateCommitmentService {
     pub fn aggregate_commitment(
         ancestors: &[Slot],
         bank: &Bank,
-        (node_vote_pubkey, node_vote_state): &(Pubkey, VoteState),
+        (node_vote_pubkey, node_vote_state): &(Pubkey, TowerVoteState),
     ) -> (HashMap<Slot, BlockCommitment>, Vec<(Slot, u64)>) {
         assert!(!ancestors.is_empty());
 
@@ -202,14 +202,14 @@ impl AggregateCommitmentService {
             }
             let vote_state = if pubkey == node_vote_pubkey {
                 // Override old vote_state in bank with latest one for my own vote pubkey
-                node_vote_state
+                node_vote_state.clone()
             } else {
-                account.vote_state()
+                TowerVoteState::from(account.vote_state_view())
             };
             Self::aggregate_commitment_for_vote_account(
                 &mut commitment,
                 &mut rooted_stake,
-                vote_state,
+                &vote_state,
                 ancestors,
                 *lamports,
             );
@@ -221,7 +221,7 @@ impl AggregateCommitmentService {
     fn aggregate_commitment_for_vote_account(
         commitment: &mut HashMap<Slot, BlockCommitment>,
         rooted_stake: &mut Vec<(Slot, u64)>,
-        vote_state: &VoteState,
+        vote_state: &TowerVoteState,
         ancestors: &[Slot],
         lamports: u64,
     ) {
@@ -266,20 +266,18 @@ impl AggregateCommitmentService {
 mod tests {
     use {
         super::*,
+        solana_account::Account,
         solana_ledger::genesis_utils::{create_genesis_config, GenesisConfigInfo},
+        solana_pubkey::Pubkey,
         solana_runtime::{
-            accounts_background_service::AbsRequestSender,
             bank_forks::BankForks,
             genesis_utils::{create_genesis_config_with_vote_accounts, ValidatorVoteKeypairs},
         },
-        solana_sdk::{account::Account, pubkey::Pubkey, signature::Signer},
+        solana_signer::Signer,
         solana_stake_program::stake_state,
-        solana_vote_program::{
-            vote_state::{
-                self, process_slot_vote_unchecked, TowerSync, VoteStateVersions,
-                MAX_LOCKOUT_HISTORY,
-            },
-            vote_transaction,
+        solana_vote::vote_transaction,
+        solana_vote_program::vote_state::{
+            self, process_slot_vote_unchecked, TowerSync, VoteStateVersions, MAX_LOCKOUT_HISTORY,
         },
     };
 
@@ -312,7 +310,7 @@ mod tests {
         let mut commitment = HashMap::new();
         let mut rooted_stake = vec![];
         let lamports = 5;
-        let mut vote_state = VoteState::default();
+        let mut vote_state = TowerVoteState::default();
 
         let root = *ancestors.last().unwrap();
         vote_state.root_slot = Some(root);
@@ -338,11 +336,11 @@ mod tests {
         let mut commitment = HashMap::new();
         let mut rooted_stake = vec![];
         let lamports = 5;
-        let mut vote_state = VoteState::default();
+        let mut vote_state = TowerVoteState::default();
 
         let root = ancestors[2];
         vote_state.root_slot = Some(root);
-        process_slot_vote_unchecked(&mut vote_state, *ancestors.last().unwrap());
+        vote_state.process_next_vote_slot(*ancestors.last().unwrap());
         AggregateCommitmentService::aggregate_commitment_for_vote_account(
             &mut commitment,
             &mut rooted_stake,
@@ -369,13 +367,13 @@ mod tests {
         let mut commitment = HashMap::new();
         let mut rooted_stake = vec![];
         let lamports = 5;
-        let mut vote_state = VoteState::default();
+        let mut vote_state = TowerVoteState::default();
 
         let root = ancestors[2];
         vote_state.root_slot = Some(root);
         assert!(ancestors[4] + 2 >= ancestors[6]);
-        process_slot_vote_unchecked(&mut vote_state, ancestors[4]);
-        process_slot_vote_unchecked(&mut vote_state, ancestors[6]);
+        vote_state.process_next_vote_slot(ancestors[4]);
+        vote_state.process_next_vote_slot(ancestors[6]);
         AggregateCommitmentService::aggregate_commitment_for_vote_account(
             &mut commitment,
             &mut rooted_stake,
@@ -498,7 +496,7 @@ mod tests {
         let (commitment, rooted_stake) = AggregateCommitmentService::aggregate_commitment(
             &ancestors,
             &bank,
-            &(node_vote_pubkey, vote_state1),
+            &(node_vote_pubkey, TowerVoteState::from(vote_state1)),
         );
 
         for a in ancestors {
@@ -539,9 +537,9 @@ mod tests {
 
     #[test]
     fn test_highest_super_majority_root_advance() {
-        fn get_vote_state(vote_pubkey: Pubkey, bank: &Bank) -> VoteState {
+        fn get_vote_state(vote_pubkey: Pubkey, bank: &Bank) -> TowerVoteState {
             let vote_account = bank.get_vote_account(&vote_pubkey).unwrap();
-            vote_account.vote_state().clone()
+            TowerVoteState::from(vote_account.vote_state_view())
         }
 
         let block_commitment_cache = RwLock::new(BlockCommitmentCache::new_for_tests());
@@ -584,11 +582,7 @@ mod tests {
             .root_slot
             .unwrap();
         for x in 0..root {
-            bank_forks
-                .write()
-                .unwrap()
-                .set_root(x, &AbsRequestSender::default(), None)
-                .unwrap();
+            bank_forks.write().unwrap().set_root(x, None, None).unwrap();
         }
 
         // Add an additional bank/vote that will root slot 2
@@ -631,11 +625,7 @@ mod tests {
         bank_forks
             .write()
             .unwrap()
-            .set_root(
-                root,
-                &AbsRequestSender::default(),
-                Some(highest_super_majority_root),
-            )
+            .set_root(root, None, Some(highest_super_majority_root))
             .unwrap();
         let highest_super_majority_root_bank =
             bank_forks.read().unwrap().get(highest_super_majority_root);
@@ -719,11 +709,7 @@ mod tests {
         bank_forks
             .write()
             .unwrap()
-            .set_root(
-                root,
-                &AbsRequestSender::default(),
-                Some(highest_super_majority_root),
-            )
+            .set_root(root, None, Some(highest_super_majority_root))
             .unwrap();
         let highest_super_majority_root_bank =
             bank_forks.read().unwrap().get(highest_super_majority_root);

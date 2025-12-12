@@ -1,12 +1,6 @@
 use {
-    crate::{
-        accounts_index::AccountsIndexRootsStats,
-        append_vec::{
-            APPEND_VEC_MMAPPED_FILES_DIRTY, APPEND_VEC_MMAPPED_FILES_OPEN,
-            APPEND_VEC_OPEN_AS_FILE_IO,
-        },
-    },
-    solana_sdk::timing::AtomicInterval,
+    crate::{accounts_index::AccountsIndexRootsStats, append_vec::APPEND_VEC_STATS},
+    solana_time_utils::AtomicInterval,
     std::{
         num::Saturating,
         sync::atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -34,7 +28,6 @@ pub struct AccountsStats {
     pub store_get_slot_store: AtomicU64,
     pub store_find_existing: AtomicU64,
     pub dropped_stores: AtomicU64,
-    pub store_uncleaned_update: AtomicU64,
     pub handle_dead_keys_us: AtomicU64,
     pub purge_exact_us: AtomicU64,
     pub purge_exact_count: AtomicU64,
@@ -150,18 +143,20 @@ impl StoreAccountsTiming {
 
 #[derive(Debug, Default)]
 pub struct FlushStats {
-    pub num_flushed: Saturating<usize>,
-    pub num_purged: Saturating<usize>,
-    pub total_size: Saturating<u64>,
+    pub num_accounts_flushed: Saturating<usize>,
+    pub num_bytes_flushed: Saturating<u64>,
+    pub num_accounts_purged: Saturating<usize>,
+    pub num_bytes_purged: Saturating<u64>,
     pub store_accounts_timing: StoreAccountsTiming,
     pub store_accounts_total_us: Saturating<u64>,
 }
 
 impl FlushStats {
     pub fn accumulate(&mut self, other: &Self) {
-        self.num_flushed += other.num_flushed;
-        self.num_purged += other.num_purged;
-        self.total_size += other.total_size;
+        self.num_accounts_flushed += other.num_accounts_flushed;
+        self.num_bytes_flushed += other.num_bytes_flushed;
+        self.num_accounts_purged += other.num_accounts_purged;
+        self.num_bytes_purged += other.num_bytes_purged;
         self.store_accounts_timing
             .accumulate(&other.store_accounts_timing);
         self.store_accounts_total_us += other.store_accounts_total_us;
@@ -244,17 +239,22 @@ impl LatestAccountsIndexRootsStats {
             ),
             (
                 "append_vecs_open",
-                APPEND_VEC_MMAPPED_FILES_OPEN.load(Ordering::Relaxed),
+                APPEND_VEC_STATS.files_open.load(Ordering::Relaxed),
                 i64
             ),
             (
                 "append_vecs_dirty",
-                APPEND_VEC_MMAPPED_FILES_DIRTY.load(Ordering::Relaxed),
+                APPEND_VEC_STATS.files_dirty.load(Ordering::Relaxed),
+                i64
+            ),
+            (
+                "append_vecs_open_as_mmap",
+                APPEND_VEC_STATS.open_as_mmap.load(Ordering::Relaxed),
                 i64
             ),
             (
                 "append_vecs_open_as_file_io",
-                APPEND_VEC_OPEN_AS_FILE_IO.load(Ordering::Relaxed),
+                APPEND_VEC_STATS.open_as_file_io.load(Ordering::Relaxed),
                 i64
             )
         );

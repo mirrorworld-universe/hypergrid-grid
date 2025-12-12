@@ -4,16 +4,17 @@ use {
         banking_trace::TracedSender, sigverify::TransactionSigVerifier,
         sigverify_stage::SigVerifyStage,
     },
-    solana_net_utils::{bind_in_range_with_config, bind_more_with_config, SocketConfig},
+    solana_keypair::Keypair,
+    solana_net_utils::{multi_bind_in_range_with_config, SocketConfig},
     solana_perf::packet::PacketBatch,
-    solana_sdk::{quic::NotifyKeyUpdate, signature::Keypair},
+    solana_quic_definitions::NotifyKeyUpdate,
     solana_streamer::{
         nonblocking::quic::DEFAULT_WAIT_FOR_CHUNK_TIMEOUT,
         quic::{spawn_server_multi, EndpointKeyUpdater, QuicServerParams},
         streamer::StakedNodes,
     },
     std::{
-        net::UdpSocket,
+        net::{SocketAddr, UdpSocket},
         sync::{atomic::AtomicBool, Arc, Mutex, RwLock},
         thread::{self, JoinHandle},
         time::Duration,
@@ -56,35 +57,27 @@ impl Vortexor {
     pub fn create_tpu_sockets(
         bind_address: std::net::IpAddr,
         dynamic_port_range: (u16, u16),
-        num_quic_endpoints: u64,
+        tpu_address: Option<SocketAddr>,
+        tpu_forward_address: Option<SocketAddr>,
+        num_quic_endpoints: usize,
     ) -> TpuSockets {
         let quic_config = SocketConfig::default().reuseport(true);
 
-        let (_, tpu_quic) =
-            bind_in_range_with_config(bind_address, dynamic_port_range, quic_config)
-                .expect("expected bind to succeed");
-
-        let tpu_quic_port = tpu_quic.local_addr().unwrap().port();
-        let tpu_quic = bind_more_with_config(
-            tpu_quic,
-            num_quic_endpoints.try_into().unwrap(),
-            quic_config,
-        )
-        .unwrap();
-
-        let (_, tpu_quic_fwd) = bind_in_range_with_config(
+        let tpu_quic = bind_sockets(
             bind_address,
-            (tpu_quic_port.saturating_add(1), dynamic_port_range.1),
+            dynamic_port_range,
+            tpu_address,
+            num_quic_endpoints,
             quic_config,
-        )
-        .expect("expected bind to succeed");
+        );
 
-        let tpu_quic_fwd = bind_more_with_config(
-            tpu_quic_fwd,
-            num_quic_endpoints.try_into().unwrap(),
+        let tpu_quic_fwd = bind_sockets(
+            bind_address,
+            dynamic_port_range,
+            tpu_forward_address,
+            num_quic_endpoints,
             quic_config,
-        )
-        .unwrap();
+        );
 
         TpuSockets {
             tpu_quic,
@@ -93,10 +86,10 @@ impl Vortexor {
     }
 
     pub fn create_sigverify_stage(
-        tpu_receiver: Receiver<solana_perf::packet::PacketBatch>,
+        tpu_receiver: Receiver<PacketBatch>,
         non_vote_sender: TracedSender,
     ) -> SigVerifyStage {
-        let verifier = TransactionSigVerifier::new(non_vote_sender);
+        let verifier = TransactionSigVerifier::new(non_vote_sender, None);
         SigVerifyStage::new(
             tpu_receiver,
             verifier,
@@ -111,11 +104,11 @@ impl Vortexor {
         staked_nodes: Arc<RwLock<StakedNodes>>,
         tpu_sender: Sender<PacketBatch>,
         tpu_fwd_sender: Sender<PacketBatch>,
-        max_connections_per_peer: u64,
-        max_tpu_staked_connections: u64,
-        max_tpu_unstaked_connections: u64,
-        max_fwd_staked_connections: u64,
-        max_fwd_unstaked_connections: u64,
+        max_connections_per_peer: usize,
+        max_tpu_staked_connections: usize,
+        max_tpu_unstaked_connections: usize,
+        max_fwd_staked_connections: usize,
+        max_fwd_unstaked_connections: usize,
         max_streams_per_ms: u64,
         max_connections_per_ipaddr_per_min: u64,
         tpu_coalesce: Duration,
@@ -123,9 +116,9 @@ impl Vortexor {
         exit: Arc<AtomicBool>,
     ) -> Self {
         let mut quic_server_params = QuicServerParams {
-            max_connections_per_peer: max_connections_per_peer.try_into().unwrap(),
-            max_staked_connections: max_tpu_staked_connections.try_into().unwrap(),
-            max_unstaked_connections: max_tpu_unstaked_connections.try_into().unwrap(),
+            max_connections_per_peer,
+            max_staked_connections: max_tpu_staked_connections,
+            max_unstaked_connections: max_tpu_unstaked_connections,
             max_streams_per_ms,
             max_connections_per_ipaddr_per_min,
             wait_for_chunk_timeout: DEFAULT_WAIT_FOR_CHUNK_TIMEOUT,
@@ -152,9 +145,8 @@ impl Vortexor {
 
         // Fot TPU forward -- we disallow unstaked connections. Allocate all connection resources
         // for staked connections:
-        quic_server_params.max_staked_connections = max_fwd_staked_connections.try_into().unwrap();
-        quic_server_params.max_unstaked_connections =
-            max_fwd_unstaked_connections.try_into().unwrap();
+        quic_server_params.max_staked_connections = max_fwd_staked_connections;
+        quic_server_params.max_unstaked_connections = max_fwd_unstaked_connections;
         let tpu_fwd_result = spawn_server_multi(
             "solVtxTpuFwd",
             "quic_vortexor_tpu_forwards",
@@ -186,4 +178,23 @@ impl Vortexor {
         }
         Ok(())
     }
+}
+
+/// Binds the sockets to the specified address and port range if address is Some.
+/// If the address is None, it binds to the specified bind_address and port range.
+fn bind_sockets(
+    bind_address: std::net::IpAddr,
+    port_range: (u16, u16),
+    address: Option<SocketAddr>,
+    num_quic_endpoints: usize,
+    quic_config: SocketConfig,
+) -> Vec<UdpSocket> {
+    let (bind_address, port_range) = address
+        .map(|addr| (addr.ip(), (addr.port(), addr.port().saturating_add(1))))
+        .unwrap_or((bind_address, port_range));
+
+    let (_, sockets) =
+        multi_bind_in_range_with_config(bind_address, port_range, quic_config, num_quic_endpoints)
+            .expect("expected bind to succeed");
+    sockets
 }

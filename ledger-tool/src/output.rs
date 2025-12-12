@@ -5,28 +5,29 @@ use {
     },
     chrono::{Local, TimeZone},
     itertools::Either,
+    pretty_hex::PrettyHex,
     serde::ser::{Impossible, SerializeSeq, SerializeStruct, Serializer},
     serde_derive::{Deserialize, Serialize},
-    solana_account_decoder::{encode_ui_account, UiAccountData, UiAccountEncoding},
-    solana_accounts_db::accounts_index::ScanConfig,
+    solana_account::{AccountSharedData, ReadableAccount},
+    solana_accounts_db::{
+        accounts_index::{ScanConfig, ScanOrder},
+        is_loadable::IsLoadable as _,
+    },
     solana_cli_output::{
         display::writeln_transaction, CliAccount, CliAccountNewConfig, OutputFormat, QuietDisplay,
         VerboseDisplay,
     },
+    solana_clock::{Slot, UnixTimestamp},
+    solana_hash::Hash,
     solana_ledger::{
         blockstore::{Blockstore, BlockstoreError},
         blockstore_meta::{DuplicateSlotProof, ErasureMeta},
         shred::{self, Shred, ShredType},
     },
+    solana_native_token::lamports_to_sol,
+    solana_pubkey::Pubkey,
     solana_runtime::bank::{Bank, TotalAccountsStats},
-    solana_sdk::{
-        account::{AccountSharedData, ReadableAccount},
-        clock::{Slot, UnixTimestamp},
-        hash::Hash,
-        native_token::lamports_to_sol,
-        pubkey::Pubkey,
-        transaction::VersionedTransaction,
-    },
+    solana_transaction::versioned::VersionedTransaction,
     solana_transaction_status::{
         BlockEncodingOptions, ConfirmedBlock, Encodable, EncodedConfirmedBlock,
         EncodedTransactionWithStatusMeta, EntrySummary, Rewards, TransactionDetails,
@@ -586,7 +587,11 @@ pub fn output_slot(
         Err(_) => {
             // Transaction metadata could be missing, try to fetch just the
             // entries and leave the metadata fields empty
-            let entries = blockstore.get_slot_entries(slot, /*shred_start_index:*/ 0)?;
+            let (entries, _, _) = blockstore.get_slot_entries_with_shred_info(
+                slot,
+                /*shred_start_index:*/ 0,
+                allow_dead_slots,
+            )?;
 
             let blockhash = entries
                 .last()
@@ -763,10 +768,8 @@ pub enum AccountsOutputMode {
 
 pub struct AccountsOutputConfig {
     pub mode: AccountsOutputMode,
+    pub output_config: Option<CliAccountNewConfig>,
     pub include_sysvars: bool,
-    pub include_account_contents: bool,
-    pub include_account_data: bool,
-    pub account_data_encoding: UiAccountEncoding,
 }
 
 impl AccountsOutputStreamer {
@@ -826,8 +829,8 @@ struct AccountsScanner {
 impl AccountsScanner {
     /// Returns true if this account should be included in the output
     fn should_process_account(&self, account: &AccountSharedData) -> bool {
-        solana_accounts_db::accounts::Accounts::is_loadable(account.lamports())
-            && (self.config.include_sysvars || !solana_sdk::sysvar::check_id(account.owner()))
+        account.is_loadable()
+            && (self.config.include_sysvars || !solana_sdk_ids::sysvar::check_id(account.owner()))
     }
 
     fn maybe_output_account<S>(
@@ -835,24 +838,26 @@ impl AccountsScanner {
         seq_serializer: &mut Option<S>,
         pubkey: &Pubkey,
         account: &AccountSharedData,
-        slot: Option<Slot>,
-        cli_account_new_config: &CliAccountNewConfig,
     ) where
         S: SerializeSeq,
     {
-        if self.config.include_account_contents {
+        if let Some(output_config) = &self.config.output_config {
+            let cli_account = CliAccount::new_with_config(pubkey, account, output_config);
+
             if let Some(serializer) = seq_serializer {
-                let cli_account =
-                    CliAccount::new_with_config(pubkey, account, cli_account_new_config);
                 serializer.serialize_element(&cli_account).unwrap();
             } else {
-                output_account(
-                    pubkey,
-                    account,
-                    slot,
-                    self.config.include_account_data,
-                    self.config.account_data_encoding,
-                );
+                print!("{}", &cli_account);
+                // CliAccount doesn't print the account data payload so handle
+                // that separately. If --no-account-data was specified,
+                // output_config.data_slice_config will have been created to
+                // yield an empty slice which will make data.empty() below true
+                let account_data = cli_account.keyed_account.account.data.decode();
+                if let Some(data) = account_data {
+                    if !data.is_empty() {
+                        println!("{:?}", data.hex_dump());
+                    }
+                }
             }
         }
     }
@@ -864,23 +869,12 @@ impl AccountsScanner {
         let mut total_accounts_stats = self.total_accounts_stats.borrow_mut();
         let rent_collector = self.bank.rent_collector();
 
-        let cli_account_new_config = CliAccountNewConfig {
-            data_encoding: self.config.account_data_encoding,
-            ..CliAccountNewConfig::default()
-        };
-
         let scan_func = |account_tuple: Option<(&Pubkey, AccountSharedData, Slot)>| {
-            if let Some((pubkey, account, slot)) =
+            if let Some((pubkey, account, _slot)) =
                 account_tuple.filter(|(_, account, _)| self.should_process_account(account))
             {
                 total_accounts_stats.accumulate_account(pubkey, &account, rent_collector);
-                self.maybe_output_account(
-                    seq_serializer,
-                    pubkey,
-                    &account,
-                    Some(slot),
-                    &cli_account_new_config,
-                );
+                self.maybe_output_account(seq_serializer, pubkey, &account);
             }
         };
 
@@ -889,36 +883,24 @@ impl AccountsScanner {
                 self.bank.scan_all_accounts(scan_func, true).unwrap();
             }
             AccountsOutputMode::Individual(pubkeys) => pubkeys.iter().for_each(|pubkey| {
-                if let Some((account, slot)) = self
+                if let Some((account, _slot)) = self
                     .bank
                     .get_account_modified_slot_with_fixed_root(pubkey)
                     .filter(|(account, _)| self.should_process_account(account))
                 {
                     total_accounts_stats.accumulate_account(pubkey, &account, rent_collector);
-                    self.maybe_output_account(
-                        seq_serializer,
-                        pubkey,
-                        &account,
-                        Some(slot),
-                        &cli_account_new_config,
-                    );
+                    self.maybe_output_account(seq_serializer, pubkey, &account);
                 }
             }),
             AccountsOutputMode::Program(program_pubkey) => self
                 .bank
-                .get_program_accounts(program_pubkey, &ScanConfig::new(false))
+                .get_program_accounts(program_pubkey, &ScanConfig::new(ScanOrder::Sorted))
                 .unwrap()
                 .iter()
                 .filter(|(_, account)| self.should_process_account(account))
                 .for_each(|(pubkey, account)| {
                     total_accounts_stats.accumulate_account(pubkey, account, rent_collector);
-                    self.maybe_output_account(
-                        seq_serializer,
-                        pubkey,
-                        account,
-                        None,
-                        &cli_account_new_config,
-                    );
+                    self.maybe_output_account(seq_serializer, pubkey, account);
                 }),
         }
     }
@@ -935,40 +917,24 @@ impl serde::Serialize for AccountsScanner {
     }
 }
 
-pub fn output_account(
-    pubkey: &Pubkey,
-    account: &AccountSharedData,
-    modified_slot: Option<Slot>,
-    print_account_data: bool,
-    encoding: UiAccountEncoding,
-) {
-    println!("{pubkey}:");
-    println!("  balance: {} SOL", lamports_to_sol(account.lamports()));
-    println!("  owner: '{}'", account.owner());
-    println!("  executable: {}", account.executable());
-    if let Some(slot) = modified_slot {
-        println!("  slot: {slot}");
-    }
-    println!("  rent_epoch: {}", account.rent_epoch());
-    println!("  data_len: {}", account.data().len());
-    if print_account_data {
-        let account_data = encode_ui_account(pubkey, account, encoding, None, None).data;
-        match account_data {
-            UiAccountData::Binary(data, data_encoding) => {
-                println!("  data: '{data}'");
-                println!(
-                    "  encoding: {}",
-                    serde_json::to_string(&data_encoding).unwrap()
-                );
+#[derive(Serialize, Deserialize)]
+pub struct CliAccounts {
+    pub accounts: Vec<CliAccount>,
+}
+
+impl fmt::Display for CliAccounts {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        for account in &self.accounts {
+            write!(f, "{account}")?;
+            let account_data = account.keyed_account.account.data.decode();
+            if let Some(data) = account_data {
+                if !data.is_empty() {
+                    writeln!(f, "{:?}", data.hex_dump())?;
+                }
             }
-            UiAccountData::Json(account_data) => {
-                println!(
-                    "  data: '{}'",
-                    serde_json::to_string(&account_data).unwrap()
-                );
-                println!("  encoding: \"jsonParsed\"");
-            }
-            UiAccountData::LegacyBinary(_) => {}
-        };
+        }
+        Ok(())
     }
 }
+impl QuietDisplay for CliAccounts {}
+impl VerboseDisplay for CliAccounts {}

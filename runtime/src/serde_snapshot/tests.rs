@@ -12,8 +12,10 @@ mod serde_snapshot_tests {
         bincode::{serialize_into, Error},
         log::info,
         rand::{thread_rng, Rng},
+        solana_account::{AccountSharedData, ReadableAccount},
         solana_accounts_db::{
-            account_storage::{AccountStorageMap, AccountStorageReference},
+            account_storage::AccountStorageMap,
+            account_storage_reader::AccountStorageReader,
             accounts::Accounts,
             accounts_db::{
                 get_temp_accounts_paths, test_utils::create_test_accounts, AccountStorageEntry,
@@ -23,18 +25,16 @@ mod serde_snapshot_tests {
             accounts_hash::AccountsHash,
             ancestors::Ancestors,
         },
-        solana_sdk::{
-            account::{AccountSharedData, ReadableAccount},
-            clock::Slot,
-            epoch_schedule::EpochSchedule,
-            genesis_config::{ClusterType, GenesisConfig},
-            hash::Hash,
-            pubkey::Pubkey,
-            rent_collector::RentCollector,
-        },
+        solana_clock::Slot,
+        solana_epoch_schedule::EpochSchedule,
+        solana_genesis_config::{ClusterType, GenesisConfig},
+        solana_hash::Hash,
+        solana_nohash_hasher::BuildNoHashHasher,
+        solana_pubkey::Pubkey,
+        solana_rent_collector::RentCollector,
         std::{
             fs::File,
-            io::{BufReader, Cursor, Read, Write},
+            io::{self, BufReader, Cursor, Read, Write},
             ops::RangeFull,
             path::{Path, PathBuf},
             sync::{
@@ -133,21 +133,22 @@ mod serde_snapshot_tests {
         storage_access: StorageAccess,
     ) -> Result<StorageAndNextAccountsFileId, AccountsFileError> {
         let storage_entries = accounts_db.get_storages(RangeFull).0;
-        let storage: AccountStorageMap = AccountStorageMap::with_capacity(storage_entries.len());
+        let storage: AccountStorageMap = AccountStorageMap::with_capacity_and_hasher(
+            storage_entries.len(),
+            BuildNoHashHasher::default(),
+        );
         let mut next_append_vec_id = 0;
         for storage_entry in storage_entries.into_iter() {
             // Copy file to new directory
-            let storage_path = storage_entry.path();
             let file_name = AccountsFile::file_name(storage_entry.slot(), storage_entry.id());
             let output_path = output_dir.as_ref().join(file_name);
-            std::fs::copy(storage_path, &output_path)?;
+            let mut reader = AccountStorageReader::new(&storage_entry, None).unwrap();
+            let mut writer = File::create(&output_path)?;
+            io::copy(&mut reader, &mut writer)?;
 
             // Read new file into append-vec and build new entry
-            let (accounts_file, num_accounts) = AccountsFile::new_from_file(
-                output_path,
-                storage_entry.accounts.len(),
-                storage_access,
-            )?;
+            let (accounts_file, num_accounts) =
+                AccountsFile::new_from_file(output_path, reader.len(), storage_access)?;
             let new_storage_entry = AccountStorageEntry::new_existing(
                 storage_entry.slot(),
                 storage_entry.id(),
@@ -155,13 +156,7 @@ mod serde_snapshot_tests {
                 num_accounts,
             );
             next_append_vec_id = next_append_vec_id.max(new_storage_entry.id());
-            storage.insert(
-                new_storage_entry.slot(),
-                AccountStorageReference {
-                    id: new_storage_entry.id(),
-                    storage: Arc::new(new_storage_entry),
-                },
-            );
+            storage.insert(new_storage_entry.slot(), Arc::new(new_storage_entry));
         }
 
         Ok(StorageAndNextAccountsFileId {

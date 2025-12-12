@@ -6,14 +6,12 @@ use {
         latest_validator_votes_for_frozen_banks::LatestValidatorVotesForFrozenBanks,
         progress_map::ProgressMap, tree_diff::TreeDiff, Tower,
     },
+    solana_clock::{Epoch, Slot},
+    solana_epoch_schedule::EpochSchedule,
+    solana_hash::Hash,
     solana_measure::measure::Measure,
+    solana_pubkey::Pubkey,
     solana_runtime::{bank::Bank, bank_forks::BankForks, epoch_stakes::EpochStakes},
-    solana_sdk::{
-        clock::{Epoch, Slot},
-        epoch_schedule::EpochSchedule,
-        hash::Hash,
-        pubkey::Pubkey,
-    },
     std::{
         borrow::Borrow,
         cmp::Ordering,
@@ -256,11 +254,18 @@ impl HeaviestSubtreeForkChoice {
     }
 
     pub fn new_from_bank_forks(bank_forks: Arc<RwLock<BankForks>>) -> Self {
-        let bank_forks = bank_forks.read().unwrap();
-        let mut frozen_banks: Vec<_> = bank_forks.frozen_banks().values().cloned().collect();
+        let (frozen_banks, root_bank) = {
+            let bank_forks = bank_forks.read().unwrap();
+            let mut frozen_banks: Vec<_> = bank_forks
+                .frozen_banks()
+                .map(|(_slot, bank)| bank)
+                .collect();
+            frozen_banks.sort_by_key(|bank| bank.slot());
+            let root_bank = bank_forks.root_bank();
 
-        frozen_banks.sort_by_key(|bank| bank.slot());
-        let root_bank = bank_forks.root_bank();
+            (frozen_banks, root_bank)
+        };
+
         Self::new_from_frozen_banks((root_bank.slot(), root_bank.hash()), &frozen_banks)
     }
 
@@ -1033,10 +1038,8 @@ impl HeaviestSubtreeForkChoice {
                     {
                         assert!(if new_vote_slot == old_latest_vote_slot {
                             warn!(
-                                "Got a duplicate vote for
-                                    validator: {},
-                                    slot_hash: {:?}",
-                                pubkey, new_vote_slot_hash
+                                "Got a duplicate vote for validator: {pubkey}, \
+                                 slot_hash: {new_vote_slot_hash:?}",
                             );
                             // If the slots are equal, then the new
                             // vote must be for a smaller hash
@@ -1428,8 +1431,9 @@ mod test {
         super::*,
         crate::vote_simulator::VoteSimulator,
         itertools::Itertools,
+        solana_hash::Hash,
         solana_runtime::{bank::Bank, bank_utils},
-        solana_sdk::{hash::Hash, slot_history::SlotHistory},
+        solana_slot_history::SlotHistory,
         std::{collections::HashSet, ops::Range},
         trees::tr,
     };
@@ -1602,8 +1606,7 @@ mod test {
             .read()
             .unwrap()
             .frozen_banks()
-            .values()
-            .cloned()
+            .map(|(_slot, bank)| bank)
             .collect();
         frozen_banks.sort_by_key(|bank| bank.slot());
 

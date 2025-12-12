@@ -53,6 +53,10 @@ while [[ -n $1 ]]; do
       buildProfileArg='--profile release-with-debug'
       buildProfile='release-with-debug'
       shift
+    elif [[ $1 = --release-with-lto ]]; then
+      buildProfileArg='--profile release-with-lto'
+      buildProfile='release-with-lto'
+      shift
     elif [[ $1 = --validator-only ]]; then
       validatorOnly=true
       shift
@@ -166,7 +170,7 @@ check_dcou() {
     grep -q -F '"feature=\"dev-context-only-utils\""'
 }
 
-# Some binaries (like the notable agave-ledger-tool) need to acitivate
+# Some binaries (like the notable agave-ledger-tool) need to activate
 # the dev-context-only-utils feature flag to build.
 # Build those binaries separately to avoid the unwanted feature unification.
 # Note that `--workspace --exclude <dcou tainted packages>` is needed to really

@@ -1,19 +1,19 @@
 use {
-    solana_sdk::{
-        hash::Hash,
-        instruction::{AccountMeta, CompiledInstruction},
-        message::{
-            v0::{self, LoadedAddresses, MessageAddressTableLookup},
-            AddressLoader, AddressLoaderError, Message, MessageHeader, VersionedMessage,
-        },
-        pubkey::Pubkey,
-        reserved_account_keys::ReservedAccountKeys,
-        signature::Signature,
-        transaction::{
-            SanitizedTransaction, SanitizedVersionedTransaction, TransactionError,
-            VersionedTransaction,
-        },
+    agave_reserved_account_keys::ReservedAccountKeys,
+    solana_hash::Hash,
+    solana_instruction::AccountMeta,
+    solana_message::{
+        compiled_instruction::CompiledInstruction,
+        v0::{self, LoadedAddresses, MessageAddressTableLookup},
+        AddressLoader, AddressLoaderError, Message, MessageHeader, VersionedMessage,
     },
+    solana_pubkey::Pubkey,
+    solana_signature::Signature,
+    solana_transaction::{
+        sanitized::SanitizedTransaction,
+        versioned::{sanitized::SanitizedVersionedTransaction, VersionedTransaction},
+    },
+    solana_transaction_error::TransactionError,
     std::collections::{HashMap, HashSet},
 };
 

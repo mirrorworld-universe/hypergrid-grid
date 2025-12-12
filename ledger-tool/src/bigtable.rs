@@ -25,17 +25,19 @@ use {
         display::println_transaction, CliBlock, CliTransaction, CliTransactionConfirmation,
         OutputFormat,
     },
+    solana_clock::Slot,
     solana_entry::entry::{create_ticks, Entry},
+    solana_hash::Hash,
+    solana_keypair::keypair_from_seed,
     solana_ledger::{
         bigtable_upload::ConfirmedBlockUploadConfig,
         blockstore::Blockstore,
         blockstore_options::AccessType,
         shred::{ProcessShredsStats, ReedSolomonCache, Shredder},
     },
-    solana_sdk::{
-        clock::Slot, hash::Hash, pubkey::Pubkey, shred_version::compute_shred_version,
-        signature::Signature, signer::keypair::keypair_from_seed,
-    },
+    solana_pubkey::Pubkey,
+    solana_shred_version::compute_shred_version,
+    solana_signature::Signature,
     solana_storage_bigtable::CredentialType,
     solana_transaction_status::{ConfirmedBlock, UiTransactionEncoding, VersionedConfirmedBlock},
     std::{
@@ -1448,7 +1450,7 @@ pub fn bigtable_process_command(ledger_path: &Path, matches: &ArgMatches<'_>) {
             let blockstore = Arc::new(crate::open_blockstore(
                 &ledger_path,
                 arg_matches,
-                AccessType::Primary,
+                AccessType::PrimaryForMaintenance,
             ));
 
             let shred_config = if let Some(shred_version) = shred_version {

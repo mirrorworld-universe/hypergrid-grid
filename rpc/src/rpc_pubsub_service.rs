@@ -13,7 +13,7 @@ use {
     soketto::handshake::{server, Server},
     solana_metrics::TokenCounter,
     solana_rayon_threadlimit::get_thread_count,
-    solana_sdk::timing::AtomicInterval,
+    solana_time_utils::AtomicInterval,
     std::{
         io,
         net::SocketAddr,
@@ -375,7 +375,10 @@ async fn handle_connection(
         protocol: None,
     };
     server.send_response(&accept).await?;
-    let (mut sender, mut receiver) = server.into_builder().finish();
+    let mut builder = server.into_builder();
+    builder.set_max_message_size(4_096);
+    builder.set_max_frame_size(4_096);
+    let (mut sender, mut receiver) = builder.finish();
 
     let mut broadcast_receiver = subscription_control.broadcast_receiver();
     let mut data = Vec::new();
@@ -493,7 +496,6 @@ mod tests {
         let pubsub_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
         let exit = Arc::new(AtomicBool::new(false));
         let max_complete_transaction_status_slot = Arc::new(AtomicU64::default());
-        let max_complete_rewards_slot = Arc::new(AtomicU64::default());
         let GenesisConfigInfo { genesis_config, .. } = create_genesis_config(10_000);
         let bank = Bank::new_for_tests(&genesis_config);
         let bank_forks = BankForks::new_rw_arc(bank);
@@ -502,7 +504,6 @@ mod tests {
         let subscriptions = Arc::new(RpcSubscriptions::new_for_tests(
             exit,
             max_complete_transaction_status_slot,
-            max_complete_rewards_slot,
             bank_forks,
             Arc::new(RwLock::new(BlockCommitmentCache::new_for_tests())),
             optimistically_confirmed_bank,

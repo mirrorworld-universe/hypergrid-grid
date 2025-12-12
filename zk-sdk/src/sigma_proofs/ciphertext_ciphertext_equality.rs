@@ -94,9 +94,8 @@ impl CiphertextCiphertextEqualityProof {
         let mut y_r = Scalar::random(&mut OsRng);
 
         let Y_0 = (&y_s * P_first).compress();
-        let Y_1 =
-            RistrettoPoint::multiscalar_mul(vec![&y_x, &y_s], vec![&(*G), D_first]).compress();
-        let Y_2 = RistrettoPoint::multiscalar_mul(vec![&y_x, &y_r], vec![&(*G), &(*H)]).compress();
+        let Y_1 = RistrettoPoint::multiscalar_mul(vec![&y_x, &y_s], vec![&G, D_first]).compress();
+        let Y_2 = RistrettoPoint::multiscalar_mul(vec![&y_x, &y_r], vec![&G, &(*H)]).compress();
         let Y_3 = (&y_r * P_second).compress();
 
         // record masking factors in the transcript
@@ -162,6 +161,10 @@ impl CiphertextCiphertextEqualityProof {
         transcript.validate_and_append_point(b"Y_3", &self.Y_3)?;
 
         let c = transcript.challenge_scalar(b"c");
+
+        transcript.append_scalar(b"z_s", &self.z_s);
+        transcript.append_scalar(b"z_x", &self.z_x);
+        transcript.append_scalar(b"z_r", &self.z_r);
         let w = transcript.challenge_scalar(b"w"); // w used for batch verification
         let ww = &w * &w;
         let www = &w * &ww;
@@ -209,11 +212,11 @@ impl CiphertextCiphertextEqualityProof {
                 P_first,  // P_first
                 &(*H),    // H
                 &Y_0,     // Y_0
-                &(*G),    // G
+                &G,       // G
                 D_first,  // D_first
                 C_first,  // C_first
                 &Y_1,     // Y_1
-                &(*G),    // G
+                &G,       // G
                 &(*H),    // H
                 C_second, // C_second
                 &Y_2,     // Y_2

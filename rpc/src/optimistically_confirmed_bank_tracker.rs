@@ -11,11 +11,12 @@
 use {
     crate::rpc_subscriptions::RpcSubscriptions,
     crossbeam_channel::{Receiver, RecvTimeoutError, Sender},
+    solana_clock::Slot,
     solana_rpc_client_api::response::{SlotTransactionStats, SlotUpdate},
     solana_runtime::{
         bank::Bank, bank_forks::BankForks, prioritization_fee_cache::PrioritizationFeeCache,
     },
-    solana_sdk::{clock::Slot, timing::timestamp},
+    solana_time_utils::timestamp,
     std::{
         collections::HashSet,
         sync::{
@@ -403,9 +404,7 @@ mod tests {
         crossbeam_channel::unbounded,
         solana_ledger::genesis_utils::{create_genesis_config, GenesisConfigInfo},
         solana_pubkey::Pubkey,
-        solana_runtime::{
-            accounts_background_service::AbsRequestSender, commitment::BlockCommitmentCache,
-        },
+        solana_runtime::commitment::BlockCommitmentCache,
         std::sync::atomic::AtomicU64,
     };
 
@@ -440,11 +439,9 @@ mod tests {
 
         let block_commitment_cache = Arc::new(RwLock::new(BlockCommitmentCache::default()));
         let max_complete_transaction_status_slot = Arc::new(AtomicU64::default());
-        let max_complete_rewards_slot = Arc::new(AtomicU64::default());
         let subscriptions = Arc::new(RpcSubscriptions::new_for_tests(
             exit,
             max_complete_transaction_status_slot,
-            max_complete_rewards_slot,
             bank_forks.clone(),
             block_commitment_cache,
             optimistically_confirmed_bank.clone(),
@@ -604,11 +601,7 @@ mod tests {
         let bank5 = bank_forks.read().unwrap().get(5).unwrap();
         let bank7 = Bank::new_from_parent(bank5, &Pubkey::default(), 7);
         bank_forks.write().unwrap().insert(bank7);
-        bank_forks
-            .write()
-            .unwrap()
-            .set_root(7, &AbsRequestSender::default(), None)
-            .unwrap();
+        bank_forks.write().unwrap().set_root(7, None, None).unwrap();
         OptimisticallyConfirmedBankTracker::process_notification(
             BankNotification::OptimisticallyConfirmed(6),
             &bank_forks,

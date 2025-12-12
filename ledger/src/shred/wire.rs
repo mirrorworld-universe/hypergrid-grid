@@ -1,56 +1,71 @@
 // Helper methods to extract pieces of the shred from the payload without
 // deserializing the entire payload.
+#![deny(clippy::indexing_slicing)]
 use {
     crate::shred::{
-        self, merkle::SIZE_OF_MERKLE_ROOT, Error, Nonce, ShredFlags, ShredId, ShredType,
-        ShredVariant, SignedData, SIZE_OF_COMMON_SHRED_HEADER, SIZE_OF_NONCE,
+        self, merkle_tree::SIZE_OF_MERKLE_ROOT, traits::Shred, Error, Nonce, ShredFlags, ShredId,
+        ShredType, ShredVariant, SignedData, SIZE_OF_COMMON_SHRED_HEADER,
     },
-    solana_perf::packet::Packet,
-    solana_sdk::{
-        clock::Slot,
-        hash::Hash,
-        signature::{Signature, Signer, SIGNATURE_BYTES},
-        signer::keypair::Keypair,
-    },
+    solana_clock::Slot,
+    solana_hash::Hash,
+    solana_keypair::Keypair,
+    solana_perf::packet::{PacketRef, PacketRefMut},
+    solana_signature::{Signature, SIGNATURE_BYTES},
+    solana_signer::Signer,
     std::ops::Range,
 };
 #[cfg(test)]
 use {
     rand::{seq::SliceRandom, Rng},
+    solana_perf::packet::Packet,
     std::collections::HashMap,
 };
 
 #[inline]
-fn get_shred_size(packet: &Packet) -> Option<usize> {
-    let size = packet.data(..)?.len();
-    if packet.meta().repair() {
-        size.checked_sub(SIZE_OF_NONCE)
-    } else {
-        Some(size)
+fn get_shred_size(shred: &[u8]) -> Option<usize> {
+    // Legacy data shreds have zero padding at the end which might have been
+    // trimmed. Other variants do not have any trailing zeros.
+    Some(match get_shred_variant(shred).ok()? {
+        ShredVariant::LegacyCode => shred::legacy::ShredCode::SIZE_OF_PAYLOAD,
+        ShredVariant::LegacyData => shred::legacy::ShredData::SIZE_OF_PAYLOAD.min(shred.len()),
+        ShredVariant::MerkleCode { .. } => shred::merkle::ShredCode::SIZE_OF_PAYLOAD,
+        ShredVariant::MerkleData { .. } => shred::merkle::ShredData::SIZE_OF_PAYLOAD,
+    })
+}
+
+#[inline]
+pub fn get_shred<'a, P>(packet: P) -> Option<&'a [u8]>
+where
+    P: Into<PacketRef<'a>>,
+{
+    let data = packet.into().data(..)?;
+    data.get(..get_shred_size(data)?)
+}
+
+#[inline]
+pub fn get_shred_mut<'a>(packet: &'a mut PacketRefMut) -> Option<&'a mut [u8]> {
+    // This function is used only in turbine for re-signing shreds.
+    match packet {
+        // Currently, turbine uses only `Packet`, which allows mutability.
+        PacketRefMut::Packet(packet) => {
+            let buffer = packet.buffer_mut();
+            buffer.get_mut(..get_shred_size(buffer)?)
+        }
+        // `BytesPacket` is immutable, but not used in turbine.
+        PacketRefMut::Bytes(_) => unreachable!("`BytesPacket` is not used in turbine"),
     }
 }
 
 #[inline]
-pub fn get_shred(packet: &Packet) -> Option<&[u8]> {
-    let size = get_shred_size(packet)?;
-    packet.data(..size)
-}
-
-#[inline]
-pub fn get_shred_mut(packet: &mut Packet) -> Option<&mut [u8]> {
-    let size = get_shred_size(packet)?;
-    packet.buffer_mut().get_mut(..size)
-}
-
-#[inline]
-pub fn get_shred_and_repair_nonce(packet: &Packet) -> Option<(&[u8], Option<Nonce>)> {
+pub fn get_shred_and_repair_nonce(packet: PacketRef) -> Option<(&[u8], Option<Nonce>)> {
     let data = packet.data(..)?;
+    let shred = data.get(..get_shred_size(data)?)?;
     if !packet.meta().repair() {
-        return Some((data, None));
+        return Some((shred, None));
     }
     let offset = data.len().checked_sub(4)?;
-    let (shred, nonce) = data.split_at(offset);
-    let nonce = u32::from_le_bytes(<[u8; 4]>::try_from(nonce).unwrap());
+    let nonce = <[u8; 4]>::try_from(data.get(offset..)?).ok()?;
+    let nonce = u32::from_le_bytes(nonce);
     Some((shred, Some(nonce)))
 }
 
@@ -108,9 +123,10 @@ pub(super) fn get_parent_offset(shred: &[u8]) -> Option<u16> {
     Some(u16::from_le_bytes(bytes))
 }
 
-// Returns DataShredHeader.flags.
+// Returns DataShredHeader.flags if the shred is data.
+// Returns Error::InvalidShredType for coding shreds.
 #[inline]
-pub(crate) fn get_flags(shred: &[u8]) -> Result<ShredFlags, Error> {
+pub fn get_flags(shred: &[u8]) -> Result<ShredFlags, Error> {
     match get_shred_type(shred)? {
         ShredType::Code => Err(Error::InvalidShredType),
         ShredType::Data => {
@@ -353,6 +369,7 @@ pub fn resign_shred(shred: &mut [u8], keypair: &Keypair) -> Result<(), Error> {
 
 // Minimally corrupts the packet so that the signature no longer verifies.
 #[cfg(test)]
+#[allow(clippy::indexing_slicing)]
 pub(crate) fn corrupt_packet<R: Rng>(
     rng: &mut R,
     packet: &mut Packet,
@@ -363,7 +380,9 @@ pub(crate) fn corrupt_packet<R: Rng>(
         let byte = buffer[offsets].choose_mut(rng).unwrap();
         *byte = rng.gen::<u8>().max(1u8).wrapping_add(*byte);
     }
-    let shred = get_shred(packet).unwrap();
+    // We need to re-borrow the `packet` here, otherwise compiler considers it
+    // as moved.
+    let shred = get_shred(&*packet).unwrap();
     let merkle_variant = match get_shred_variant(shred).unwrap() {
         ShredVariant::LegacyCode | ShredVariant::LegacyData => None,
         ShredVariant::MerkleCode {
@@ -391,7 +410,10 @@ pub(crate) fn corrupt_packet<R: Rng>(
                 let size = shred.len() - if resigned { SIGNATURE_BYTES } else { 0 };
                 size - offset..size
             })
-            .or_else(|| get_signed_data_offsets(shred));
+            .or_else(|| {
+                let Range { start, end } = get_signed_data_offsets(shred)?;
+                Some(start + 1..end) // +1 to exclude ShredVariant.
+            });
         modify_packet(rng, packet, offsets.unwrap());
     }
     // Assert that the signature no longer verifies.
@@ -434,6 +456,36 @@ mod tests {
         Signature::from(signature)
     }
 
+    fn write_shred<R: Rng>(
+        rng: &mut R,
+        shred: impl AsRef<[u8]>,
+        nonce: Option<Nonce>,
+        packet: &mut Packet,
+    ) {
+        let buffer = packet.buffer_mut();
+        let capacity = buffer.len();
+        let mut cursor = Cursor::new(buffer);
+        cursor.write_all(shred.as_ref()).unwrap();
+        // Write some random many bytes trailing shred payload.
+        let mut bytes = {
+            let size = capacity
+                - cursor.position() as usize
+                - if nonce.is_some() {
+                    std::mem::size_of::<Nonce>()
+                } else {
+                    0
+                };
+            vec![0u8; rng.gen_range(0..=size)]
+        };
+        rng.fill(&mut bytes[..]);
+        cursor.write_all(&bytes).unwrap();
+        // Write nonce after random trailing bytes.
+        if let Some(nonce) = nonce {
+            cursor.write_all(&nonce.to_le_bytes()).unwrap();
+        }
+        packet.meta_mut().size = usize::try_from(cursor.position()).unwrap();
+    }
+
     #[test_case(false, false, false)]
     #[test_case(false, false, true)]
     #[test_case(false, true, false)]
@@ -460,29 +512,31 @@ mod tests {
                 );
             }
         }
-        let mut packet = Packet::default();
-        if repaired {
-            packet.meta_mut().flags |= PacketFlags::REPAIR;
-        }
         for shred in &shreds {
-            let nonce = repaired.then(|| rng.gen::<Nonce>());
-            let mut cursor = Cursor::new(packet.buffer_mut());
-            cursor.write_all(shred.payload()).unwrap();
-            if let Some(nonce) = nonce {
-                cursor.write_all(&nonce.to_le_bytes()).unwrap();
+            let mut packet = Packet::default();
+            if repaired {
+                packet.meta_mut().flags |= PacketFlags::REPAIR;
             }
-            packet.meta_mut().size = usize::try_from(cursor.position()).unwrap();
-            assert_eq!(get_shred_size(&packet).unwrap(), shred.payload().len());
-            assert_eq!(get_shred(&packet).unwrap(), shred.payload().as_ref());
+            let nonce = repaired.then(|| rng.gen::<Nonce>());
+            write_shred(&mut rng, shred.payload(), nonce, &mut packet);
+            let mut packet = PacketRefMut::Packet(&mut packet);
+            assert_eq!(
+                packet.data(..).map(get_shred_size).unwrap().unwrap(),
+                shred.payload().len()
+            );
+            assert_eq!(
+                get_shred(packet.as_ref()).unwrap(),
+                shred.payload().as_ref()
+            );
             assert_eq!(
                 get_shred_mut(&mut packet).unwrap(),
                 shred.payload().as_ref(),
             );
             assert_eq!(
-                get_shred_and_repair_nonce(&packet).unwrap(),
+                get_shred_and_repair_nonce(packet.as_ref()).unwrap(),
                 (shred.payload().as_ref(), nonce),
             );
-            let bytes = get_shred(&packet).unwrap();
+            let bytes = get_shred(packet.as_ref()).unwrap();
             let shred_common_header = shred.common_header();
             assert_eq!(
                 get_common_header_bytes(bytes).unwrap(),

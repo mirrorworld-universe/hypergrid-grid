@@ -16,11 +16,13 @@ use {
     crossbeam_channel::{unbounded, Sender},
     itertools::Itertools,
     log::*,
-    solana_client::connection_cache::ConnectionCache,
+    solana_clock::{Slot, DEFAULT_MS_PER_SLOT, HOLD_TRANSACTIONS_SLOT_OFFSET},
+    solana_genesis_config::GenesisConfig,
     solana_gossip::{
         cluster_info::{ClusterInfo, Node},
         contact_info::ContactInfoQuery,
     },
+    solana_keypair::Keypair,
     solana_ledger::{
         blockstore::{Blockstore, PurgeType},
         leader_schedule_cache::LeaderScheduleCache,
@@ -29,21 +31,17 @@ use {
     solana_poh::{
         poh_recorder::{PohRecorder, GRACE_TICKS_FACTOR, MAX_GRACE_SLOTS},
         poh_service::{PohService, DEFAULT_HASHES_PER_BATCH, DEFAULT_PINNED_CPU_CORE},
+        transaction_recorder::TransactionRecorder,
     },
+    solana_pubkey::Pubkey,
     solana_runtime::{
         bank::{Bank, HashOverrides},
         bank_forks::BankForks,
         installed_scheduler_pool::BankWithScheduler,
         prioritization_fee_cache::PrioritizationFeeCache,
     },
-    solana_sdk::{
-        clock::{Slot, DEFAULT_MS_PER_SLOT, HOLD_TRANSACTIONS_SLOT_OFFSET},
-        genesis_config::GenesisConfig,
-        pubkey::Pubkey,
-        shred_version::compute_shred_version,
-        signature::Signer,
-        signer::keypair::Keypair,
-    },
+    solana_shred_version::compute_shred_version,
+    solana_signer::Signer,
     solana_streamer::socket::SocketAddrSpace,
     solana_turbine::broadcast_stage::{BroadcastStage, BroadcastStageType},
     std::{
@@ -57,7 +55,7 @@ use {
             Arc, RwLock,
         },
         thread::{self, sleep, JoinHandle},
-        time::{Duration, SystemTime},
+        time::{Duration, Instant, SystemTime},
     },
     thiserror::Error,
 };
@@ -267,19 +265,25 @@ impl SimulatorLoopLogger {
             .unwrap()
     }
 
-    fn log_frozen_bank_cost(&self, bank: &Bank) {
+    fn log_frozen_bank_cost(&self, bank: &Bank, bank_elapsed: Duration) {
         info!(
-            "bank cost: slot: {} {:?} (frozen)",
+            "simulated bank slot+delta: {}+{}ms costs: {:?} fees: {} txs: {} (frozen)",
             bank.slot(),
+            bank_elapsed.as_millis(),
             Self::bank_costs(bank),
+            bank.collector_fees(),
+            bank.executed_transaction_count(),
         );
     }
 
-    fn log_ongoing_bank_cost(&self, bank: &Bank) {
-        debug!(
-            "bank cost: slot: {} {:?} (ongoing)",
+    fn log_ongoing_bank_cost(&self, bank: &Bank, bank_elapsed: Duration) {
+        info!(
+            "simulated bank slot+delta: {}+{}ms costs: {:?} fees: {} txs: {} (ongoing)",
             bank.slot(),
+            bank_elapsed.as_millis(),
             Self::bank_costs(bank),
+            bank.collector_fees(),
+            bank.executed_transaction_count(),
         );
     }
 
@@ -312,8 +316,14 @@ impl SimulatorLoopLogger {
         }
     }
 
-    fn on_new_leader(&self, bank: &Bank, new_slot: Slot, new_leader: Pubkey) {
-        self.log_frozen_bank_cost(bank);
+    fn on_new_leader(
+        &self,
+        bank: &Bank,
+        bank_elapsed: Duration,
+        new_slot: Slot,
+        new_leader: Pubkey,
+    ) {
+        self.log_frozen_bank_cost(bank, bank_elapsed);
         info!(
             "{} isn't leader anymore at slot {}; new leader: {}",
             self.simulated_leader, new_slot, new_leader
@@ -432,7 +442,7 @@ impl SimulatorLoop {
             base_simulation_time,
             freeze_time_by_slot: self.freeze_time_by_slot,
         };
-        let mut bank = self.bank;
+        let (mut bank, mut bank_created) = (self.bank, Instant::now());
         loop {
             if self.poh_recorder.read().unwrap().bank().is_none() {
                 let next_leader_slot = self.leader_schedule_cache.next_leader_slot(
@@ -466,7 +476,7 @@ impl SimulatorLoop {
                     .slot_leader_at(new_slot, None)
                     .unwrap();
                 if new_leader != self.simulated_leader {
-                    logger.on_new_leader(&bank, new_slot, new_leader);
+                    logger.on_new_leader(&bank, bank_created.elapsed(), new_slot, new_leader);
                     break;
                 } else if sender_thread.is_finished() {
                     warn!("sender thread existed maybe due to completion of sending traced events");
@@ -484,7 +494,7 @@ impl SimulatorLoop {
                 self.retracer
                     .hash_event(bank.slot(), &bank.last_blockhash(), &bank.hash());
                 if *bank.collector_id() == self.simulated_leader {
-                    logger.log_frozen_bank_cost(&bank);
+                    logger.log_frozen_bank_cost(&bank, bank_created.elapsed());
                 }
                 self.retransmit_slots_sender.send(bank.slot()).unwrap();
                 update_bank_forks_and_poh_recorder_for_new_tpu_bank(
@@ -493,13 +503,16 @@ impl SimulatorLoop {
                     new_bank,
                     false,
                 );
-                bank = self
-                    .bank_forks
-                    .read()
-                    .unwrap()
-                    .working_bank_with_scheduler();
+                (bank, bank_created) = (
+                    self.bank_forks
+                        .read()
+                        .unwrap()
+                        .working_bank_with_scheduler(),
+                    Instant::now(),
+                );
+                logger.log_ongoing_bank_cost(&bank, bank_created.elapsed());
             } else {
-                logger.log_ongoing_bank_cost(&bank);
+                logger.log_ongoing_bank_cost(&bank, bank_created.elapsed());
             }
 
             sleep(Duration::from_millis(10));
@@ -712,7 +725,7 @@ impl BankingSimulator {
 
         info!("Poh is starting!");
 
-        let (poh_recorder, entry_receiver, record_receiver) = PohRecorder::new_with_clear_signal(
+        let (poh_recorder, entry_receiver) = PohRecorder::new_with_clear_signal(
             bank.tick_height(),
             bank.last_blockhash(),
             bank.clone(),
@@ -723,10 +736,11 @@ impl BankingSimulator {
             blockstore.get_new_shred_signal(0),
             &leader_schedule_cache,
             &genesis_config.poh_config,
-            None,
             exit.clone(),
         );
         let poh_recorder = Arc::new(RwLock::new(poh_recorder));
+        let (record_sender, record_receiver) = unbounded();
+        let transaction_recorder = TransactionRecorder::new(record_sender, exit.clone());
         let poh_service = PohService::new(
             poh_recorder.clone(),
             &genesis_config.poh_config,
@@ -772,7 +786,6 @@ impl BankingSimulator {
             gossip_vote_receiver,
         } = retracer.create_channels(false);
 
-        let connection_cache = Arc::new(ConnectionCache::new("connection_cache_sim"));
         let (replay_vote_sender, _replay_vote_receiver) = unbounded();
         let (retransmit_slots_sender, retransmit_slots_receiver) = unbounded();
         let shred_version = compute_shred_version(
@@ -811,6 +824,7 @@ impl BankingSimulator {
             transaction_struct.clone(),
             &cluster_info_for_banking,
             &poh_recorder,
+            transaction_recorder,
             non_vote_receiver,
             tpu_vote_receiver,
             gossip_vote_receiver,
@@ -818,10 +832,8 @@ impl BankingSimulator {
             None,
             replay_vote_sender,
             None,
-            connection_cache,
             bank_forks.clone(),
             prioritization_fee_cache,
-            false,
         );
 
         let (&_slot, &raw_base_event_time) = freeze_time_by_slot

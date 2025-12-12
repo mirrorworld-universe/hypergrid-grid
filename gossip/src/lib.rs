@@ -7,6 +7,7 @@ pub mod contact_info;
 pub mod crds;
 pub mod crds_data;
 pub mod crds_entry;
+mod crds_filter;
 pub mod crds_gossip;
 pub mod crds_gossip_error;
 pub mod crds_gossip_pull;
@@ -18,9 +19,11 @@ pub mod duplicate_shred;
 pub mod duplicate_shred_handler;
 pub mod duplicate_shred_listener;
 pub mod epoch_slots;
-mod epoch_specs;
+pub mod epoch_specs;
 pub mod gossip_error;
 pub mod gossip_service;
+#[macro_use]
+mod tlv;
 #[macro_use]
 mod legacy_contact_info;
 pub mod ping_pong;
@@ -46,3 +49,5 @@ extern crate solana_frozen_abi_macro;
 
 #[macro_use]
 extern crate solana_metrics;
+
+mod wire_format_tests;

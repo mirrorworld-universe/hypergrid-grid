@@ -1,12 +1,11 @@
 use {
     solana_poh::poh_recorder::{BankStart, PohRecorder},
-    solana_sdk::{
-        clock::{
-            DEFAULT_TICKS_PER_SLOT, FORWARD_TRANSACTIONS_TO_LEADER_AT_SLOT_OFFSET,
-            HOLD_TRANSACTIONS_SLOT_OFFSET,
-        },
-        pubkey::Pubkey,
+    solana_clock::{
+        DEFAULT_TICKS_PER_SLOT, FORWARD_TRANSACTIONS_TO_LEADER_AT_SLOT_OFFSET,
+        HOLD_TRANSACTIONS_SLOT_OFFSET,
     },
+    solana_pubkey::Pubkey,
+    solana_unified_scheduler_pool::{BankingStageMonitor, BankingStageStatus},
     std::{
         sync::{Arc, RwLock},
         time::{Duration, Instant},
@@ -31,9 +30,10 @@ impl BufferedPacketsDecision {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, derive_more::Debug)]
 pub struct DecisionMaker {
     my_pubkey: Pubkey,
+    #[debug("{poh_recorder:p}")]
     poh_recorder: Arc<RwLock<PohRecorder>>,
 
     cached_decision: Option<BufferedPacketsDecision>,
@@ -136,6 +136,19 @@ impl DecisionMaker {
     }
 }
 
+impl BankingStageMonitor for DecisionMaker {
+    fn status(&mut self) -> BankingStageStatus {
+        if matches!(
+            self.make_consume_or_forward_decision(),
+            BufferedPacketsDecision::Forward,
+        ) {
+            BankingStageStatus::Inactive
+        } else {
+            BankingStageStatus::Active
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use {
@@ -144,7 +157,7 @@ mod tests {
         solana_ledger::{blockstore::Blockstore, genesis_utils::create_genesis_config},
         solana_poh::poh_recorder::create_test_recorder,
         solana_runtime::bank::Bank,
-        solana_sdk::clock::NUM_CONSECUTIVE_LEADER_SLOTS,
+        solana_clock::NUM_CONSECUTIVE_LEADER_SLOTS,
         std::{
             env::temp_dir,
             sync::{atomic::Ordering, Arc},
@@ -175,7 +188,7 @@ mod tests {
         let (bank, _bank_forks) = Bank::new_no_wallclock_throttle_for_tests(&genesis_config);
         let ledger_path = temp_dir();
         let blockstore = Arc::new(Blockstore::open(ledger_path.as_path()).unwrap());
-        let (exit, poh_recorder, poh_service, _entry_receiver) =
+        let (exit, poh_recorder, _transaction_recorder, poh_service, _entry_receiver) =
             create_test_recorder(bank.clone(), blockstore, None, None);
         // Drop the poh service immediately to avoid potential ticking
         exit.store(true, Ordering::Relaxed);

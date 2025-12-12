@@ -17,6 +17,8 @@ use {
     serde_json::json,
     solana_clap_utils::{hidden_unless_forced, input_validators::is_slot},
     solana_cli_output::OutputFormat,
+    solana_clock::{Slot, UnixTimestamp},
+    solana_hash::Hash,
     solana_ledger::{
         ancestor_iterator::AncestorIterator,
         blockstore::{
@@ -26,11 +28,8 @@ use {
         blockstore_options::AccessType,
         shred::Shred,
     },
-    solana_sdk::{
-        clock::{Slot, UnixTimestamp},
-        hash::Hash,
-    },
     std::{
+        borrow::Cow,
         collections::{BTreeMap, BTreeSet, HashMap},
         fs::File,
         io::{stdout, BufRead, BufReader, Write},
@@ -131,7 +130,6 @@ fn analyze_storage(blockstore: &Blockstore) -> Result<()> {
     analyze_column(blockstore, Blocktime::NAME)?;
     analyze_column(blockstore, PerfSamples::NAME)?;
     analyze_column(blockstore, BlockHeight::NAME)?;
-    analyze_column(blockstore, ProgramCosts::NAME)?;
     analyze_column(blockstore, OptimisticSlots::NAME)
 }
 
@@ -160,7 +158,6 @@ fn raw_key_to_slot(key: &[u8], column_name: &str) -> Option<Slot> {
         cf::Blocktime::NAME => Some(cf::Blocktime::slot(cf::Blocktime::index(key))),
         cf::PerfSamples::NAME => Some(cf::PerfSamples::slot(cf::PerfSamples::index(key))),
         cf::BlockHeight::NAME => Some(cf::BlockHeight::slot(cf::BlockHeight::index(key))),
-        cf::ProgramCosts::NAME => None, // does not implement slot()
         cf::OptimisticSlots::NAME => {
             Some(cf::OptimisticSlots::slot(cf::OptimisticSlots::index(key)))
         }
@@ -669,14 +666,16 @@ fn do_blockstore_process_command(ledger_path: &Path, matches: &ArgMatches<'_>) -
             let target_db = PathBuf::from(value_t_or_exit!(arg_matches, "target_db", String));
 
             let source = crate::open_blockstore(&ledger_path, arg_matches, AccessType::Secondary);
-            let target = crate::open_blockstore(&target_db, arg_matches, AccessType::Primary);
+            let target =
+                crate::open_blockstore(&target_db, arg_matches, AccessType::PrimaryForMaintenance);
 
             for (slot, _meta) in source.slot_meta_iterator(starting_slot)? {
                 if slot > ending_slot {
                     break;
                 }
                 let shreds = source.get_data_shreds_for_slot(slot, 0)?;
-                if target.insert_shreds(shreds, None, true).is_err() {
+                let shreds = shreds.into_iter().map(Cow::Owned);
+                if target.insert_cow_shreds(shreds, None, true).is_err() {
                     warn!("error inserting shreds for slot {}", slot);
                 }
             }
@@ -928,7 +927,11 @@ fn do_blockstore_process_command(ledger_path: &Path, matches: &ArgMatches<'_>) -
         }
         ("remove-dead-slot", Some(arg_matches)) => {
             let slots = values_t_or_exit!(arg_matches, "slots", Slot);
-            let blockstore = crate::open_blockstore(&ledger_path, arg_matches, AccessType::Primary);
+            let blockstore = crate::open_blockstore(
+                &ledger_path,
+                arg_matches,
+                AccessType::PrimaryForMaintenance,
+            );
             for slot in slots {
                 blockstore
                     .remove_dead_slot(slot)
@@ -936,7 +939,11 @@ fn do_blockstore_process_command(ledger_path: &Path, matches: &ArgMatches<'_>) -
             }
         }
         ("repair-roots", Some(arg_matches)) => {
-            let blockstore = crate::open_blockstore(&ledger_path, arg_matches, AccessType::Primary);
+            let blockstore = crate::open_blockstore(
+                &ledger_path,
+                arg_matches,
+                AccessType::PrimaryForMaintenance,
+            );
 
             let start_root =
                 value_t!(arg_matches, "start_root", Slot).unwrap_or_else(|_| blockstore.max_root());
@@ -962,7 +969,11 @@ fn do_blockstore_process_command(ledger_path: &Path, matches: &ArgMatches<'_>) -
         }
         ("set-dead-slot", Some(arg_matches)) => {
             let slots = values_t_or_exit!(arg_matches, "slots", Slot);
-            let blockstore = crate::open_blockstore(&ledger_path, arg_matches, AccessType::Primary);
+            let blockstore = crate::open_blockstore(
+                &ledger_path,
+                arg_matches,
+                AccessType::PrimaryForMaintenance,
+            );
             for slot in slots {
                 blockstore
                     .set_dead_slot(slot)

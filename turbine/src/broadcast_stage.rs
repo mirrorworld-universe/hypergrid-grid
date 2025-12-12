@@ -12,10 +12,12 @@ use {
     bytes::Bytes,
     crossbeam_channel::{unbounded, Receiver, RecvError, RecvTimeoutError, Sender},
     itertools::{Either, Itertools},
+    solana_clock::Slot,
     solana_gossip::{
         cluster_info::{ClusterInfo, ClusterInfoError},
         contact_info::Protocol,
     },
+    solana_keypair::Keypair,
     solana_ledger::{
         blockstore::Blockstore,
         shred::{self, Shred},
@@ -23,17 +25,13 @@ use {
     solana_measure::measure::Measure,
     solana_metrics::{inc_new_counter_error, inc_new_counter_info},
     solana_poh::poh_recorder::WorkingBankEntry,
+    solana_pubkey::Pubkey,
     solana_runtime::{bank::MAX_LEADER_SCHEDULE_STAKES, bank_forks::BankForks},
-    solana_sdk::{
-        clock::Slot,
-        pubkey::Pubkey,
-        signature::Keypair,
-        timing::{timestamp, AtomicInterval},
-    },
     solana_streamer::{
         sendmmsg::{batch_send, SendPktsError},
         socket::SocketAddrSpace,
     },
+    solana_time_utils::{timestamp, AtomicInterval},
     static_assertions::const_assert_eq,
     std::{
         collections::{HashMap, HashSet},
@@ -86,7 +84,7 @@ pub enum Error {
     #[error("Shred not found, slot: {slot}, index: {index}")]
     ShredNotFound { slot: Slot, index: u64 },
     #[error(transparent)]
-    TransportError(#[from] solana_sdk::transport::TransportError),
+    TransportError(#[from] solana_transaction_error::TransportError),
     #[error("Unknown last index, slot: {0}")]
     UnknownLastIndex(Slot),
     #[error("Unknown slot meta, slot: {0}")]
@@ -445,6 +443,7 @@ pub fn broadcast_shreds(
     quic_endpoint_sender: &AsyncSender<(SocketAddr, Bytes)>,
 ) -> Result<()> {
     let mut result = Ok(());
+    // Compute destinations & transmission protocols for each of the shreds to be sent
     let mut shred_select = Measure::start("shred_select");
     let (root_bank, working_bank) = {
         let bank_forks = bank_forks.read().unwrap();
@@ -476,9 +475,9 @@ pub fn broadcast_shreds(
         .partition_map(std::convert::identity);
     shred_select.stop();
     transmit_stats.shred_select += shred_select.as_us();
-
+    let num_udp_packets = packets.len();
     let mut send_mmsg_time = Measure::start("send_mmsg");
-    match batch_send(s, &packets[..]) {
+    match batch_send(s, packets) {
         Ok(()) => (),
         Err(SendPktsError::IoError(ioerr, num_failed)) => {
             transmit_stats.dropped_packets_udp += num_failed;
@@ -487,7 +486,8 @@ pub fn broadcast_shreds(
     }
     send_mmsg_time.stop();
     transmit_stats.send_mmsg_elapsed += send_mmsg_time.as_us();
-    transmit_stats.total_packets += packets.len() + quic_packets.len();
+    let mut quic_send_time = Measure::start("send shreds via quic");
+    transmit_stats.total_packets += num_udp_packets + quic_packets.len();
     for (shred, addr) in quic_packets {
         let shred = Bytes::from(shred::Payload::unwrap_or_clone(shred.clone()));
         if let Err(err) = quic_endpoint_sender.blocking_send((addr, shred)) {
@@ -495,6 +495,8 @@ pub fn broadcast_shreds(
             result = Err(Error::from(err));
         }
     }
+    quic_send_time.stop();
+    transmit_stats.send_quic_elapsed = quic_send_time.as_us();
     result
 }
 
@@ -518,6 +520,8 @@ pub mod test {
         rand::Rng,
         solana_entry::entry::create_ticks,
         solana_gossip::cluster_info::{ClusterInfo, Node},
+        solana_hash::Hash,
+        solana_keypair::Keypair,
         solana_ledger::{
             blockstore::Blockstore,
             genesis_utils::{create_genesis_config, GenesisConfigInfo},
@@ -525,10 +529,7 @@ pub mod test {
             shred::{max_ticks_per_n_shreds, ProcessShredsStats, ReedSolomonCache, Shredder},
         },
         solana_runtime::bank::Bank,
-        solana_sdk::{
-            hash::Hash,
-            signature::{Keypair, Signer},
-        },
+        solana_signer::Signer,
         std::{
             path::Path,
             sync::{atomic::AtomicBool, Arc},

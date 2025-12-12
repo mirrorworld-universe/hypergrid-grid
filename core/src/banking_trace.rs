@@ -4,7 +4,8 @@ use {
     chrono::{DateTime, Local},
     crossbeam_channel::{unbounded, Receiver, SendError, Sender, TryRecvError},
     rolling_file::{RollingCondition, RollingConditionBasic, RollingFileAppender},
-    solana_sdk::{hash::Hash, slot_history::Slot},
+    solana_clock::Slot,
+    solana_hash::Hash,
     std::{
         fs::{create_dir_all, remove_dir_all},
         io::{self, Write},
@@ -62,7 +63,7 @@ pub struct BankingTracer {
 #[cfg_attr(
     feature = "frozen-abi",
     derive(AbiExample),
-    frozen_abi(digest = "DAdZnX6ijBWaxKAyksq4nJa6PAZqT4RShZqLWTtNvyAM")
+    frozen_abi(digest = "91baCBT3aY2nXSAuzY3S5dnMhWabVsHowgWqYPLjfyg7")
 )]
 #[derive(Serialize, Deserialize, Debug)]
 pub struct TimedTracedEvent(pub std::time::SystemTime, pub TracedEvent);
@@ -182,6 +183,28 @@ pub struct Channels {
     pub tpu_vote_receiver: BankingPacketReceiver,
     pub gossip_vote_sender: BankingPacketSender,
     pub gossip_vote_receiver: BankingPacketReceiver,
+}
+
+#[allow(dead_code)]
+impl Channels {
+    #[cfg(feature = "dev-context-only-utils")]
+    pub fn unified_sender(&self) -> &BankingPacketSender {
+        let unified_sender = &self.non_vote_sender;
+        assert!(unified_sender
+            .sender
+            .same_channel(&self.tpu_vote_sender.sender));
+        assert!(unified_sender
+            .sender
+            .same_channel(&self.gossip_vote_sender.sender));
+        unified_sender
+    }
+
+    pub(crate) fn unified_receiver(&self) -> &BankingPacketReceiver {
+        let unified_receiver = &self.non_vote_receiver;
+        assert!(unified_receiver.same_channel(&self.tpu_vote_receiver));
+        assert!(unified_receiver.same_channel(&self.gossip_vote_receiver));
+        unified_receiver
+    }
 }
 
 impl BankingTracer {
@@ -462,7 +485,7 @@ pub mod for_test {
     pub fn drop_and_clean_temp_dir_unless_suppressed(temp_dir: TempDir) {
         std::env::var("BANKING_TRACE_LEAVE_FILES").is_ok().then(|| {
             warn!("prevented to remove {:?}", temp_dir.path());
-            drop(temp_dir.into_path());
+            drop(temp_dir.keep());
         });
     }
 

@@ -26,13 +26,13 @@ use {
     solana_epoch_info::EpochInfo,
     solana_hash::Hash,
     solana_native_token::lamports_to_sol,
-    solana_program::stake::state::{Authorized, Lockup},
     solana_pubkey::Pubkey,
     solana_rpc_client_api::response::{
         RpcAccountBalance, RpcContactInfo, RpcInflationGovernor, RpcInflationRate, RpcKeyedAccount,
         RpcSupply, RpcVoteAccountInfo,
     },
     solana_signature::Signature,
+    solana_stake_interface::state::{Authorized, Lockup},
     solana_sysvar::stake_history::StakeHistoryEntry,
     solana_transaction::{versioned::VersionedTransaction, Transaction},
     solana_transaction_error::TransactionError,
@@ -2463,6 +2463,25 @@ impl fmt::Display for CliUpgradeableProgramExtended {
             f,
             "Extended Program Id {} by {} bytes",
             &self.program_id, self.additional_bytes,
+        )?;
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CliUpgradeableProgramMigrated {
+    pub program_id: String,
+}
+impl QuietDisplay for CliUpgradeableProgramMigrated {}
+impl VerboseDisplay for CliUpgradeableProgramMigrated {}
+impl fmt::Display for CliUpgradeableProgramMigrated {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        writeln!(f)?;
+        writeln!(
+            f,
+            "Migrated Program Id {} from loader-v3 to loader-v4",
+            &self.program_id,
         )?;
         Ok(())
     }

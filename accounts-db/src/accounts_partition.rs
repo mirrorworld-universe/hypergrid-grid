@@ -2,12 +2,9 @@
 use {
     itertools::Itertools,
     log::trace,
+    solana_clock::{Epoch, Slot, SlotCount, SlotIndex},
+    solana_epoch_schedule::EpochSchedule,
     solana_pubkey::Pubkey,
-    solana_sdk::{
-        clock::{Slot, SlotCount, SlotIndex},
-        stake_history::Epoch,
-        sysvar::epoch_schedule::EpochSchedule,
-    },
     std::{collections::HashSet, mem, ops::RangeInclusive},
 };
 
@@ -345,9 +342,8 @@ pub fn partition_from_pubkey(
     result
 }
 
-lazy_static! {
-    static ref EMPTY_HASHSET: HashSet<Pubkey> = HashSet::default();
-}
+static EMPTY_HASHSET: std::sync::LazyLock<HashSet<Pubkey>> =
+    std::sync::LazyLock::new(HashSet::default);
 
 /// populated at startup with the accounts that were found that are rent paying.
 /// These are the 'possible' rent paying accounts.

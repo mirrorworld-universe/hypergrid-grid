@@ -13,7 +13,6 @@ use {
     log::*,
     serde::{de::DeserializeOwned, Deserialize, Serialize},
     solana_accounts_db::{
-        account_storage::meta::StoredMetaWriteVersion,
         accounts::Accounts,
         accounts_db::{
             AccountStorageEntry, AccountsDb, AccountsDbConfig, AccountsFileId,
@@ -27,20 +26,18 @@ use {
         epoch_accounts_hash::EpochAccountsHash,
     },
     solana_builtins::prototype::BuiltinPrototype,
+    solana_clock::{Epoch, Slot, UnixTimestamp},
+    solana_epoch_schedule::EpochSchedule,
+    solana_fee_calculator::{FeeCalculator, FeeRateGovernor},
+    solana_genesis_config::GenesisConfig,
+    solana_hard_forks::HardForks,
+    solana_hash::Hash,
+    solana_inflation::Inflation,
     solana_measure::measure::Measure,
-    solana_sdk::{
-        clock::{Epoch, Slot, UnixTimestamp},
-        deserialize_utils::default_on_eof,
-        epoch_schedule::EpochSchedule,
-        fee_calculator::{FeeCalculator, FeeRateGovernor},
-        genesis_config::GenesisConfig,
-        hard_forks::HardForks,
-        hash::Hash,
-        inflation::Inflation,
-        pubkey::Pubkey,
-        rent_collector::RentCollector,
-        stake::state::Delegation,
-    },
+    solana_pubkey::Pubkey,
+    solana_rent_collector::RentCollector,
+    solana_serde::default_on_eof,
+    solana_stake_interface::state::Delegation,
     std::{
         cell::RefCell,
         collections::{HashMap, HashSet},
@@ -75,7 +72,7 @@ const MAX_STREAM_SIZE: u64 = 32 * 1024 * 1024 * 1024;
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct AccountsDbFields<T>(
     HashMap<Slot, Vec<T>>,
-    StoredMetaWriteVersion,
+    u64, // obsolete, formerly write_version
     Slot,
     BankHashInfo,
     /// all slots that were roots within the last epoch
@@ -639,7 +636,7 @@ pub fn serialize_bank_snapshot_into<W>(
     accounts_hash: AccountsHash,
     account_storage_entries: &[Vec<Arc<AccountStorageEntry>>],
     extra_fields: ExtraFieldsToSerialize,
-    write_version: StoredMetaWriteVersion,
+    write_version: u64,
 ) -> Result<(), Error>
 where
     W: Write,
@@ -669,7 +666,7 @@ pub fn serialize_bank_snapshot_with<S>(
     accounts_hash: AccountsHash,
     account_storage_entries: &[Vec<Arc<AccountStorageEntry>>],
     extra_fields: ExtraFieldsToSerialize,
-    write_version: StoredMetaWriteVersion,
+    write_version: u64,
 ) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
@@ -785,7 +782,7 @@ struct SerializableAccountsDb<'a> {
     bank_hash_stats: BankHashStats,
     accounts_delta_hash: AccountsDeltaHash,
     accounts_hash: AccountsHash,
-    write_version: StoredMetaWriteVersion,
+    write_version: u64,
 }
 
 impl Serialize for SerializableAccountsDb<'_> {
@@ -801,7 +798,7 @@ impl Serialize for SerializableAccountsDb<'_> {
                 x.first().unwrap().slot(),
                 utils::serialize_iter_as_seq(
                     x.iter()
-                        .map(|x| SerializableAccountStorageEntry::from(x.as_ref())),
+                        .map(|x| SerializableAccountStorageEntry::new(x.as_ref(), self.slot)),
                 ),
             )
         }));

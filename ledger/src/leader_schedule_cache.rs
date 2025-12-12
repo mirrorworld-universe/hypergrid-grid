@@ -6,12 +6,10 @@ use {
     },
     itertools::Itertools,
     log::*,
+    solana_clock::{Epoch, Slot},
+    solana_epoch_schedule::EpochSchedule,
+    solana_pubkey::Pubkey,
     solana_runtime::bank::Bank,
-    solana_sdk::{
-        clock::{Epoch, Slot},
-        epoch_schedule::EpochSchedule,
-        pubkey::Pubkey,
-    },
     std::{
         collections::{hash_map::Entry, HashMap, VecDeque},
         sync::{Arc, RwLock},
@@ -134,7 +132,7 @@ impl LeaderScheduleCache {
                 let num_slots = bank.get_slots_in_epoch(k) as usize;
                 let first_slot = bank.epoch_schedule().get_first_slot_in_epoch(k);
                 leader_schedule
-                    .get_indices(pubkey, offset)
+                    .get_leader_upcoming_slots(pubkey, offset)
                     .take_while(move |i| *i < num_slots)
                     .map(move |i| i as Slot + first_slot)
             })
@@ -253,18 +251,17 @@ mod tests {
                 create_genesis_config_with_leader, GenesisConfigInfo,
             },
             get_tmp_ledger_path_auto_delete,
+            leader_schedule::IdentityKeyedLeaderSchedule,
             staking_utils::tests::setup_vote_and_stake_accounts,
         },
         crossbeam_channel::unbounded,
-        solana_runtime::bank::Bank,
-        solana_sdk::{
-            clock::NUM_CONSECUTIVE_LEADER_SLOTS,
-            epoch_schedule::{
-                EpochSchedule, DEFAULT_LEADER_SCHEDULE_SLOT_OFFSET, DEFAULT_SLOTS_PER_EPOCH,
-                MINIMUM_SLOTS_PER_EPOCH,
-            },
-            signature::{Keypair, Signer},
+        solana_clock::{DEFAULT_SLOTS_PER_EPOCH, NUM_CONSECUTIVE_LEADER_SLOTS},
+        solana_epoch_schedule::{
+            EpochSchedule, DEFAULT_LEADER_SCHEDULE_SLOT_OFFSET, MINIMUM_SLOTS_PER_EPOCH,
         },
+        solana_keypair::Keypair,
+        solana_runtime::bank::Bank,
+        solana_signer::Signer,
         std::{sync::Arc, thread::Builder},
     };
 
@@ -306,10 +303,13 @@ mod tests {
 
     #[test]
     fn test_retain_latest() {
-        let mut cached_schedules = HashMap::new();
+        let mut cached_schedules: HashMap<Epoch, Arc<LeaderSchedule>> = HashMap::new();
         let mut order = VecDeque::new();
         for i in 0..=MAX_SCHEDULES {
-            cached_schedules.insert(i as u64, Arc::new(LeaderSchedule::default()));
+            cached_schedules.insert(
+                i as u64,
+                Arc::new(Box::new(IdentityKeyedLeaderSchedule::default())),
+            );
             order.push_back(i as u64);
         }
         LeaderScheduleCache::retain_latest(&mut cached_schedules, &mut order, MAX_SCHEDULES);
@@ -517,7 +517,11 @@ mod tests {
             &vote_account,
             &validator_identity,
             bootstrap_validator_stake_lamports()
-                + solana_stake_program::get_minimum_delegation(&bank.feature_set),
+                + solana_stake_program::get_minimum_delegation(
+                    bank.feature_set.is_active(
+                        &agave_feature_set::stake_raise_minimum_delegation_to_1_sol::id(),
+                    ),
+                ),
         );
         let node_pubkey = validator_identity.pubkey();
 

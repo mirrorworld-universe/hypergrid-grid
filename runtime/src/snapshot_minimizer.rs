@@ -2,12 +2,14 @@
 
 use {
     crate::{bank::Bank, static_ids},
+    agave_reserved_account_keys::ReservedAccountKeys,
     dashmap::DashSet,
     log::info,
     rayon::{
         iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator},
         prelude::ParallelSlice,
     },
+    solana_account::{state_traits::StateMut, ReadableAccount},
     solana_accounts_db::{
         accounts_db::{
             stats::PurgeStats, AccountStorageEntry, AccountsDb, GetUniqueAccountsResult,
@@ -15,15 +17,11 @@ use {
         accounts_partition,
         storable_accounts::StorableAccountsBySlot,
     },
+    solana_clock::Slot,
+    solana_loader_v3_interface::state::UpgradeableLoaderState,
     solana_measure::measure_time,
-    solana_sdk::{
-        account::ReadableAccount,
-        account_utils::StateMut,
-        bpf_loader_upgradeable::{self, UpgradeableLoaderState},
-        clock::Slot,
-        pubkey::Pubkey,
-        reserved_account_keys::ReservedAccountKeys,
-    },
+    solana_pubkey::Pubkey,
+    solana_sdk_ids::bpf_loader_upgradeable,
     std::{
         collections::HashSet,
         sync::{
@@ -99,14 +97,18 @@ impl<'a> SnapshotMinimizer<'a> {
 
     /// Used to get active bank feature accounts in `minimize`.
     fn get_active_bank_features(&self) {
-        self.bank.feature_set.active.iter().for_each(|(pubkey, _)| {
-            self.minimized_account_set.insert(*pubkey);
-        });
+        self.bank
+            .feature_set
+            .active()
+            .iter()
+            .for_each(|(pubkey, _)| {
+                self.minimized_account_set.insert(*pubkey);
+            });
     }
 
     /// Used to get inactive bank feature accounts in `minimize`
     fn get_inactive_bank_features(&self) {
-        self.bank.feature_set.inactive.iter().for_each(|pubkey| {
+        self.bank.feature_set.inactive().iter().for_each(|pubkey| {
             self.minimized_account_set.insert(*pubkey);
         });
     }
@@ -391,14 +393,13 @@ mod tests {
             snapshot_minimizer::SnapshotMinimizer,
         },
         dashmap::DashSet,
-        solana_sdk::{
-            account::{AccountSharedData, ReadableAccount, WritableAccount},
-            bpf_loader_upgradeable::{self, UpgradeableLoaderState},
-            genesis_config::{create_genesis_config, GenesisConfig},
-            pubkey::Pubkey,
-            signer::Signer,
-            stake,
-        },
+        solana_account::{AccountSharedData, ReadableAccount, WritableAccount},
+        solana_genesis_config::{create_genesis_config, GenesisConfig},
+        solana_loader_v3_interface::state::UpgradeableLoaderState,
+        solana_pubkey::Pubkey,
+        solana_sdk_ids::bpf_loader_upgradeable,
+        solana_signer::Signer,
+        solana_stake_interface as stake,
         std::sync::Arc,
     };
 

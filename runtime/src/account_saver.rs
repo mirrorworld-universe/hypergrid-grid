@@ -1,9 +1,7 @@
 use {
     core::borrow::Borrow,
-    solana_sdk::{
-        account::AccountSharedData, pubkey::Pubkey, transaction::SanitizedTransaction,
-        transaction_context::TransactionAccount,
-    },
+    solana_account::AccountSharedData,
+    solana_pubkey::Pubkey,
     solana_svm::{
         rollback_accounts::RollbackAccounts,
         transaction_processing_result::{
@@ -12,6 +10,8 @@ use {
         },
     },
     solana_svm_transaction::svm_message::SVMMessage,
+    solana_transaction::sanitized::SanitizedTransaction,
+    solana_transaction_context::TransactionAccount,
 };
 
 // Used to approximate how many accounts will be calculated for storage so that
@@ -177,29 +177,29 @@ fn collect_accounts_for_failed_tx<'a, T: SVMMessage>(
 mod tests {
     use {
         super::*,
-        solana_compute_budget::compute_budget_limits::ComputeBudgetLimits,
-        solana_sdk::{
-            account::{AccountSharedData, ReadableAccount},
-            fee::FeeDetails,
-            hash::Hash,
-            instruction::{CompiledInstruction, InstructionError},
-            message::Message,
-            native_loader,
-            nonce::{
-                state::{Data as NonceData, DurableNonce, Versions as NonceVersions},
-                State as NonceState,
-            },
-            nonce_account,
-            rent_debits::RentDebits,
-            signature::{keypair_from_seed, signers::Signers, Keypair, Signer},
-            system_instruction, system_program,
-            transaction::{Result, SanitizedTransaction, Transaction, TransactionError},
+        solana_account::{AccountSharedData, ReadableAccount},
+        solana_fee_structure::FeeDetails,
+        solana_hash::Hash,
+        solana_instruction::error::InstructionError,
+        solana_keypair::{keypair_from_seed, Keypair},
+        solana_message::{compiled_instruction::CompiledInstruction, Message},
+        solana_nonce::{
+            state::{Data as NonceData, DurableNonce, State as NonceState},
+            versions::Versions as NonceVersions,
         },
+        solana_nonce_account as nonce_account,
+        solana_program_runtime::execution_budget::SVMTransactionExecutionBudget,
+        solana_rent_debits::RentDebits,
+        solana_sdk_ids::native_loader,
+        solana_signer::{signers::Signers, Signer},
         solana_svm::{
             account_loader::{FeesOnlyTransaction, LoadedTransaction},
             nonce_info::NonceInfo,
             transaction_execution_result::{ExecutedTransaction, TransactionExecutionDetails},
         },
+        solana_system_interface::{instruction as system_instruction, program as system_program},
+        solana_transaction::{sanitized::SanitizedTransaction, Transaction},
+        solana_transaction_error::{TransactionError, TransactionResult as Result},
         std::collections::HashMap,
     };
 
@@ -279,7 +279,7 @@ mod tests {
             program_indices: vec![],
             fee_details: FeeDetails::default(),
             rollback_accounts: RollbackAccounts::default(),
-            compute_budget_limits: ComputeBudgetLimits::default(),
+            compute_budget: SVMTransactionExecutionBudget::default(),
             rent: 0,
             rent_debits: RentDebits::default(),
             loaded_accounts_data_size: 0,
@@ -290,7 +290,7 @@ mod tests {
             program_indices: vec![],
             fee_details: FeeDetails::default(),
             rollback_accounts: RollbackAccounts::default(),
-            compute_budget_limits: ComputeBudgetLimits::default(),
+            compute_budget: SVMTransactionExecutionBudget::default(),
             rent: 0,
             rent_debits: RentDebits::default(),
             loaded_accounts_data_size: 0,
@@ -353,7 +353,7 @@ mod tests {
             rollback_accounts: RollbackAccounts::FeePayerOnly {
                 fee_payer_account: from_account_pre.clone(),
             },
-            compute_budget_limits: ComputeBudgetLimits::default(),
+            compute_budget: SVMTransactionExecutionBudget::default(),
             rent: 0,
             rent_debits: RentDebits::default(),
             loaded_accounts_data_size: 0,
@@ -448,7 +448,7 @@ mod tests {
                 nonce: nonce.clone(),
                 fee_payer_account: from_account_pre.clone(),
             },
-            compute_budget_limits: ComputeBudgetLimits::default(),
+            compute_budget: SVMTransactionExecutionBudget::default(),
             rent: 0,
             rent_debits: RentDebits::default(),
             loaded_accounts_data_size: 0,
@@ -556,7 +556,7 @@ mod tests {
             rollback_accounts: RollbackAccounts::SameNonceAndFeePayer {
                 nonce: nonce.clone(),
             },
-            compute_budget_limits: ComputeBudgetLimits::default(),
+            compute_budget: SVMTransactionExecutionBudget::default(),
             rent: 0,
             rent_debits: RentDebits::default(),
             loaded_accounts_data_size: 0,

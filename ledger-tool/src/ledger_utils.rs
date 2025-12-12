@@ -7,10 +7,12 @@ use {
         hardened_unpack::open_genesis_config,
         utils::{create_all_accounts_run_and_snapshot_dirs, move_and_async_delete_path_contents},
     },
+    solana_clock::Slot,
     solana_core::{
         accounts_hash_verifier::AccountsHashVerifier,
         snapshot_packager_service::PendingSnapshotPackages, validator::BlockVerificationMethod,
     },
+    solana_genesis_config::GenesisConfig,
     solana_geyser_plugin_manager::geyser_plugin_service::{
         GeyserPluginService, GeyserPluginServiceError,
     },
@@ -24,25 +26,21 @@ use {
         use_snapshot_archives_at_startup::UseSnapshotArchivesAtStartup,
     },
     solana_measure::measure_time,
-    solana_rpc::{
-        cache_block_meta_service::CacheBlockMetaService,
-        transaction_status_service::TransactionStatusService,
-    },
+    solana_pubkey::Pubkey,
+    solana_rpc::transaction_status_service::TransactionStatusService,
     solana_runtime::{
         accounts_background_service::{
-            AbsRequestHandlers, AbsRequestSender, AccountsBackgroundService,
-            PrunedBanksRequestHandler, SnapshotRequestHandler,
+            AbsRequestHandlers, AccountsBackgroundService, PrunedBanksRequestHandler,
+            SnapshotRequestHandler,
         },
         bank_forks::BankForks,
         prioritization_fee_cache::PrioritizationFeeCache,
-        snapshot_config::SnapshotConfig,
+        snapshot_config::{SnapshotConfig, SnapshotUsage},
+        snapshot_controller::SnapshotController,
         snapshot_hash::StartingSnapshotHashes,
         snapshot_utils::{self, clean_orphaned_account_snapshot_dirs},
     },
-    solana_sdk::{
-        clock::Slot, genesis_config::GenesisConfig, pubkey::Pubkey,
-        transaction::VersionedTransaction,
-    },
+    solana_transaction::versioned::VersionedTransaction,
     solana_unified_scheduler_pool::DefaultSchedulerPool,
     std::{
         path::{Path, PathBuf},
@@ -144,9 +142,7 @@ pub fn load_and_process_ledger(
     };
 
     let mut starting_slot = 0; // default start check with genesis
-    let snapshot_config = if arg_matches.is_present("no_snapshot") {
-        None
-    } else {
+    let snapshot_config = {
         let full_snapshot_archives_dir = value_t!(arg_matches, "snapshots", String)
             .ok()
             .map(PathBuf::from)
@@ -167,13 +163,19 @@ pub fn load_and_process_ledger(
                 .unwrap_or_default();
             starting_slot = std::cmp::max(full_snapshot_slot, incremental_snapshot_slot);
         }
+        let usage = if arg_matches.is_present("no_snapshot") {
+            SnapshotUsage::Disabled
+        } else {
+            SnapshotUsage::LoadOnly
+        };
 
-        Some(SnapshotConfig {
+        SnapshotConfig {
+            usage,
             full_snapshot_archives_dir,
             incremental_snapshot_archives_dir,
             bank_snapshots_dir: bank_snapshots_dir.clone(),
-            ..SnapshotConfig::new_load_only()
-        })
+            ..SnapshotConfig::default()
+        }
     };
 
     match process_options.halt_at_slot {
@@ -290,77 +292,60 @@ pub fn load_and_process_ledger(
 
     let enable_rpc_transaction_history = arg_matches.is_present("enable_rpc_transaction_history");
 
-    let (
-        transaction_status_sender,
-        transaction_status_service,
-        cache_block_meta_sender,
-        cache_block_meta_service,
-    ) = if geyser_plugin_active || enable_rpc_transaction_history {
-        // Need Primary (R/W) access to insert transaction and rewards data;
-        // obtain Primary access if we do not already have it
-        let write_blockstore = if enable_rpc_transaction_history && !blockstore.is_primary_access()
-        {
-            Arc::new(open_blockstore(
-                blockstore.ledger_path(),
-                arg_matches,
-                AccessType::PrimaryForMaintenance,
-            ))
+    let (transaction_status_sender, transaction_status_service) =
+        if geyser_plugin_active || enable_rpc_transaction_history {
+            // Need Primary (R/W) access to insert transaction and rewards data;
+            // obtain Primary access if we do not already have it
+            let write_blockstore =
+                if enable_rpc_transaction_history && !blockstore.is_primary_access() {
+                    Arc::new(open_blockstore(
+                        blockstore.ledger_path(),
+                        arg_matches,
+                        AccessType::PrimaryForMaintenance,
+                    ))
+                } else {
+                    blockstore.clone()
+                };
+
+            let (transaction_status_sender, transaction_status_receiver) = unbounded();
+            let transaction_status_service = TransactionStatusService::new(
+                transaction_status_receiver,
+                Arc::default(),
+                enable_rpc_transaction_history,
+                transaction_notifier,
+                write_blockstore.clone(),
+                arg_matches.is_present("enable_extended_tx_metadata_storage"),
+                tss_exit.clone(),
+            );
+
+            (
+                Some(TransactionStatusSender {
+                    sender: transaction_status_sender,
+                }),
+                Some(transaction_status_service),
+            )
         } else {
-            blockstore.clone()
+            (transaction_status_sender, None)
         };
-
-        let (transaction_status_sender, transaction_status_receiver) = unbounded();
-        let transaction_status_service = TransactionStatusService::new(
-            transaction_status_receiver,
-            Arc::default(),
-            enable_rpc_transaction_history,
-            transaction_notifier,
-            write_blockstore.clone(),
-            arg_matches.is_present("enable_extended_tx_metadata_storage"),
-            tss_exit.clone(),
-        );
-
-        let (cache_block_meta_sender, cache_block_meta_receiver) = unbounded();
-        // Nothing else will be interacting with max_complete_rewards_slot
-        let max_complete_rewards_slot = Arc::default();
-        let cache_block_meta_service = CacheBlockMetaService::new(
-            cache_block_meta_receiver,
-            write_blockstore,
-            max_complete_rewards_slot,
-            exit.clone(),
-        );
-
-        (
-            Some(TransactionStatusSender {
-                sender: transaction_status_sender,
-            }),
-            Some(transaction_status_service),
-            Some(cache_block_meta_sender),
-            Some(cache_block_meta_service),
-        )
-    } else {
-        (transaction_status_sender, None, None, None)
-    };
 
     let (bank_forks, leader_schedule_cache, starting_snapshot_hashes, ..) =
         bank_forks_utils::load_bank_forks(
             genesis_config,
             blockstore.as_ref(),
             account_paths,
-            snapshot_config.as_ref(),
+            &snapshot_config,
             &process_options,
-            cache_block_meta_sender.as_ref(),
+            transaction_status_sender.as_ref(),
             None, // Maybe support this later, though
             accounts_update_notifier,
             exit.clone(),
         )
         .map_err(LoadAndProcessLedgerError::LoadBankForks)?;
-    let block_verification_method = value_t!(
+    let block_verification_method = value_t_or_exit!(
         arg_matches,
         "block_verification_method",
         BlockVerificationMethod
-    )
-    .unwrap_or_default();
+    );
     info!(
         "Using: block-verification-method: {}",
         block_verification_method,
@@ -393,6 +378,12 @@ pub fn load_and_process_ledger(
         }
     }
 
+    let (snapshot_request_sender, snapshot_request_receiver) = crossbeam_channel::unbounded();
+    let snapshot_controller = Arc::new(SnapshotController::new(
+        snapshot_request_sender,
+        SnapshotConfig::new_load_only(),
+        bank_forks.read().unwrap().root(),
+    ));
     let pending_snapshot_packages = Arc::new(Mutex::new(PendingSnapshotPackages::default()));
     let (accounts_package_sender, accounts_package_receiver) = crossbeam_channel::unbounded();
     let accounts_hash_verifier = AccountsHashVerifier::new(
@@ -400,13 +391,10 @@ pub fn load_and_process_ledger(
         accounts_package_receiver,
         pending_snapshot_packages,
         exit.clone(),
-        SnapshotConfig::new_load_only(),
+        snapshot_controller.clone(),
     );
-    let (snapshot_request_sender, snapshot_request_receiver) = crossbeam_channel::unbounded();
-    let accounts_background_request_sender = AbsRequestSender::new(snapshot_request_sender.clone());
     let snapshot_request_handler = SnapshotRequestHandler {
-        snapshot_config: SnapshotConfig::new_load_only(),
-        snapshot_request_sender,
+        snapshot_controller: snapshot_controller.clone(),
         snapshot_request_receiver,
         accounts_package_sender,
     };
@@ -432,9 +420,8 @@ pub fn load_and_process_ledger(
         &leader_schedule_cache,
         &process_options,
         transaction_status_sender.as_ref(),
-        cache_block_meta_sender.as_ref(),
         None, // entry_notification_sender
-        &accounts_background_request_sender,
+        Some(&snapshot_controller),
     )
     .map(|_| LoadAndProcessLedgerOutput {
         bank_forks,
@@ -447,9 +434,6 @@ pub fn load_and_process_ledger(
     accounts_hash_verifier.join().unwrap();
     if let Some(service) = transaction_status_service {
         service.quiesce_and_join_for_tests(tss_exit);
-    }
-    if let Some(service) = cache_block_meta_service {
-        service.join().unwrap();
     }
 
     result

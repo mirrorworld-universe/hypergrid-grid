@@ -17,7 +17,7 @@ fn bench_weighted_shuffle_new(c: &mut Criterion) {
     c.bench_function("bench_weighted_shuffle_new", |b| {
         b.iter(|| {
             let weights = make_weights(&mut rng);
-            black_box(WeightedShuffle::new("", &weights));
+            black_box(WeightedShuffle::<u64>::new("", &weights));
         })
     });
 }
@@ -26,7 +26,7 @@ fn bench_weighted_shuffle_shuffle(c: &mut Criterion) {
     let mut seed = [0u8; 32];
     let mut rng = rand::thread_rng();
     let weights = make_weights(&mut rng);
-    let weighted_shuffle = WeightedShuffle::new("", &weights);
+    let weighted_shuffle = WeightedShuffle::new("", weights);
     c.bench_function("bench_weighted_shuffle_shuffle", |b| {
         b.iter(|| {
             rng.fill(&mut seed[..]);
@@ -43,7 +43,8 @@ fn bench_weighted_shuffle_shuffle(c: &mut Criterion) {
         b.iter(|| {
             rng.fill(&mut seed[..]);
             let mut rng = ChaChaRng::from_seed(seed);
-            let shuffle = weighted_shuffle.clone().shuffle(&mut rng);
+            let mut weighted_shuffle = weighted_shuffle.clone();
+            let shuffle = weighted_shuffle.shuffle(&mut rng);
             black_box(shuffle.collect::<Vec<_>>());
         })
     });

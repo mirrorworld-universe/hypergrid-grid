@@ -7,11 +7,13 @@ use {
         ledger_path::*,
         ledger_utils::*,
         output::{
-            output_account, AccountsOutputConfig, AccountsOutputMode, AccountsOutputStreamer,
+            AccountsOutputConfig, AccountsOutputMode, AccountsOutputStreamer, CliAccounts,
             SlotBankHash,
         },
         program::*,
     },
+    agave_feature_set::{self as feature_set, FeatureSet},
+    agave_reserved_account_keys::ReservedAccountKeys,
     clap::{
         crate_description, crate_name, value_t, value_t_or_exit, values_t_or_exit, App,
         AppSettings, Arg, ArgMatches, SubCommand,
@@ -19,8 +21,11 @@ use {
     dashmap::DashMap,
     log::*,
     serde_derive::Serialize,
-    solana_account_decoder::UiAccountEncoding,
-    solana_accounts_db::{accounts_db::CalcAccountsHashDataSource, accounts_index::ScanConfig},
+    solana_account::{state_traits::StateMut, AccountSharedData, ReadableAccount, WritableAccount},
+    solana_accounts_db::{
+        accounts_db::CalcAccountsHashDataSource,
+        accounts_index::{ScanConfig, ScanOrder},
+    },
     solana_clap_utils::{
         hidden_unless_forced,
         input_parsers::{cluster_type_of, pubkey_of, pubkeys_of},
@@ -29,14 +34,18 @@ use {
             is_within_range,
         },
     },
-    solana_cli_output::OutputFormat,
+    solana_cli_output::{CliAccount, OutputFormat},
+    solana_clock::{Epoch, Slot},
     solana_core::{
         banking_simulation::{BankingSimulator, BankingTraceEvents},
         system_monitor_service::{SystemMonitorService, SystemMonitorStatsReportConfig},
         validator::{BlockProductionMethod, BlockVerificationMethod, TransactionStructure},
     },
     solana_cost_model::{cost_model::CostModel, cost_tracker::CostTracker},
-    solana_feature_set::{self as feature_set, FeatureSet},
+    solana_feature_gate_interface::{self as feature, Feature},
+    solana_genesis_config::ClusterType,
+    solana_inflation::Inflation,
+    solana_instruction::TRANSACTION_LEVEL_STACK_HEIGHT,
     solana_ledger::{
         blockstore::{banking_trace_path, create_new_ledger, Blockstore},
         blockstore_options::{AccessType, LedgerColumnOptions},
@@ -45,12 +54,17 @@ use {
         },
     },
     solana_measure::{measure::Measure, measure_time},
+    solana_message::SimpleAddressLoader,
+    solana_native_token::{lamports_to_sol, sol_to_lamports, Sol},
+    solana_pubkey::Pubkey,
+    solana_rent::Rent,
     solana_runtime::{
         bank::{
             bank_hash_details::{self, SlotDetails, TransactionDetails},
             Bank, RewardCalculationEvent,
         },
         bank_forks::BankForks,
+        inflation_rewards::points::{InflationPointCalculationEvent, PointValue},
         snapshot_archive_info::SnapshotArchiveInfoGetter,
         snapshot_bank_utils,
         snapshot_minimizer::SnapshotMinimizer,
@@ -60,25 +74,14 @@ use {
         },
     },
     solana_runtime_transaction::runtime_transaction::RuntimeTransaction,
-    solana_sdk::{
-        account::{AccountSharedData, ReadableAccount, WritableAccount},
-        account_utils::StateMut,
-        clock::{Epoch, Slot},
-        feature::{self, Feature},
-        genesis_config::ClusterType,
-        inflation::Inflation,
-        native_token::{lamports_to_sol, sol_to_lamports, Sol},
-        pubkey::Pubkey,
-        rent::Rent,
-        reserved_account_keys::ReservedAccountKeys,
-        shred_version::compute_shred_version,
-        stake::{self, state::StakeStateV2},
-        system_program,
-        transaction::{MessageHash, SimpleAddressLoader},
-    },
-    solana_stake_program::{points::PointValue, stake_state},
+    solana_shred_version::compute_shred_version,
+    solana_stake_interface::{self as stake, state::StakeStateV2},
+    solana_stake_program::stake_state,
+    solana_system_interface::program as system_program,
+    solana_transaction::sanitized::MessageHash,
     solana_transaction_status::parse_ui_instruction,
     solana_unified_scheduler_pool::DefaultSchedulerPool,
+    solana_vote::vote_state_view::VoteStateView,
     solana_vote_program::{
         self,
         vote_state::{self, VoteState},
@@ -109,15 +112,6 @@ mod ledger_utils;
 mod output;
 mod program;
 
-fn parse_encoding_format(matches: &ArgMatches<'_>) -> UiAccountEncoding {
-    match matches.value_of("encoding") {
-        Some("jsonParsed") => UiAccountEncoding::JsonParsed,
-        Some("base64") => UiAccountEncoding::Base64,
-        Some("base64+zstd") => UiAccountEncoding::Base64Zstd,
-        _ => UiAccountEncoding::Base64,
-    }
-}
-
 fn render_dot(dot: String, output_file: &str, output_format: &str) -> io::Result<()> {
     let mut child = Command::new("dot")
         .arg(format!("-T{output_format}"))
@@ -134,10 +128,10 @@ fn render_dot(dot: String, output_file: &str, output_format: &str) -> io::Result
 
     let status = child.wait_with_output()?.status;
     if !status.success() {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!("dot failed with error {}", status.code().unwrap_or(-1)),
-        ));
+        return Err(io::Error::other(format!(
+            "dot failed with error {}",
+            status.code().unwrap_or(-1)
+        )));
     }
     Ok(())
 }
@@ -199,7 +193,10 @@ struct GraphConfig {
 #[allow(clippy::cognitive_complexity)]
 fn graph_forks(bank_forks: &BankForks, config: &GraphConfig) -> String {
     let frozen_banks = bank_forks.frozen_banks();
-    let mut fork_slots: HashSet<_> = frozen_banks.keys().cloned().collect();
+    let mut fork_slots: HashSet<_> = bank_forks
+        .frozen_banks()
+        .map(|(slot, _bank)| slot)
+        .collect();
     for (_, bank) in frozen_banks {
         for parent in bank.parents() {
             fork_slots.remove(&parent.slot());
@@ -217,16 +214,16 @@ fn graph_forks(bank_forks: &BankForks, config: &GraphConfig) -> String {
             .map(|(_, (stake, _))| stake)
             .sum();
         for (stake, vote_account) in bank.vote_accounts().values() {
-            let vote_state = vote_account.vote_state();
-            if let Some(last_vote) = vote_state.votes.iter().last() {
-                let entry = last_votes.entry(vote_state.node_pubkey).or_insert((
-                    last_vote.slot(),
-                    vote_state.clone(),
+            let vote_state_view = vote_account.vote_state_view();
+            if let Some(last_vote) = vote_state_view.last_voted_slot() {
+                let entry = last_votes.entry(*vote_state_view.node_pubkey()).or_insert((
+                    last_vote,
+                    vote_state_view.clone(),
                     *stake,
                     total_stake,
                 ));
-                if entry.0 < last_vote.slot() {
-                    *entry = (last_vote.slot(), vote_state.clone(), *stake, total_stake);
+                if entry.0 < last_vote {
+                    *entry = (last_vote, vote_state_view.clone(), *stake, total_stake);
                 }
             }
         }
@@ -250,19 +247,20 @@ fn graph_forks(bank_forks: &BankForks, config: &GraphConfig) -> String {
     dot.push("  subgraph cluster_banks {".to_string());
     dot.push("    style=invis".to_string());
     let mut styled_slots = HashSet::new();
-    let mut all_votes: HashMap<Pubkey, HashMap<Slot, VoteState>> = HashMap::new();
+    let mut all_votes: HashMap<Pubkey, HashMap<Slot, VoteStateView>> = HashMap::new();
     for fork_slot in &fork_slots {
         let mut bank = bank_forks[*fork_slot].clone();
 
         let mut first = true;
         loop {
             for (_, vote_account) in bank.vote_accounts().values() {
-                let vote_state = vote_account.vote_state();
-                if let Some(last_vote) = vote_state.votes.iter().last() {
-                    let validator_votes = all_votes.entry(vote_state.node_pubkey).or_default();
+                let vote_state_view = vote_account.vote_state_view();
+                if let Some(last_vote) = vote_state_view.last_voted_slot() {
+                    let validator_votes =
+                        all_votes.entry(*vote_state_view.node_pubkey()).or_default();
                     validator_votes
-                        .entry(last_vote.slot())
-                        .or_insert_with(|| vote_state.clone());
+                        .entry(last_vote)
+                        .or_insert_with(|| vote_state_view.clone());
                 }
             }
 
@@ -340,7 +338,7 @@ fn graph_forks(bank_forks: &BankForks, config: &GraphConfig) -> String {
     let mut absent_votes = 0;
     let mut lowest_last_vote_slot = u64::MAX;
     let mut lowest_total_stake = 0;
-    for (node_pubkey, (last_vote_slot, vote_state, stake, total_stake)) in &last_votes {
+    for (node_pubkey, (last_vote_slot, vote_state_view, stake, total_stake)) in &last_votes {
         all_votes.entry(*node_pubkey).and_modify(|validator_votes| {
             validator_votes.remove(last_vote_slot);
         });
@@ -360,9 +358,8 @@ fn graph_forks(bank_forks: &BankForks, config: &GraphConfig) -> String {
                 if matches!(config.vote_account_mode, GraphVoteAccountMode::WithHistory) {
                     format!(
                         "vote history:\n{}",
-                        vote_state
-                            .votes
-                            .iter()
+                        vote_state_view
+                            .votes_iter()
                             .map(|vote| format!(
                                 "slot {} (conf={})",
                                 vote.slot(),
@@ -374,10 +371,9 @@ fn graph_forks(bank_forks: &BankForks, config: &GraphConfig) -> String {
                 } else {
                     format!(
                         "last vote slot: {}",
-                        vote_state
-                            .votes
-                            .back()
-                            .map(|vote| vote.slot().to_string())
+                        vote_state_view
+                            .last_voted_slot()
+                            .map(|vote_slot| vote_slot.to_string())
                             .unwrap_or_else(|| "none".to_string())
                     )
                 };
@@ -386,7 +382,7 @@ fn graph_forks(bank_forks: &BankForks, config: &GraphConfig) -> String {
                 node_pubkey,
                 node_pubkey,
                 lamports_to_sol(*stake),
-                vote_state.root_slot.unwrap_or(0),
+                vote_state_view.root_slot().unwrap_or(0),
                 vote_history,
             ));
 
@@ -415,16 +411,15 @@ fn graph_forks(bank_forks: &BankForks, config: &GraphConfig) -> String {
     // Add for vote information from all banks.
     if config.include_all_votes {
         for (node_pubkey, validator_votes) in &all_votes {
-            for (vote_slot, vote_state) in validator_votes {
+            for (vote_slot, vote_state_view) in validator_votes {
                 dot.push(format!(
                     r#"  "{} vote {}"[shape=box,style=dotted,label="validator vote: {}\nroot slot: {}\nvote history:\n{}"];"#,
                     node_pubkey,
                     vote_slot,
                     node_pubkey,
-                    vote_state.root_slot.unwrap_or(0),
-                    vote_state
-                        .votes
-                        .iter()
+                    vote_state_view.root_slot().unwrap_or(0),
+                    vote_state_view
+                        .votes_iter()
                         .map(|vote| format!("slot {} (conf={})", vote.slot(), vote.confirmation_count()))
                         .collect::<Vec<_>>()
                         .join("\n")
@@ -760,7 +755,13 @@ fn record_transactions(
                     let instructions = message
                         .instructions()
                         .iter()
-                        .map(|ix| parse_ui_instruction(ix, &message.account_keys(), None))
+                        .map(|ix| {
+                            parse_ui_instruction(
+                                ix,
+                                &message.account_keys(),
+                                Some(TRANSACTION_LEVEL_STACK_HEIGHT as u32),
+                            )
+                        })
                         .collect();
 
                     let is_simple_vote_tx = tx.is_simple_vote_transaction();
@@ -979,6 +980,7 @@ fn main() {
                 .value_name("METHOD")
                 .takes_value(true)
                 .possible_values(BlockVerificationMethod::cli_names())
+                .default_value(BlockVerificationMethod::default().into())
                 .global(true)
                 .help(BlockVerificationMethod::cli_message()),
         )
@@ -1481,7 +1483,17 @@ fn main() {
                         .value_name("METHOD")
                         .takes_value(true)
                         .possible_values(BlockProductionMethod::cli_names())
+                        .default_value(BlockProductionMethod::default().into())
                         .help(BlockProductionMethod::cli_message()),
+                )
+                .arg(
+                    Arg::with_name("transaction_struct")
+                        .long("transaction-structure")
+                        .value_name("STRUCT")
+                        .takes_value(true)
+                        .possible_values(TransactionStructure::cli_names())
+                        .default_value(TransactionStructure::default().into())
+                        .help(TransactionStructure::cli_message()),
                 )
                 .arg(
                     Arg::with_name("first_simulated_slot")
@@ -1668,20 +1680,29 @@ fn main() {
 
             match matches.subcommand() {
                 ("genesis", Some(arg_matches)) => {
+                    let output_format =
+                        OutputFormat::from_matches(arg_matches, "output_format", false);
+                    let output_accounts = arg_matches.is_present("accounts");
+
                     let genesis_config = open_genesis_config_by(&ledger_path, arg_matches);
-                    let print_accounts = arg_matches.is_present("accounts");
-                    if print_accounts {
-                        let print_account_data = !arg_matches.is_present("no_account_data");
-                        let print_encoding_format = parse_encoding_format(arg_matches);
-                        for (pubkey, account) in genesis_config.accounts {
-                            output_account(
-                                &pubkey,
-                                &AccountSharedData::from(account),
-                                None,
-                                print_account_data,
-                                print_encoding_format,
-                            );
-                        }
+
+                    if output_accounts {
+                        let output_config = parse_account_output_config(arg_matches);
+
+                        let accounts: Vec<_> = genesis_config
+                            .accounts
+                            .into_iter()
+                            .map(|(pubkey, account)| {
+                                CliAccount::new_with_config(
+                                    &pubkey,
+                                    &AccountSharedData::from(account),
+                                    &output_config,
+                                )
+                            })
+                            .collect();
+                        let accounts = CliAccounts { accounts };
+
+                        println!("{}", output_format.formatted_string(&accounts));
                     } else {
                         println!("{genesis_config}");
                     }
@@ -2172,7 +2193,10 @@ fn main() {
 
                     if remove_stake_accounts {
                         for (address, mut account) in bank
-                            .get_program_accounts(&stake::program::id(), &ScanConfig::new(false))
+                            .get_program_accounts(
+                                &stake::program::id(),
+                                &ScanConfig::new(ScanOrder::Sorted),
+                            )
                             .unwrap()
                             .into_iter()
                         {
@@ -2196,7 +2220,10 @@ fn main() {
 
                     if !vote_accounts_to_destake.is_empty() {
                         for (address, mut account) in bank
-                            .get_program_accounts(&stake::program::id(), &ScanConfig::new(false))
+                            .get_program_accounts(
+                                &stake::program::id(),
+                                &ScanConfig::new(ScanOrder::Sorted),
+                            )
                             .unwrap()
                             .into_iter()
                         {
@@ -2236,7 +2263,7 @@ fn main() {
                         for (address, mut account) in bank
                             .get_program_accounts(
                                 &solana_vote_program::id(),
-                                &ScanConfig::new(false),
+                                &ScanConfig::new(ScanOrder::Sorted),
                             )
                             .unwrap()
                             .into_iter()
@@ -2311,9 +2338,7 @@ fn main() {
                     }
 
                     if child_bank_required {
-                        while !bank.is_complete() {
-                            bank.register_unique_tick();
-                        }
+                        bank.fill_bank_with_ticks_for_tests();
                     }
 
                     let pre_capitalization = bank.capitalization();
@@ -2498,10 +2523,12 @@ fn main() {
                     };
                     process_options.halt_at_slot = Some(parent_slot);
 
+                    // PrimaryForMaintenance needed over Secondary to purge any
+                    // existing simulated shreds from previous runs
                     let blockstore = Arc::new(open_blockstore(
                         &ledger_path,
                         arg_matches,
-                        AccessType::Primary, // needed for purging already existing simulated block shreds...
+                        AccessType::PrimaryForMaintenance,
                     ));
                     let genesis_config = open_genesis_config_by(&ledger_path, arg_matches);
                     let LoadAndProcessLedgerOutput { bank_forks, .. } =
@@ -2513,15 +2540,13 @@ fn main() {
                             None, // transaction status sender
                         );
 
-                    let block_production_method = value_t!(
+                    let block_production_method = value_t_or_exit!(
                         arg_matches,
                         "block_production_method",
                         BlockProductionMethod
-                    )
-                    .unwrap_or_default();
+                    );
                     let transaction_struct =
-                        value_t!(arg_matches, "transaction_struct", TransactionStructure)
-                            .unwrap_or_default();
+                        value_t_or_exit!(arg_matches, "transaction_struct", TransactionStructure);
 
                     info!("Using: block-production-method: {block_production_method} transaction-structure: {transaction_struct}");
 
@@ -2558,9 +2583,12 @@ fn main() {
                     let bank = bank_forks.read().unwrap().working_bank();
 
                     let include_sysvars = arg_matches.is_present("include_sysvars");
-                    let include_account_contents = !arg_matches.is_present("no_account_contents");
-                    let include_account_data = !arg_matches.is_present("no_account_data");
-                    let account_data_encoding = parse_encoding_format(arg_matches);
+                    let output_config = if arg_matches.is_present("no_account_contents") {
+                        None
+                    } else {
+                        Some(parse_account_output_config(arg_matches))
+                    };
+
                     let mode = if let Some(pubkeys) = pubkeys_of(arg_matches, "account") {
                         info!("Scanning individual accounts: {pubkeys:?}");
                         AccountsOutputMode::Individual(pubkeys)
@@ -2573,10 +2601,8 @@ fn main() {
                     };
                     let config = AccountsOutputConfig {
                         mode,
+                        output_config,
                         include_sysvars,
-                        include_account_contents,
-                        include_account_data,
-                        account_data_encoding,
                     };
                     let output_format =
                         OutputFormat::from_matches(arg_matches, "output_format", false);
@@ -2751,7 +2777,6 @@ fn main() {
                             new_credits_observed: Option<u64>,
                             skipped_reasons: String,
                         }
-                        use solana_stake_program::points::InflationPointCalculationEvent;
                         let stake_calculation_details: DashMap<Pubkey, CalculationDetail> =
                             DashMap::new();
                         let last_point_value = Arc::new(RwLock::new(None));
@@ -2928,7 +2953,7 @@ fn main() {
                         for (pubkey, warped_account) in all_accounts {
                             // Don't output sysvars; it's always updated but not related to
                             // inflation.
-                            if solana_sdk::sysvar::check_id(warped_account.owner()) {
+                            if solana_sdk_ids::sysvar::check_id(warped_account.owner()) {
                                 continue;
                             }
 
