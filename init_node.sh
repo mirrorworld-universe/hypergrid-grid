@@ -12,7 +12,8 @@ SOLANA_RUN_SH_CLUSTER_TYPE=mainnet-beta
 PATH=./bin:$PATH
 
 ok=true
-for program in solana-{faucet,genesis,keygen,validator}; do
+agave-validator -V || ok=false
+for program in solana-{faucet,genesis,keygen}; do
   $program -V || ok=false
 done
 $ok || {
@@ -81,3 +82,4 @@ else
     $SPL_GENESIS_ARGS \
     $SOLANA_RUN_SH_GENESIS_ARGS
 fi
+
