@@ -29,7 +29,7 @@ solana-hash = { workspace = true }
 solana-sdk-ids = { workspace = true }
 solana-genesis-config = { workspace = true }
 solana-commitment-config = { workspace = true }
-solana-loader-v3-interface = { workspace = true }
+solana-loader-v3-interface = { workspace = true, features = ["serde"] }
 solana-client = {workspace = true}
 solana-measure = { workspace = true }
 thiserror = { workspace = true }
