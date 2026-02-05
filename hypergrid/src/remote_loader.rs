@@ -118,6 +118,12 @@ impl RemoteAccountLoader {
             }
         };
 
+        if !std::fs::exists(&config.accounts_path).expect("Failed to check accounts_path") {
+            info!("Creating accounts path directory: {}", config.accounts_path);
+            std::fs::create_dir_all(&config.accounts_path)
+                .expect("Failed to create accounts path");
+        }
+
         Self {
             // rpc_client: RpcClient::new_with_timeout_and_commitment(&config.baselayer_rpc_url,
             // Duration::from_secs(30), CommitmentConfig::confirmed()),
