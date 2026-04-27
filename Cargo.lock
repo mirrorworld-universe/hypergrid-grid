@@ -2780,6 +2780,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
+name = "foldhash"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
+
+[[package]]
 name = "foreign-types"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3186,7 +3192,18 @@ checksum = "3a9bfc1af68b1726ea47d3d5109de126281def866b33970e10fbab11b5dafab3"
 dependencies = [
  "allocator-api2",
  "equivalent",
- "foldhash",
+ "foldhash 0.1.5",
+]
+
+[[package]]
+name = "hashbrown"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f467dd6dccf739c208452f8014c75c18bb8301b050ad1cfb27153803edb0f51"
+dependencies = [
+ "allocator-api2",
+ "equivalent",
+ "foldhash 0.2.0",
 ]
 
 [[package]]
@@ -4220,6 +4237,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e999beba7b6e8345721bd280141ed958096a2e4abdf74f67ff4ce49b4b54e47a"
 dependencies = [
  "hashbrown 0.12.3",
+]
+
+[[package]]
+name = "lru"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e0b564323a0fb6d54b864f625ae139de9612e27edb944dda37c109f05aac531"
+dependencies = [
+ "hashbrown 0.17.0",
 ]
 
 [[package]]
@@ -5627,7 +5653,7 @@ dependencies = [
  "cc",
  "libc",
  "libm",
- "lru",
+ "lru 0.7.8",
  "parking_lot 0.11.2",
  "smallvec",
  "spin",
@@ -7120,7 +7146,7 @@ dependencies = [
  "solana-packet",
  "solana-poseidon",
  "solana-program",
- "solana-program-entrypoint 2.2.1",
+ "solana-program-entrypoint",
  "solana-program-runtime",
  "solana-pubkey",
  "solana-rent",
@@ -7746,7 +7772,7 @@ dependencies = [
  "histogram",
  "itertools 0.12.1",
  "log",
- "lru",
+ "lru 0.17.0",
  "min-max-heap",
  "num_enum",
  "prio-graph",
@@ -8429,7 +8455,7 @@ dependencies = [
  "indexmap 2.9.0",
  "itertools 0.12.1",
  "log",
- "lru",
+ "lru 0.17.0",
  "num-traits",
  "num_cpus",
  "rand 0.7.3",
@@ -8665,7 +8691,7 @@ dependencies = [
  "lazy-lru",
  "libc",
  "log",
- "lru",
+ "lru 0.17.0",
  "mockall",
  "num_cpus",
  "num_enum",
@@ -9287,7 +9313,7 @@ dependencies = [
  "solana-msg",
  "solana-native-token",
  "solana-nonce",
- "solana-program-entrypoint 2.3.0",
+ "solana-program-entrypoint",
  "solana-program-error",
  "solana-program-memory",
  "solana-program-option",
@@ -9312,18 +9338,6 @@ dependencies = [
  "solana-vote-interface",
  "thiserror 2.0.12",
  "wasm-bindgen",
-]
-
-[[package]]
-name = "solana-program-entrypoint"
-version = "2.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "473ffe73c68d93e9f2aa726ad2985fe52760052709aaab188100a42c618060ec"
-dependencies = [
- "solana-account-info",
- "solana-msg",
- "solana-program-error",
- "solana-pubkey",
 ]
 
 [[package]]
@@ -9400,7 +9414,7 @@ dependencies = [
  "solana-log-collector",
  "solana-measure",
  "solana-metrics",
- "solana-program-entrypoint 2.2.1",
+ "solana-program-entrypoint",
  "solana-program-runtime",
  "solana-pubkey",
  "solana-rent",
@@ -9458,7 +9472,7 @@ dependencies = [
  "solana-native-token",
  "solana-poh-config",
  "solana-program",
- "solana-program-entrypoint 2.2.1",
+ "solana-program-entrypoint",
  "solana-program-error",
  "solana-program-runtime",
  "solana-pubkey",
@@ -10647,7 +10661,7 @@ dependencies = [
  "solana-nonce-account",
  "solana-packet",
  "solana-precompile-error",
- "solana-program-entrypoint 2.2.1",
+ "solana-program-entrypoint",
  "solana-program-pack",
  "solana-program-runtime",
  "solana-pubkey",
@@ -10824,7 +10838,7 @@ dependencies = [
  "solana-instruction",
  "solana-instructions-sysvar",
  "solana-last-restart-slot",
- "solana-program-entrypoint 2.3.0",
+ "solana-program-entrypoint",
  "solana-program-error",
  "solana-program-memory",
  "solana-pubkey",
@@ -11065,7 +11079,7 @@ dependencies = [
  "crossbeam-channel",
  "futures 0.3.31",
  "log",
- "lru",
+ "lru 0.17.0",
  "quinn",
  "rustls 0.23.27",
  "solana-cli-config",
@@ -11284,7 +11298,7 @@ dependencies = [
  "itertools 0.12.1",
  "lazy-lru",
  "log",
- "lru",
+ "lru 0.17.0",
  "quinn",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
@@ -11934,7 +11948,7 @@ dependencies = [
  "solana-cpi",
  "solana-instruction",
  "solana-msg",
- "solana-program-entrypoint 2.2.1",
+ "solana-program-entrypoint",
  "solana-program-error",
  "solana-pubkey",
  "solana-rent",
@@ -11966,7 +11980,7 @@ dependencies = [
  "solana-account-info",
  "solana-cpi",
  "solana-instruction",
- "solana-program-entrypoint 2.2.1",
+ "solana-program-entrypoint",
  "solana-program-error",
  "solana-pubkey",
 ]
@@ -11980,7 +11994,7 @@ dependencies = [
  "solana-account-info",
  "solana-instruction",
  "solana-msg",
- "solana-program-entrypoint 2.2.1",
+ "solana-program-entrypoint",
  "solana-program-error",
  "solana-pubkey",
 ]
@@ -12070,7 +12084,7 @@ dependencies = [
  "solana-decode-error",
  "solana-instruction",
  "solana-msg",
- "solana-program-entrypoint 2.2.1",
+ "solana-program-entrypoint",
  "solana-program-error",
  "solana-program-memory",
  "solana-program-option",
@@ -12100,7 +12114,7 @@ dependencies = [
  "solana-instruction",
  "solana-msg",
  "solana-native-token",
- "solana-program-entrypoint 2.2.1",
+ "solana-program-entrypoint",
  "solana-program-error",
  "solana-program-memory",
  "solana-program-option",

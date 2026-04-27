@@ -319,7 +319,7 @@ libsecp256k1 = { version = "0.6.0", default-features = false, features = [
 ] }
 light-poseidon = "0.2.0"
 log = "0.4.27"
-lru = "0.7.7"
+lru = "0.17.0"
 lz4 = "1.28.1"
 memmap2 = "0.9.5"
 memoffset = "0.9"
