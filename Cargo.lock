@@ -1642,7 +1642,7 @@ dependencies = [
  "num-traits",
  "serde",
  "wasm-bindgen",
- "windows-link",
+ "windows-link 0.1.0",
 ]
 
 [[package]]
@@ -3399,7 +3399,7 @@ dependencies = [
  "httpdate",
  "itoa",
  "pin-project-lite",
- "socket2",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -3519,7 +3519,7 @@ dependencies = [
  "libc",
  "percent-encoding 2.3.1",
  "pin-project-lite",
- "socket2",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -5328,7 +5328,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash 2.0.0",
  "rustls 0.23.27",
- "socket2",
+ "socket2 0.5.10",
  "thiserror 2.0.12",
  "tokio",
  "tracing",
@@ -5366,7 +5366,7 @@ checksum = "4fe68c2e9e1a1234e218683dbdf9f9dfcb094113c5ac2b938dfcb9bab4c4140b"
 dependencies = [
  "libc",
  "once_cell",
- "socket2",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.59.0",
 ]
@@ -6519,6 +6519,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "socket2"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "soketto"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7120,7 +7130,7 @@ dependencies = [
  "solana-packet",
  "solana-poseidon",
  "solana-program",
- "solana-program-entrypoint 2.2.1",
+ "solana-program-entrypoint",
  "solana-program-runtime",
  "solana-pubkey",
  "solana-rent",
@@ -9010,7 +9020,7 @@ dependencies = [
  "rand 0.8.5",
  "serde",
  "serde_derive",
- "socket2",
+ "socket2 0.6.4",
  "solana-logger",
  "solana-serde",
  "tokio",
@@ -9287,7 +9297,7 @@ dependencies = [
  "solana-msg",
  "solana-native-token",
  "solana-nonce",
- "solana-program-entrypoint 2.3.0",
+ "solana-program-entrypoint",
  "solana-program-error",
  "solana-program-memory",
  "solana-program-option",
@@ -9312,18 +9322,6 @@ dependencies = [
  "solana-vote-interface",
  "thiserror 2.0.12",
  "wasm-bindgen",
-]
-
-[[package]]
-name = "solana-program-entrypoint"
-version = "2.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "473ffe73c68d93e9f2aa726ad2985fe52760052709aaab188100a42c618060ec"
-dependencies = [
- "solana-account-info",
- "solana-msg",
- "solana-program-error",
- "solana-pubkey",
 ]
 
 [[package]]
@@ -9400,7 +9398,7 @@ dependencies = [
  "solana-log-collector",
  "solana-measure",
  "solana-metrics",
- "solana-program-entrypoint 2.2.1",
+ "solana-program-entrypoint",
  "solana-program-runtime",
  "solana-pubkey",
  "solana-rent",
@@ -9458,7 +9456,7 @@ dependencies = [
  "solana-native-token",
  "solana-poh-config",
  "solana-program",
- "solana-program-entrypoint 2.2.1",
+ "solana-program-entrypoint",
  "solana-program-error",
  "solana-program-runtime",
  "solana-pubkey",
@@ -10574,7 +10572,7 @@ dependencies = [
  "rand 0.8.5",
  "rustls 0.23.27",
  "smallvec",
- "socket2",
+ "socket2 0.6.4",
  "solana-keypair",
  "solana-logger",
  "solana-measure",
@@ -10647,7 +10645,7 @@ dependencies = [
  "solana-nonce-account",
  "solana-packet",
  "solana-precompile-error",
- "solana-program-entrypoint 2.2.1",
+ "solana-program-entrypoint",
  "solana-program-pack",
  "solana-program-runtime",
  "solana-pubkey",
@@ -10824,7 +10822,7 @@ dependencies = [
  "solana-instruction",
  "solana-instructions-sysvar",
  "solana-last-restart-slot",
- "solana-program-entrypoint 2.3.0",
+ "solana-program-entrypoint",
  "solana-program-error",
  "solana-program-memory",
  "solana-pubkey",
@@ -11459,7 +11457,7 @@ dependencies = [
  "rustls 0.23.27",
  "signal-hook",
  "smallvec",
- "socket2",
+ "socket2 0.6.4",
  "solana-clap-utils",
  "solana-client",
  "solana-clock",
@@ -11934,7 +11932,7 @@ dependencies = [
  "solana-cpi",
  "solana-instruction",
  "solana-msg",
- "solana-program-entrypoint 2.2.1",
+ "solana-program-entrypoint",
  "solana-program-error",
  "solana-pubkey",
  "solana-rent",
@@ -11966,7 +11964,7 @@ dependencies = [
  "solana-account-info",
  "solana-cpi",
  "solana-instruction",
- "solana-program-entrypoint 2.2.1",
+ "solana-program-entrypoint",
  "solana-program-error",
  "solana-pubkey",
 ]
@@ -11980,7 +11978,7 @@ dependencies = [
  "solana-account-info",
  "solana-instruction",
  "solana-msg",
- "solana-program-entrypoint 2.2.1",
+ "solana-program-entrypoint",
  "solana-program-error",
  "solana-pubkey",
 ]
@@ -12070,7 +12068,7 @@ dependencies = [
  "solana-decode-error",
  "solana-instruction",
  "solana-msg",
- "solana-program-entrypoint 2.2.1",
+ "solana-program-entrypoint",
  "solana-program-error",
  "solana-program-memory",
  "solana-program-option",
@@ -12100,7 +12098,7 @@ dependencies = [
  "solana-instruction",
  "solana-msg",
  "solana-native-token",
- "solana-program-entrypoint 2.2.1",
+ "solana-program-entrypoint",
  "solana-program-error",
  "solana-program-memory",
  "solana-program-option",
@@ -12749,7 +12747,7 @@ dependencies = [
  "parking_lot 0.12.3",
  "pin-project-lite",
  "signal-hook-registry",
- "socket2",
+ "socket2 0.5.10",
  "tokio-macros",
  "windows-sys 0.52.0",
 ]
@@ -13621,6 +13619,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6dccfd733ce2b1753b03b6d3c65edf020262ea35e20ccdf3e288043e6dd620e3"
 
 [[package]]
+name = "windows-link"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
+
+[[package]]
 name = "windows-result"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13663,6 +13667,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e38bc4d79ed67fd075bcc251a1c39b32a1776bbe92e5bef1f0bf1f8c531853b"
 dependencies = [
  "windows-targets 0.52.6",
+]
+
+[[package]]
+name = "windows-sys"
+version = "0.61.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
+dependencies = [
+ "windows-link 0.2.1",
 ]
 
 [[package]]
